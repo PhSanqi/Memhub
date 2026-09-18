@@ -24,7 +24,11 @@ import {
   projectIdFromMemory
 } from "../namespace/namespace-scope.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
-import { L3WorldModelTraceFieldPipeline } from "./l3-world-model-pipeline.js";
+import {
+  L3WorldModelTraceFieldPipeline,
+  type ExternalL3WorldModelSubmission,
+  type ExternalL3WorldModelWorkItem
+} from "./l3-world-model-pipeline.js";
 import { NegativeExperiencePipeline } from "./negative-experience-pipeline.js";
 import { BigTurnSpanPipeline } from "./big-turn-span-pipeline.js";
 import { PolicyInductionEngine } from "./policy-induction.js";
@@ -180,6 +184,17 @@ export class EvolutionJobProcessor {
 
   updateL3WorldModel(job: EvolutionJobRecord): Promise<void> {
     return this.l3WorldModel.updateField(job);
+  }
+
+  prepareExternalL3WorldModel(job: EvolutionJobRecord): ExternalL3WorldModelWorkItem {
+    return this.l3WorldModel.prepareExternal(job);
+  }
+
+  applyExternalL3WorldModel(
+    job: EvolutionJobRecord,
+    submission: ExternalL3WorldModelSubmission
+  ): ReturnType<L3WorldModelTraceFieldPipeline["applyExternal"]> {
+    return this.l3WorldModel.applyExternal(job, submission);
   }
 
   crystallizeSkill(job: EvolutionJobRecord): Promise<void> {

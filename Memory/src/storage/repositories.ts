@@ -2892,6 +2892,107 @@ export class RuntimeRepository {
     return Boolean(row);
   }
 
+  leaseNextExternalL3WorldModelJob(
+    userId: string,
+    projectId: string | null,
+    leaseSeconds = 300
+  ): EvolutionJobRecord | undefined {
+    const at = nowIso();
+    const leaseUntil = new Date(Date.now() + Math.max(30, leaseSeconds) * 1000).toISOString();
+    const projectClause = projectId === null
+      ? "session_scope.project_id IS NULL"
+      : "session_scope.project_id = ?";
+    const projectArgs = projectId === null ? [] : [projectId];
+    const profileBarrier = projectId === null
+      ? ""
+      : `AND NOT EXISTS (
+           SELECT 1
+           FROM evolution_jobs AS profile_job
+           WHERE profile_job.job_type = 'project_environment_profile'
+             AND profile_job.user_id = evolution_jobs.user_id
+             AND profile_job.status IN ('queued', 'leased', 'failed')
+             AND CAST(json_extract(profile_job.payload_json, '$.projectId') AS TEXT) = session_scope.project_id
+         )`;
+
+    return this.db.transaction(() => {
+      const row = this.db.prepare(
+        `SELECT evolution_jobs.*
+         FROM evolution_jobs
+         JOIN sessions AS session_scope ON session_scope.id = evolution_jobs.session_id
+         WHERE evolution_jobs.job_type = 'l3_world_model_update'
+           AND evolution_jobs.user_id = ?
+           AND session_scope.user_id = ?
+           AND ${projectClause}
+           AND (
+             evolution_jobs.status IN ('queued', 'failed')
+             OR (
+               evolution_jobs.status = 'leased'
+               AND evolution_jobs.leased_until IS NOT NULL
+               AND evolution_jobs.leased_until <= ?
+             )
+           )
+           AND evolution_jobs.attempts < evolution_jobs.max_attempts
+           AND (
+             json_extract(evolution_jobs.payload_json, '$.runAfter') IS NULL
+             OR CAST(json_extract(evolution_jobs.payload_json, '$.runAfter') AS TEXT) <= ?
+           )
+           AND evolution_jobs.scope_key IS NOT NULL
+           AND evolution_jobs.scope_seq IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM evolution_jobs AS leased_l3_job
+             WHERE leased_l3_job.job_type = 'l3_world_model_update'
+               AND leased_l3_job.scope_key = evolution_jobs.scope_key
+               AND leased_l3_job.status = 'leased'
+               AND leased_l3_job.leased_until IS NOT NULL
+               AND leased_l3_job.leased_until > ?
+               AND leased_l3_job.id <> evolution_jobs.id
+           )
+           AND NOT EXISTS (
+             SELECT 1
+             FROM evolution_jobs AS earlier_l3_job
+             WHERE earlier_l3_job.job_type = 'l3_world_model_update'
+               AND earlier_l3_job.scope_key = evolution_jobs.scope_key
+               AND earlier_l3_job.scope_seq < evolution_jobs.scope_seq
+               AND earlier_l3_job.status IN ('queued', 'leased', 'failed')
+           )
+           ${profileBarrier}
+         ORDER BY evolution_jobs.scope_seq ASC, evolution_jobs.created_at ASC, evolution_jobs.id ASC
+         LIMIT 1`
+      ).get(
+        userId,
+        userId,
+        ...projectArgs,
+        at,
+        at,
+        at
+      ) as SqlJobRow | undefined;
+      if (!row) return undefined;
+
+      const changed = this.db.prepare(
+        `UPDATE evolution_jobs
+         SET status = 'leased',
+             attempts = attempts + 1,
+             leased_until = ?,
+             updated_at = ?
+         WHERE id = ?
+           AND attempts < max_attempts
+           AND (
+             status IN ('queued', 'failed')
+             OR (status = 'leased' AND leased_until IS NOT NULL AND leased_until <= ?)
+           )`
+      ).run(leaseUntil, at, row.id, at);
+      if (changed.changes !== 1) return undefined;
+      return jobFromSql({
+        ...row,
+        status: "leased",
+        attempts: row.attempts + 1,
+        leased_until: leaseUntil,
+        updated_at: at
+      });
+    })();
+  }
+
   leaseQueuedJobs(
     limit = 10,
     leaseSeconds = 60,

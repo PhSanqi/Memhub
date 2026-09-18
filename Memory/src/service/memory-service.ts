@@ -43,6 +43,7 @@ import {
   type ChangeLogRecord,
   type EpisodeRecord,
   type EvolutionJobRecord,
+  type L3WorldModelTargetField,
   type RawTurnRecord,
   type SessionRecord
 } from "../storage/repositories.js";
@@ -2121,6 +2122,143 @@ export class MemoryService {
     return this.workerRunner.runWorkerOnce(limit, request);
   }
 
+  leaseExternalL3WorldModel(input: RequestEnvelope & {
+    projectId?: string | null;
+    leaseSeconds?: number;
+  } = {}): {
+    job: (ReturnType<EvolutionJobProcessor["prepareExternalL3WorldModel"]> & {
+      leasedUntil: string | null;
+    }) | null;
+    serverTime: string;
+  } {
+    const namespace = normalizeNamespace(input.namespace);
+    const userId = namespace.userId;
+    const projectId = externalProjectScope(input.projectId, namespace.projectId);
+    const leaseSeconds = Math.min(900, Math.max(30, Math.floor(input.leaseSeconds ?? 300)));
+    const job = this.repos.runtime.leaseNextExternalL3WorldModelJob(
+      userId,
+      projectId,
+      leaseSeconds
+    );
+    if (!job) return { job: null, serverTime: nowIso() };
+    this.workerHandlers.appendJobChange(job, "leased");
+    let prepared: ReturnType<EvolutionJobProcessor["prepareExternalL3WorldModel"]>;
+    try {
+      prepared = this.evolutionJobs.prepareExternalL3WorldModel(job);
+    } catch (error) {
+      this.workerRunner.failLeasedWorkerJob(job, error);
+      throw error;
+    }
+    if (prepared.userId !== userId || prepared.projectId !== projectId) {
+      throw new MemoryServiceError("forbidden", "leased L3 job escaped requested scope");
+    }
+    return {
+      job: {
+        ...prepared,
+        leasedUntil: job.leasedUntil ?? null
+      },
+      serverTime: nowIso()
+    };
+  }
+
+  submitExternalL3WorldModel(
+    jobId: string,
+    input: RequestEnvelope & {
+      projectId?: string | null;
+      expectedFieldHash: string;
+      expectedProfileHash?: string;
+      candidate: unknown;
+    }
+  ): {
+    ok: true;
+    jobId: string;
+    projectId: string | null;
+    targetField: string;
+    noChange: boolean;
+    memoryId?: string;
+    serverTime: string;
+  } {
+    const namespace = normalizeNamespace(input.namespace);
+    const userId = namespace.userId;
+    const projectId = externalProjectScope(input.projectId, namespace.projectId);
+    const job = this.repos.runtime.getJob(jobId);
+    if (!job || job.jobType !== "l3_world_model_update") {
+      throw new MemoryServiceError("not_found", "external L3 job not found");
+    }
+    if (job.userId !== userId) {
+      throw new MemoryServiceError("forbidden", "external L3 job belongs to another user");
+    }
+    if (!job.sessionId) {
+      throw new MemoryServiceError("conflict", "external L3 job has no session scope");
+    }
+    const session = this.requireSession(job.sessionId);
+    if (session.userId !== userId || (session.projectId ?? null) !== projectId) {
+      throw new MemoryServiceError("forbidden", "external L3 submission scope mismatch");
+    }
+    if (job.status === "succeeded") {
+      const batchId = typeof job.payload.batchId === "string" ? job.payload.batchId : undefined;
+      const targetField = externalL3TargetField(job.payload.targetField);
+      if (!batchId || !targetField) {
+        throw new MemoryServiceError("conflict", "completed external L3 job has invalid payload");
+      }
+      const target = this.repos.l3WorldModels.getTarget(batchId, targetField);
+      const batch = this.repos.l3WorldModels.getBatch(batchId);
+      if (!target || target.status !== "applied" || !batch) {
+        throw new MemoryServiceError("conflict", "completed external L3 job has no applied target");
+      }
+      const memory = this.repos.l3WorldModels.getMemory(batch.userId, batch.projectId);
+      return {
+        ok: true,
+        jobId: job.id,
+        projectId,
+        targetField,
+        noChange: target.noChange,
+        ...(memory ? { memoryId: memory.id } : {}),
+        serverTime: nowIso()
+      };
+    }
+    if (job.status !== "leased" || !job.leasedUntil || Date.parse(job.leasedUntil) <= Date.now()) {
+      throw new MemoryServiceError("conflict", "external L3 job lease is not active");
+    }
+    const expectedFieldHash = input.expectedFieldHash.trim();
+    if (!expectedFieldHash) {
+      throw new MemoryServiceError("invalid_argument", "expectedFieldHash is required");
+    }
+    let prepared: ReturnType<EvolutionJobProcessor["prepareExternalL3WorldModel"]>;
+    let applied: ReturnType<EvolutionJobProcessor["applyExternalL3WorldModel"]>;
+    try {
+      prepared = this.evolutionJobs.prepareExternalL3WorldModel(job);
+      applied = this.evolutionJobs.applyExternalL3WorldModel(job, {
+        expectedFieldHash,
+        ...(input.expectedProfileHash?.trim()
+          ? { expectedProfileHash: input.expectedProfileHash.trim() }
+          : {}),
+        candidate: input.candidate
+      });
+    } catch (error) {
+      if (error instanceof MemoryServiceError) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (message === "stale_l3_base") {
+        this.workerRunner.failLeasedWorkerJob(job, error);
+        throw new MemoryServiceError("conflict", "external L3 base changed; lease a fresh job context");
+      }
+      if (error instanceof TypeError) {
+        throw new MemoryServiceError("invalid_argument", message);
+      }
+      throw error;
+    }
+    this.workerRunner.completeLeasedWorkerJob(job);
+    return {
+      ok: true,
+      jobId: job.id,
+      projectId,
+      targetField: prepared.targetField,
+      noChange: applied.noChange,
+      ...(applied.memory ? { memoryId: applied.memory.id } : {}),
+      serverTime: nowIso()
+    };
+  }
+
   private async queryVector(query: string): Promise<number[] | undefined> {
     return this.retrieval.queryVector(query);
   }
@@ -2602,6 +2740,36 @@ function memoryIdPrefix(layer: MemoryLayer, kind: MemoryKind): string {
   if (layer === "L2" || kind === "policy") return "policy";
   if (layer === "L3" || kind === "world_model") return "world";
   return "skill";
+}
+
+function externalProjectScope(
+  explicit: string | null | undefined,
+  namespaceProjectId: string | undefined
+): string | null {
+  const namespaceScope = namespaceProjectId?.trim() || null;
+  if (explicit === null) {
+    if (namespaceScope !== null) {
+      throw new MemoryServiceError("forbidden", "explicit global scope conflicts with namespace project");
+    }
+    return null;
+  }
+  if (explicit === undefined) return namespaceScope;
+  const normalized = explicit.trim();
+  if (!normalized) {
+    throw new MemoryServiceError("invalid_argument", "projectId must be non-empty or null");
+  }
+  if (namespaceScope !== null && namespaceScope !== normalized) {
+    throw new MemoryServiceError("forbidden", "projectId conflicts with namespace project");
+  }
+  return normalized;
+}
+
+function externalL3TargetField(value: unknown): L3WorldModelTargetField | undefined {
+  return value === "general_rules_and_safety_constraints" ||
+    value === "project_contract" ||
+    value === "domain_knowledge"
+    ? value
+    : undefined;
 }
 
 

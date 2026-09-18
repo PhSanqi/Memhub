@@ -149,26 +149,13 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime): McpServ
       throw new TypeError("kind must be skill, summary, or knowledge");
     }
     const scope = requiredString(args.scope, "scope");
-    if (scope !== "global" && scope !== "project") {
-      throw new TypeError("scope must be global or project");
-    }
     const title = optionalString(args.title);
     if (kind === "skill" && !title) throw new TypeError("title is required for skill distillation");
-    const conversationId = optionalString(args.conversation_id);
-    let projectId = optionalString(args.project) ?? null;
-    if (scope === "project" && projectId === null && conversationId) {
-      projectId = await runtime.router.currentProject(runtime.accountId, conversationId);
-    }
-    if (scope === "project" && projectId === null) {
-      throw new Error("project-scoped distillation requires an explicit or conversation-bound project");
-    }
-    if (scope === "global") projectId = null;
-    if (projectId) {
-      const projects = await runtime.router.listProjects(runtime.accountId);
-      if (projects.length > 0 && !projects.includes(projectId)) {
-        throw new Error(`unknown project for account: ${projectId}`);
-      }
-    }
+    const { projectId, conversationId } = await resolveToolScope(runtime, {
+      scope,
+      project: optionalString(args.project),
+      conversationId: optionalString(args.conversation_id)
+    });
     const sourceHarness = optionalString(args.source_harness) ?? "mcp-harness";
     const result = await runtime.memory.distill({
       accountId: runtime.accountId,
@@ -192,6 +179,79 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime): McpServ
       nativeEvolution: false,
       memory: result
     });
+  });
+
+  server.registerTool("memhub_evolution", {
+    description: "让当前已登录 Harness 参与原生 L3 World Model 演化。next 领取严格 scoped 的任务；submit 提交 JSON candidate，由 Memory Core 用原 batch ownership/hash 规则校验后写回。",
+    inputSchema: fromJsonSchema<Record<string, unknown>>({
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["next", "submit"] },
+        scope: { type: "string", enum: ["global", "project"] },
+        project: { type: "string", description: "project scope 的明确项目 slug" },
+        conversation_id: { type: "string", description: "可继承当前会话已绑定项目" },
+        lease_seconds: { type: "integer", minimum: 30, maximum: 900 },
+        job_id: { type: "string", description: "submit 时使用 next 返回的 jobId" },
+        expected_field_hash: { type: "string" },
+        expected_profile_hash: { type: "string" },
+        candidate: {
+          type: "object",
+          additionalProperties: true,
+          description: "严格匹配 next.expectedSchema 的 JSON 对象"
+        }
+      },
+      required: ["action", "scope"],
+      additionalProperties: false
+    } as JsonSchemaType)
+  }, async (args) => {
+    const action = requiredString(args.action, "action");
+    if (action !== "next" && action !== "submit") {
+      throw new TypeError("action must be next or submit");
+    }
+    const scope = requiredString(args.scope, "scope");
+    const { projectId } = await resolveToolScope(runtime, {
+      scope,
+      project: optionalString(args.project),
+      conversationId: optionalString(args.conversation_id)
+    });
+    const namespace = {
+      source: "memhub-evolution",
+      profileId: "default",
+      userId: runtime.userId,
+      tenantId: runtime.accountId,
+      ...(projectId ? { projectId } : {})
+    };
+
+    if (action === "next") {
+      const leaseSeconds = optionalInteger(args.lease_seconds);
+      const result = await runtime.memoryClient.leaseExternalL3({
+        adapterId: "memhub-harness-evolution",
+        namespace,
+        projectId,
+        ...(leaseSeconds === undefined ? {} : { leaseSeconds })
+      });
+      return jsonResult({
+        scope,
+        project: projectId,
+        result,
+        instructions: "If result.job is non-null, follow job.systemPrompt using job.dynamicInput, return exactly job.expectedSchema, then call memhub_evolution action=submit with the same scope/project, job hashes, and candidate object."
+      });
+    }
+
+    const jobId = requiredString(args.job_id, "job_id");
+    const expectedFieldHash = requiredString(args.expected_field_hash, "expected_field_hash");
+    const candidate = objectValue(args.candidate, "candidate");
+    const result = await runtime.memoryClient.submitExternalL3(jobId, {
+      adapterId: "memhub-harness-evolution",
+      namespace,
+      projectId,
+      expectedFieldHash,
+      ...(optionalString(args.expected_profile_hash)
+        ? { expectedProfileHash: optionalString(args.expected_profile_hash) }
+        : {}),
+      candidate
+    });
+    return jsonResult({ scope, project: projectId, result });
   });
 
   server.registerTool("memmy_project", {
@@ -687,6 +747,40 @@ function stringArray(value: unknown): string[] | undefined {
 
 function optionalInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : undefined;
+}
+
+function objectValue(value: unknown, field: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${field} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+async function resolveToolScope(
+  runtime: MemhubRuntime,
+  input: { scope: string; project?: string; conversationId?: string }
+): Promise<{ projectId: string | null; conversationId?: string }> {
+  if (input.scope !== "global" && input.scope !== "project") {
+    throw new TypeError("scope must be global or project");
+  }
+  let projectId = input.project ?? null;
+  if (input.scope === "project" && projectId === null && input.conversationId) {
+    projectId = await runtime.router.currentProject(runtime.accountId, input.conversationId);
+  }
+  if (input.scope === "project" && projectId === null) {
+    throw new Error("project scope requires an explicit or conversation-bound project");
+  }
+  if (input.scope === "global") projectId = null;
+  if (projectId) {
+    const projects = await runtime.router.listProjects(runtime.accountId);
+    if (projects.length > 0 && !projects.includes(projectId)) {
+      throw new Error(`unknown project for account: ${projectId}`);
+    }
+  }
+  return {
+    projectId,
+    ...(input.conversationId ? { conversationId: input.conversationId } : {})
+  };
 }
 
 const invokedArg = process.argv[1];

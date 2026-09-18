@@ -27,6 +27,32 @@ interface TraceEvidence {
   eligibleL1MemoryIds: string[];
 }
 
+export interface ExternalL3WorldModelWorkItem {
+  jobId: string;
+  batchId: string;
+  targetField: L3WorldModelTargetField;
+  userId: string;
+  projectId: string | null;
+  sessionId: string;
+  scopeKey: string;
+  scopeSeq: number;
+  currentField: string;
+  projectEnvironmentProfile: string;
+  rawTurns: JsonValue[];
+  eligibleL1MemoryIds: string[];
+  expectedFieldHash: string;
+  expectedProfileHash?: string;
+  systemPrompt: string;
+  dynamicInput: JsonValue;
+  expectedSchema: JsonValue;
+}
+
+export interface ExternalL3WorldModelSubmission {
+  expectedFieldHash: string;
+  expectedProfileHash?: string;
+  candidate: unknown;
+}
+
 export class L3WorldModelTerminalEvidenceError extends Error {
   readonly terminal = true;
 }
@@ -39,6 +65,44 @@ export class L3WorldModelTraceFieldPipeline {
   constructor(private readonly deps: { repos: Repositories; skillLlm: LlmClient }) {}
 
   async updateField(job: EvolutionJobRecord): Promise<void> {
+    const prepared = this.prepareExternal(job);
+    if (prepared.rawTurns.length === 0) {
+      logEvolutionDecision(job, "l3_world_model_update", "no_usable_raw_turns", {
+        targetField: prepared.targetField,
+        batchId: prepared.batchId
+      });
+      this.deps.repos.l3WorldModels.applyTraceTarget({
+        batchId: prepared.batchId,
+        targetField: prepared.targetField,
+        operation: "noop",
+        value: "",
+        expectedFieldHash: prepared.expectedFieldHash,
+        expectedProfileHash: prepared.expectedProfileHash,
+        eligibleL1MemoryIds: prepared.eligibleL1MemoryIds
+      });
+      return;
+    }
+
+    const output = await completeStrictJson({
+      llm: this.deps.skillLlm,
+      operation: `l3_world_model.${prepared.targetField}`,
+      systemPrompt: prepared.systemPrompt,
+      dynamicInput: prepared.dynamicInput,
+      expectedSchema: prepared.expectedSchema,
+      validate: (value) => validateFieldOutput(value, prepared.targetField, prepared.currentField)
+    });
+    this.deps.repos.l3WorldModels.applyTraceTarget({
+      batchId: prepared.batchId,
+      targetField: prepared.targetField,
+      operation: output.op,
+      value: output.value,
+      expectedFieldHash: prepared.expectedFieldHash,
+      expectedProfileHash: prepared.expectedProfileHash,
+      eligibleL1MemoryIds: prepared.eligibleL1MemoryIds
+    });
+  }
+
+  prepareExternal(job: EvolutionJobRecord): ExternalL3WorldModelWorkItem {
     const payload = strictJobPayload(job);
     const batch = this.deps.repos.l3WorldModels.getBatch(payload.batchId);
     if (!batch) throw new L3WorldModelTerminalEvidenceError(`missing batch: ${payload.batchId}`);
@@ -48,7 +112,11 @@ export class L3WorldModelTraceFieldPipeline {
         `missing target: ${payload.batchId}:${payload.targetField}`
       );
     }
-    if (target.status === "applied") return;
+    if (target.status === "applied") {
+      throw new L3WorldModelTerminalEvidenceError(
+        `target is already applied: ${payload.batchId}:${payload.targetField}`
+      );
+    }
     if (target.status === "dead_letter") {
       throw new L3WorldModelTerminalEvidenceError(
         `target is already dead letter: ${payload.batchId}:${payload.targetField}`
@@ -76,46 +144,64 @@ export class L3WorldModelTraceFieldPipeline {
       ? undefined
       : sha256Hex(profile);
     const evidence = this.loadEvidence(payload.batchId);
-    if (evidence.rawTurns.length === 0) {
-      logEvolutionDecision(job, "l3_world_model_update", "no_usable_raw_turns", {
-        targetField: payload.targetField,
-        batchId: payload.batchId
-      });
-      this.deps.repos.l3WorldModels.applyTraceTarget({
-        batchId: payload.batchId,
-        targetField: payload.targetField,
-        operation: "noop",
-        value: "",
-        expectedFieldHash,
-        expectedProfileHash,
-        eligibleL1MemoryIds: evidence.eligibleL1MemoryIds
-      });
-      return;
-    }
-
-    const prompt = promptForField(payload.targetField);
+    const systemPrompt = promptForField(payload.targetField);
     const dynamicInput = dynamicInputForField(
       payload.targetField,
       currentField,
       profile,
       evidence.rawTurns
     );
-    const output = await completeStrictJson({
-      llm: this.deps.skillLlm,
-      operation: `l3_world_model.${payload.targetField}`,
-      systemPrompt: prompt,
-      dynamicInput,
-      expectedSchema: expectedSchemaForField(payload.targetField),
-      validate: (value) => validateFieldOutput(value, payload.targetField, currentField)
-    });
-    this.deps.repos.l3WorldModels.applyTraceTarget({
+    return {
+      jobId: job.id,
       batchId: payload.batchId,
       targetField: payload.targetField,
+      userId: batch.userId,
+      projectId: batch.projectId ?? null,
+      sessionId: batch.sessionId,
+      scopeKey: target.fieldScopeKey,
+      scopeSeq: target.scopeSeq,
+      currentField,
+      projectEnvironmentProfile: profile,
+      rawTurns: evidence.rawTurns,
+      eligibleL1MemoryIds: evidence.eligibleL1MemoryIds,
+      expectedFieldHash,
+      ...(expectedProfileHash ? { expectedProfileHash } : {}),
+      systemPrompt,
+      dynamicInput,
+      expectedSchema: expectedSchemaForField(payload.targetField)
+    };
+  }
+
+  applyExternal(
+    job: EvolutionJobRecord,
+    submission: ExternalL3WorldModelSubmission
+  ): ReturnType<Repositories["l3WorldModels"]["applyTraceTarget"]> {
+    const prepared = this.prepareExternal(job);
+    if (prepared.expectedFieldHash !== submission.expectedFieldHash) {
+      throw new Error("stale_l3_base");
+    }
+    if (
+      prepared.expectedProfileHash !== undefined &&
+      prepared.expectedProfileHash !== submission.expectedProfileHash
+    ) {
+      throw new Error("stale_l3_base");
+    }
+    if (prepared.expectedProfileHash === undefined && submission.expectedProfileHash !== undefined) {
+      throw new TypeError("general L3 submission must not include expectedProfileHash");
+    }
+    const output = validateFieldOutput(
+      submission.candidate,
+      prepared.targetField,
+      prepared.currentField
+    );
+    return this.deps.repos.l3WorldModels.applyTraceTarget({
+      batchId: prepared.batchId,
+      targetField: prepared.targetField,
       operation: output.op,
       value: output.value,
-      expectedFieldHash,
-      expectedProfileHash,
-      eligibleL1MemoryIds: evidence.eligibleL1MemoryIds
+      expectedFieldHash: submission.expectedFieldHash,
+      expectedProfileHash: submission.expectedProfileHash,
+      eligibleL1MemoryIds: prepared.eligibleL1MemoryIds
     });
   }
 

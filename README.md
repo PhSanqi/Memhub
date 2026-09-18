@@ -82,6 +82,7 @@ The current high-level MCP surface is intentionally small:
 - `memmy_context` — composed account/project memory plus authoritative project architecture;
 - `memmy_remember` — explicit durable memory;
 - `memhub_distill` — submit a Harness-produced Skill, scoped summary, or curated knowledge artifact without bypassing native L2/L3 evolution;
+- `memhub_evolution` — lease and complete native L3 World Model jobs with an already-authenticated Harness while Memory Core retains scope/evidence/hash validation;
 - `memmy_project` — project listing/binding.
 
 The tool names retain `memmy_` temporarily for compatibility. The product and distribution are Memhub.

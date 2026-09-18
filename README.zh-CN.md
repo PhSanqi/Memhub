@@ -104,6 +104,7 @@ B 项目
 - `memmy_context`：组合个人记忆、项目记忆和权威项目架构；
 - `memmy_remember`：显式长期记忆；
 - `memhub_distill`：提交由当前 Harness 真正提炼出的 Skill、项目/个人总结或整理知识，但不绕过原生 L2/L3 演化；
+- `memhub_evolution`：让已登录的 Harness 领取并完成原生 L3 World Model 任务，最终 scope/evidence/hash 校验仍由 Memory Core 执行；
 - `memmy_project`：项目查询和绑定。
 
 工具名暂时保留 `memmy_` 是为了兼容已有客户端，产品和发行名称已经是 Memhub。

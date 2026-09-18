@@ -15,7 +15,9 @@
     "build:memhub": "npm run build -w memhub",
     "test:memhub": "npm run test -w memhub",
     "test:scope": "vitest run Memory/tests/service/evolution/project-skill-scope.test.ts Memory/tests/project-retrieval-scope.test.ts Memory/tests/repository/project-scope-sql.test.ts Memory/tests/privacy-network-policy.test.ts",
-    "typecheck:memhub": "npm run typecheck -w memhub"
+    "typecheck:memhub": "npm run typecheck -w memhub",
+    "test:evolution": "vitest run Memory/tests/service/evolution/external-l3-harness.test.ts Memory/tests/contract/external-l3-rest.test.ts Memory/tests/service/evolution/l3-world-model.test.ts Memory/tests/service/session/session-lifecycle.test.ts",
+    "test": "npm run test:memhub && npm run test:scope && npm run test:evolution"
   },
   "engines": {
     "node": ">=20"

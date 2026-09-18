@@ -34,6 +34,46 @@ const memory = createServer(async (request, response) => {
     response.end(JSON.stringify({ id: "new-memory", status: "activated" }));
     return;
   }
+  if (request.url === "/api/v1/evolution/l3/lease") {
+    const project = body.projectId ?? body.namespace?.projectId ?? null;
+    response.end(JSON.stringify({
+      job: {
+        jobId: `external-l3-${project ?? "global"}`,
+        batchId: `batch-${project ?? "global"}`,
+        targetField: project ? "project_contract" : "general_rules_and_safety_constraints",
+        userId: body.namespace?.userId,
+        projectId: project,
+        sessionId: `session-${project ?? "global"}`,
+        scopeKey: `scope-${project ?? "global"}`,
+        scopeSeq: 1,
+        currentField: "",
+        projectEnvironmentProfile: project ? "runtime: test" : "",
+        rawTurns: [{ user_text: "durable evidence", assistant_text: "recorded" }],
+        eligibleL1MemoryIds: ["l1-test"],
+        expectedFieldHash: "field-hash",
+        ...(project ? { expectedProfileHash: "profile-hash" } : {}),
+        systemPrompt: "Return one valid JSON object.",
+        dynamicInput: { current_field: "", raw_turns: [] },
+        expectedSchema: project
+          ? { reason: "string", op: "noop | create | update", project_contract: "string" }
+          : { op: "noop | create | update", general_rules_and_safety_constraints: "string" },
+        leasedUntil: "2099-01-01T00:00:00.000Z"
+      },
+      serverTime: "2026-09-18T00:00:00.000Z"
+    }));
+    return;
+  }
+  if (/^\/api\/v1\/evolution\/l3\/[^/]+\/submit$/.test(request.url ?? "")) {
+    response.end(JSON.stringify({
+      ok: true,
+      jobId: request.url.split("/").at(-2),
+      projectId: body.projectId ?? body.namespace?.projectId ?? null,
+      targetField: body.projectId ? "project_contract" : "general_rules_and_safety_constraints",
+      noChange: false,
+      memoryId: "l3-memory-test"
+    }));
+    return;
+  }
   if (request.url === "/api/v1/sessions/open") {
     if (!acceptIdempotent(body, "session.open", response)) return;
     response.end(JSON.stringify({
@@ -311,7 +351,7 @@ async function testHttp(memoryPort) {
       try {
         await bridgeClient.connect(bridgeTransport);
         const bridgeTools = await bridgeClient.listTools();
-        assert.deepEqual(bridgeTools.tools.map((tool) => tool.name).sort(), ["memhub_distill", "memmy_context", "memmy_project", "memmy_remember"]);
+        assert.deepEqual(bridgeTools.tools.map((tool) => tool.name).sort(), ["memhub_distill", "memhub_evolution", "memmy_context", "memmy_project", "memmy_remember"]);
         const bridgeContext = await bridgeClient.callTool({
           name: "memmy_context",
           arguments: { query: "continue through local bridge", project: "aide", conversation_id: "bridge-proxy-chat" }
@@ -353,7 +393,7 @@ function acceptIdempotent(body, operation, response) {
 
 async function exerciseClient(client, conversationId) {
   const listed = await client.listTools();
-  assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["memhub_distill", "memmy_context", "memmy_project", "memmy_remember"]);
+  assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["memhub_distill", "memhub_evolution", "memmy_context", "memmy_project", "memmy_remember"]);
   await client.callTool({ name: "memmy_project", arguments: { action: "bind", conversation_id: conversationId, project: "aide" } });
   const context = await client.callTool({ name: "memmy_context", arguments: { query: "continue", conversation_id: conversationId } });
   const capsule = JSON.parse(context.content[0].text);
@@ -409,6 +449,55 @@ async function exerciseClient(client, conversationId) {
   assert.equal(summaryWrites.at(-1).body.namespace.projectId, undefined);
   assert.ok(summaryWrites.at(-1).body.tags.includes("artifact:summary"));
   assert.equal(summaryWrites.at(-1).body.requestId, summaryWrites.at(-2).body.requestId);
+
+  const nextEvolution = await client.callTool({
+    name: "memhub_evolution",
+    arguments: {
+      action: "next",
+      scope: "project",
+      conversation_id: conversationId,
+      lease_seconds: 120
+    }
+  });
+  assert.equal(nextEvolution.isError, undefined);
+  const evolutionEnvelope = JSON.parse(nextEvolution.content[0].text);
+  const evolutionJob = evolutionEnvelope.result.job;
+  assert.equal(evolutionEnvelope.project, "aide");
+  assert.equal(evolutionJob.projectId, "aide");
+  assert.equal(evolutionJob.targetField, "project_contract");
+  assert.equal(evolutionJob.expectedFieldHash, "field-hash");
+  assert.equal(evolutionJob.expectedProfileHash, "profile-hash");
+  const leaseRequest = [...requests].reverse().find((entry) => entry.url === "/api/v1/evolution/l3/lease");
+  assert.equal(leaseRequest.body.projectId, "aide");
+  assert.equal(leaseRequest.body.namespace.projectId, "aide");
+  assert.equal(leaseRequest.body.namespace.tenantId, "acct-test");
+
+  const submitEvolution = await client.callTool({
+    name: "memhub_evolution",
+    arguments: {
+      action: "submit",
+      scope: "project",
+      conversation_id: conversationId,
+      job_id: evolutionJob.jobId,
+      expected_field_hash: evolutionJob.expectedFieldHash,
+      expected_profile_hash: evolutionJob.expectedProfileHash,
+      candidate: {
+        reason: "Durable project delivery rule.",
+        op: "create",
+        project_contract: "- Run project tests before commit."
+      }
+    }
+  });
+  assert.equal(submitEvolution.isError, undefined);
+  const submitEnvelope = JSON.parse(submitEvolution.content[0].text);
+  assert.equal(submitEnvelope.result.ok, true);
+  assert.equal(submitEnvelope.result.projectId, "aide");
+  const submitRequest = [...requests].reverse().find((entry) => /^\/api\/v1\/evolution\/l3\/[^/]+\/submit$/.test(entry.url ?? ""));
+  assert.equal(submitRequest.body.projectId, "aide");
+  assert.equal(submitRequest.body.namespace.projectId, "aide");
+  assert.equal(submitRequest.body.expectedFieldHash, "field-hash");
+  assert.equal(submitRequest.body.expectedProfileHash, "profile-hash");
+  assert.equal(submitRequest.body.candidate.project_contract, "- Run project tests before commit.");
 }
 
 function hit(id, snippet) {

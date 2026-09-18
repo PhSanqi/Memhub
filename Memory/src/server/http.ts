@@ -71,6 +71,8 @@ export const API_ROUTES = [
   "POST /api/v1/memory/:id/processing/retry",
   "GET /api/v1/memory/:id",
   "DELETE /api/v1/memory/:id",
+  "POST /api/v1/evolution/l3/lease",
+  "POST /api/v1/evolution/l3/:jobId/submit",
   "POST /api/v1/worker/run",
   "POST /api/v1/worker/import-summaries/enqueue",
   "GET /api/v1/memory/logs",
@@ -767,6 +769,71 @@ async function routeRequest(
       autoWorker.schedule();
     }
     return result;
+  }
+
+  if (method === "POST" && path === "/api/v1/evolution/l3/lease") {
+    requireMemoryWrite(principal);
+    const request = envelopeWithPrincipal(
+      asObject(body, "evolution.l3.lease"),
+      principal
+    ) as RequestEnvelope & { projectId?: unknown; leaseSeconds?: unknown };
+    return service.leaseExternalL3WorldModel({
+      ...request,
+      projectId: parseOptionalNullableString(request.projectId, "evolution.l3.lease.projectId"),
+      leaseSeconds: parseNumberValue(request.leaseSeconds)
+    });
+  }
+
+  const externalL3SubmitMatch = match(path, /^\/api\/v1\/evolution\/l3\/([^/]+)\/submit$/);
+  if (method === "POST" && externalL3SubmitMatch) {
+    requireMemoryWrite(principal);
+    const request = envelopeWithPrincipal(
+      asObject(body, "evolution.l3.submit"),
+      principal
+    ) as RequestEnvelope & {
+      projectId?: unknown;
+      expectedFieldHash?: unknown;
+      expectedProfileHash?: unknown;
+      candidate?: unknown;
+    };
+    if (typeof request.expectedFieldHash !== "string" || !request.expectedFieldHash.trim()) {
+      throw new MemoryServiceError(
+        "invalid_argument",
+        "evolution.l3.submit.expectedFieldHash must be a non-empty string"
+      );
+    }
+    if (
+      request.expectedProfileHash !== undefined &&
+      (typeof request.expectedProfileHash !== "string" || !request.expectedProfileHash.trim())
+    ) {
+      throw new MemoryServiceError(
+        "invalid_argument",
+        "evolution.l3.submit.expectedProfileHash must be a non-empty string when provided"
+      );
+    }
+    if (!isRecord(request.candidate)) {
+      throw new MemoryServiceError(
+        "invalid_argument",
+        "evolution.l3.submit.candidate must be a JSON object"
+      );
+    }
+    const expectedProfileHash = typeof request.expectedProfileHash === "string"
+      ? request.expectedProfileHash.trim()
+      : undefined;
+    return service.submitExternalL3WorldModel(
+      decodeMatchSegment(externalL3SubmitMatch, 1),
+      {
+        requestId: request.requestId,
+        adapterId: request.adapterId,
+        source: request.source,
+        namespace: request.namespace,
+        timeZone: request.timeZone,
+        projectId: parseOptionalNullableString(request.projectId, "evolution.l3.submit.projectId"),
+        expectedFieldHash: request.expectedFieldHash.trim(),
+        ...(expectedProfileHash ? { expectedProfileHash } : {}),
+        candidate: request.candidate
+      }
+    );
   }
 
   if (method === "POST" && path === "/api/v1/worker/run") {
@@ -1480,6 +1547,18 @@ function parseOptionalStringArray(value: unknown, field: string): string[] | und
     throw new MemoryServiceError("invalid_argument", `${field} must be an array of non-empty strings`);
   }
   return [...new Set(value)];
+}
+
+function parseOptionalNullableString(
+  value: unknown,
+  field: string
+): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new MemoryServiceError("invalid_argument", `${field} must be a non-empty string or null`);
+  }
+  return value.trim();
 }
 
 function parseApiLogTools(value: string | null): Array<"memory_add" | "memory_search" | "skill_generate" | "skill_evolve"> | undefined {

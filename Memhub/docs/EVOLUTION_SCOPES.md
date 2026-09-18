@@ -85,18 +85,58 @@ Global/project scope must be explicit. A project Skill is stored with that `proj
 
 Curated summaries and knowledge deliberately remain L1. They are not mislabeled as L2 policy or L3 World Model output.
 
-The next Harness-worker phase is the L3 lease/candidate/commit protocol below, which will reuse the existing L3 batch target hashes and evidence ownership checks instead of allowing arbitrary L3 writes.
+### Native L3 Harness worker available now
+
+`memhub_evolution` exposes the native L3 World Model pipeline to an already-authenticated Harness without giving the Harness direct database/write access.
+
+The tool has two actions:
+
+- `next` — lease one pending L3 field job in exactly one account/project scope;
+- `submit` — submit the schema-constrained candidate for that leased job.
+
+The leased work item contains the original L3 system prompt, immutable evidence-derived `dynamicInput`, expected output schema, current field, and optimistic-concurrency hashes. The Memory Core, not the Harness, performs the final validation and commit.
+
+The commit path preserves the native L3 safety properties:
+
+- account/user ownership is checked server-side;
+- global and project jobs are leased separately;
+- project jobs wait for the project-environment profile barrier;
+- raw evidence lineage and immutable batch ownership are revalidated;
+- project contract/domain knowledge require the project-profile base hash;
+- stale field/profile hashes are rejected with a conflict and the job can be re-leased with fresh context;
+- invalid schema candidates do not consume the lease, so the same Harness can repair and resubmit;
+- successful `submit` retries are idempotent;
+- the Harness cannot target `project_environment_profile` or arbitrary L3 fields;
+- Normify architecture is outside this write path and remains authoritative/read-only.
+
+Typical flow:
+
+```text
+Harness
+  -> memhub_evolution(action=next, scope=project, project=A)
+Memhub / Memory Core
+  -> returns job + systemPrompt + dynamicInput + expectedSchema + hashes
+Harness
+  -> produces one JSON candidate from that evidence only
+  -> memhub_evolution(action=submit, ...candidate, ...hashes)
+Memory Core
+  -> revalidates scope/evidence/base hashes
+  -> commits native L3 field or rejects the candidate
+```
 
 ### Deferred executor
 
 When no model executor is available, L1 capture and retrieval remain functional. Model-dependent jobs stay pending and can be processed later.
 
-## Planned MCP worker surface
+## Worker surface
 
-The intended L3 worker-oriented surface is separate from normal recall/distillation tools:
+Implemented:
 
-- `memhub_evolution_next` — lease one scoped pending job;
-- `memhub_evolution_submit` — submit a structured candidate;
-- `memhub_evolution_status` — inspect account/project evolution state.
+- `memhub_evolution action=next`
+- `memhub_evolution action=submit`
 
-These tools should require an explicit capability scope and must bind account/project identity server-side.
+Still planned:
+
+- scoped evolution status/queue inspection;
+- an explicit worker capability/ACL separate from ordinary recall permissions when multi-user sharing is enabled;
+- Harness-assisted native L2 policy/Skill jobs, reusing the same lease/candidate/commit pattern rather than allowing arbitrary L2 writes.

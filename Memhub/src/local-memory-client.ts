@@ -67,6 +67,14 @@ export class LocalMemoryRestClient {
     return this.request(`/api/v1/turns/${encodeURIComponent(turnId)}/complete`, request);
   }
 
+  leaseExternalL3(request: Record<string, unknown>): Promise<unknown> {
+    return this.request("/api/v1/evolution/l3/lease", request);
+  }
+
+  submitExternalL3(jobId: string, request: Record<string, unknown>): Promise<unknown> {
+    return this.request(`/api/v1/evolution/l3/${encodeURIComponent(jobId)}/submit`, request);
+  }
+
   private async request(path: string, body: Record<string, unknown>): Promise<unknown> {
     const response = await this.fetchImpl(`${this.endpoint}${path}`, {
       method: "POST",

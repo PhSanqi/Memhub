@@ -43,6 +43,10 @@ Stores an explicit durable fact/decision. `scope=project` requires either an exp
 
 Stores a reusable artifact produced by an already-authenticated AI Harness. `kind=skill` is written as a real Memory `Skill`; `summary` and `knowledge` are curated L1 memories so they remain useful without pretending to be native L2 policy or L3 World Model output. Scope must be explicitly `global` or `project`, and project artifacts remain project-owned.
 
+### `memhub_evolution`
+
+Runs the native L3 World Model with a connected Harness as the model executor. `action=next` leases exactly one account/project-scoped L3 field job and returns the original prompt, evidence input, expected JSON schema and optimistic-concurrency hashes. `action=submit` sends the candidate back to Memory Core, which revalidates ownership, evidence lineage, project-environment dependencies and base hashes before committing. It cannot overwrite Normify architecture.
+
 ### `memmy_project`
 
 Lists projects, inspects/binds/unbinds the current conversation project, and reads the authoritative Normify architecture brief.
