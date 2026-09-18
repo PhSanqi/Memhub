@@ -1,0 +1,110 @@
+import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { readdir } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { promisify } from "node:util";
+import type { ContextItem } from "./context-capsule.js";
+
+const execFileAsync = promisify(execFile);
+
+export interface ProjectArchitectureSource {
+  listProjects(accountId: string): Promise<string[]>;
+  getProjectArchitecture(input: {
+    accountId: string;
+    projectId: string;
+    query: string;
+  }): Promise<ContextItem[]>;
+}
+
+export class NullProjectArchitectureSource implements ProjectArchitectureSource {
+  async listProjects(): Promise<string[]> { return []; }
+  async getProjectArchitecture(): Promise<ContextItem[]> { return []; }
+}
+
+export interface NormifyCliArchitectureSourceOptions {
+  rootDir: string;
+  command?: string;
+  maxChars?: number;
+}
+
+/** Read-only adapter. Normify remains the source of truth; Memmy stores no architecture copy here. */
+export class NormifyCliArchitectureSource implements ProjectArchitectureSource {
+  private readonly rootDir: string;
+  private readonly command: string;
+  private readonly maxChars: number;
+
+  constructor(options: NormifyCliArchitectureSourceOptions) {
+    this.rootDir = resolve(options.rootDir);
+    this.command = options.command?.trim() || "normify";
+    this.maxChars = Math.max(1_000, options.maxChars ?? 16_000);
+  }
+
+  async listProjects(accountId: string): Promise<string[]> {
+    const normalizedAccountId = requireNonEmpty(accountId, "accountId");
+    const accountRoot = normalizedAccountId === "local"
+      ? this.rootDir
+      : join(
+          this.rootDir,
+          ".normify",
+          "accounts",
+          createHash("sha256").update(normalizedAccountId, "utf8").digest("hex")
+        );
+    try {
+      const entries = await readdir(accountRoot, { withFileTypes: true });
+      return entries
+        .filter((entry) => entry.isDirectory() && entry.name.startsWith("normify-"))
+        .map((entry) => entry.name.slice("normify-".length))
+        .filter(Boolean)
+        .sort((left, right) => left.localeCompare(right));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+      throw error;
+    }
+  }
+
+  async getProjectArchitecture(input: {
+    accountId: string;
+    projectId: string;
+    query: string;
+  }): Promise<ContextItem[]> {
+    const accountId = requireNonEmpty(input.accountId, "accountId");
+    const projectId = requireNonEmpty(input.projectId, "projectId");
+    const query = requireNonEmpty(input.query, "query");
+    const args = [
+      "--root", this.rootDir,
+      ...(accountId === "local" ? [] : ["--account", accountId]),
+      "call", "normify_brief",
+      JSON.stringify({ project: projectId, task: query, depth: 2 })
+    ];
+    const env = { ...process.env };
+    delete env.NORMIFY_PASSWORD;
+    const { stdout } = await execFileAsync(this.command, args, {
+      encoding: "utf8",
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: 30_000,
+      env
+    });
+    const trimmed = stdout.trim();
+    if (!trimmed) return [];
+    const content = trimmed.length <= this.maxChars ? trimmed : `${trimmed.slice(0, this.maxChars)}\n…[truncated]`;
+    return [{
+      id: `normify:${projectId}:brief`,
+      content,
+      authority: "authoritative",
+      scope: "project",
+      source: "normify",
+      projectId,
+      provenance: {
+        adapter: "normify-cli",
+        tool: "normify_brief",
+        rootDir: this.rootDir
+      }
+    }];
+  }
+}
+
+function requireNonEmpty(value: string, field: string): string {
+  const normalized = value.trim();
+  if (!normalized) throw new TypeError(`${field} must be non-empty`);
+  return normalized;
+}

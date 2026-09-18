@@ -1,0 +1,27 @@
+{
+  "name": "memhub-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Private project-aware memory and context hub for AI harnesses.",
+  "workspaces": [
+    "AgentSourceCore",
+    "Memory",
+    "Memhub"
+  ],
+  "scripts": {
+    "build": "npm run build -w @memmy/agent-source-core && npm run build:headless -w @memmy/memory && npm run build -w memhub",
+    "build:memory": "npm run build -w @memmy/memory",
+    "build:memhub": "npm run build -w memhub",
+    "test:memhub": "npm run test -w memhub",
+    "test:scope": "vitest run Memory/tests/service/evolution/project-skill-scope.test.ts Memory/tests/project-retrieval-scope.test.ts Memory/tests/repository/project-scope-sql.test.ts Memory/tests/privacy-network-policy.test.ts",
+    "typecheck:memhub": "npm run typecheck -w memhub"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.7"
+  }
+}

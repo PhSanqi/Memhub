@@ -1,0 +1,20 @@
+[Unit]
+Description=Memhub MCP Gateway
+After=network-online.target memmy-memory.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@MEMHUB_DIR@
+EnvironmentFile=-%h/.memmy/memhub/memhub.env
+ExecStart=@NODE@ @MEMHUB_DIR@/dist/mcp.js --http 3001 --http-path /memhub/mcp --capture-path /memhub/capture --state-root %h/.memmy/memhub --memory-url http://127.0.0.1:18960 --normify-root @NORMIFY_ROOT@ --normify-command @NORMIFY_COMMAND@
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.memmy/memhub
+
+[Install]
+WantedBy=default.target

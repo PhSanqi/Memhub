@@ -1,0 +1,28 @@
+{
+  "name": "memhub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "memhub": "./dist/mcp.js",
+    "memhub-mcp": "./dist/mcp.js",
+    "memhub-bridge": "./dist/bridge.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node tests/core-e2e.mjs && node tests/mcp-e2e.mjs && node tests/openai-adapter-e2e.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/node": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "jose": "^6.2.12"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@types/node": "^25.9.1",
+    "typescript": "^6.0.3"
+  }
+}

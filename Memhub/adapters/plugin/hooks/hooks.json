@@ -1,0 +1,29 @@
+{
+  "description": "Automatically capture Codex turns into the local Memhub Bridge.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/hooks/memhub-capture.mjs",
+            "timeout": 5,
+            "statusMessage": "Saving turn to Memhub"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/hooks/memhub-capture.mjs",
+            "timeout": 5,
+            "statusMessage": "Saving turn to Memhub"
+          }
+        ]
+      }
+    ]
+  }
+}
