@@ -1,6 +1,8 @@
 # Memhub portable plugin
 
-This is the canonical Memhub Agent Plugins package. Portable clients use its MCP + skill components; Codex/ChatGPT Work additionally use the bundled OpenAI lifecycle-hook extension.
+This is the canonical Memhub Agent Plugins package. Portable clients use its MCP
+components. OpenAI/Codex harnesses that support these lifecycle hook events can
+additionally use the bundled capture extension.
 
 It uses the portable `mcp.json` to point the model at the local Memhub Bridge and OpenAI lifecycle hooks to capture turns automatically.
 

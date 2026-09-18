@@ -18,16 +18,19 @@ import {
   addAccount,
   bindCloudflareEmail,
   deleteAccount,
+  ensureLocalAdminToken,
   importNormifyAccounts,
   listAccounts,
   resolveCloudflareAccount,
-  setAccountRole
+  setAccountRole,
+  verifyLocalAdminToken
 } from "./auth.js";
 import { importNormifyCloudflarePin, verifyCloudflareAccessJwt } from "./cloudflare.js";
 import {
   authenticateDevice,
   createDevice,
   isCaptureIngested,
+  listCaptureEvents,
   listDevices,
   markCaptureIngested,
   normalizeCaptureEvent,
@@ -35,6 +38,16 @@ import {
   storeCaptureEvent
 } from "./capture.js";
 import { ingestCaptureIntoMemory } from "./capture-ingest.js";
+import {
+  completeDistillationJob,
+  enqueueDistillationJob,
+  failDistillationJob,
+  getDistillationConfig,
+  leaseDistillationJob,
+  listDistillationJobs,
+  retryDistillationJob,
+  setDistillationConfig
+} from "./distillation-jobs.js";
 import { createMemhubRuntime, type MemhubRuntime, type MemhubRuntimeOptions } from "./runtime.js";
 import {
   DISTILLATION_CONTRACT_VERSION,
@@ -48,10 +61,10 @@ export interface MemhubMcpOptions extends MemhubRuntimeOptions {}
 
 export function createMemhubMcpServer(options: MemhubMcpOptions = {}): McpServer {
   const runtime = createMemhubRuntime(options);
-  return createMemhubMcpServerForRuntime(runtime);
+  return createMemhubMcpServerForRuntime(runtime, defaultStateRoot());
 }
 
-export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime): McpServer {
+export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoot = defaultStateRoot()): McpServer {
   const server = new McpServer({
     name: "memhub",
     version: VERSION,
@@ -143,6 +156,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime): McpServ
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
+        action: { type: "string", enum: ["next", "submit", "skip"], description: "next 领取待蒸馏 evidence；submit 提交模型蒸馏结果；skip 明确判定该批 evidence 不应形成长期知识。省略时保持兼容，直接提交。" },
         kind: { type: "string", enum: ["skill", "summary", "knowledge"], description: "沉淀产物类型" },
         content: { type: "string", description: "完整沉淀内容；Skill 应包含何时调用、步骤与边界" },
         scope: { type: "string", enum: ["global", "project"], description: "账号级或项目级；必须明确" },
@@ -156,6 +170,8 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime): McpServ
         ,evidence_refs: { type: "array", items: { type: "string" }, description: "支持该产物的 Memory/RawTurn/Episode 等稳定引用" }
         ,source_conversations: { type: "array", items: { type: "string" }, description: "产物来源对话 ID；与 distilled_by 分开保存" }
         ,confidence: { type: "number", minimum: 0, maximum: 1 }
+        ,job_id: { type: "string", description: "提交通过 next 或 Control Plane 领取的 distillation job" }
+        ,lease_seconds: { type: "integer", minimum: 30, maximum: 900 }
         ,inspect_contract: { type: "boolean", description: "只返回 Memhub 蒸馏规则，不写入任何内容" }
         ,dry_run: { type: "boolean", description: "按当前契约校验候选与 scope，但不写入 Memory Core" }
       },
@@ -164,21 +180,61 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime): McpServ
     } as JsonSchemaType)
   }, async (args) => {
     if (args.inspect_contract === true) return jsonResult({ contract: distillationContract() });
+    const action = optionalString(args.action);
+    const sourceHarness = optionalString(args.source_harness) ?? runtime.source.platform ?? "mcp-harness";
+    if (action === "next") {
+      const requestedScope = optionalString(args.scope);
+      let projectFilter: string | null | undefined;
+      if (requestedScope === "global") projectFilter = null;
+      else if (requestedScope === "project") {
+        projectFilter = (await resolveToolScope(runtime, {
+          scope: "project",
+          project: optionalString(args.project),
+          conversationId: optionalString(args.conversation_id)
+        })).projectId;
+      }
+      const job = await leaseDistillationJob(stateRoot, runtime.accountId, {
+        projectId: projectFilter,
+        harness: sourceHarness,
+        leaseSeconds: optionalInteger(args.lease_seconds)
+      });
+      return jsonResult({
+        job,
+        contract: distillationContract(),
+        instructions: job
+          ? "Analyze only the supplied evidence. Decide whether durable skill, summary, or knowledge is justified. Check relevant existing context before creating a duplicate artifact. If nothing durable is justified, call memhub_distill action=skip with job_id. Otherwise call memhub_distill action=submit with job_id and the candidate."
+          : "No pending distillation job for this account/scope."
+      });
+    }
+    if (action === "skip") {
+      const jobId = requiredString(args.job_id, "job_id");
+      const job = (await listDistillationJobs(stateRoot, runtime.accountId)).find((item) => item.job_id === jobId);
+      if (!job) throw new Error("distillation job not found for account");
+      await completeDistillationJob(stateRoot, runtime.accountId, jobId, { kind: "noop" });
+      return jsonResult({ ok: true, job_id: jobId, skipped: true, reason: "no durable artifact justified by evidence" });
+    }
+    if (action !== undefined && action !== "submit") throw new TypeError("action must be next, submit, or skip");
+    const jobId = optionalString(args.job_id);
+    const job = jobId
+      ? (await listDistillationJobs(stateRoot, runtime.accountId)).find((item) => item.job_id === jobId)
+      : undefined;
+    if (jobId && !job) throw new Error("distillation job not found for account");
     const kind = requiredString(args.kind, "kind");
     if (kind !== "skill" && kind !== "summary" && kind !== "knowledge") {
       throw new TypeError("kind must be skill, summary, or knowledge");
     }
-    const scope = requiredString(args.scope, "scope");
+    const scope = optionalString(args.scope) ?? job?.scope;
+    if (!scope) throw new TypeError("scope is required");
     const title = optionalString(args.title);
     if (kind === "skill" && !title) throw new TypeError("title is required for skill distillation");
     const { projectId, conversationId } = await resolveToolScope(runtime, {
       scope,
-      project: optionalString(args.project),
-      conversationId: optionalString(args.conversation_id)
+      project: optionalString(args.project) ?? job?.project_id ?? undefined,
+      conversationId: optionalString(args.conversation_id) ?? job?.conversation_id
     });
-    const sourceHarness = optionalString(args.source_harness) ?? "mcp-harness";
-    const evidenceRefs = stringArray(args.evidence_refs);
-    const sourceConversations = stringArray(args.source_conversations);
+    if (job && (job.scope !== scope || job.project_id !== projectId)) throw new Error("distillation job scope mismatch");
+    const evidenceRefs = uniqueStrings([...(job?.evidence_refs ?? []), ...(stringArray(args.evidence_refs) ?? [])]);
+    const sourceConversations = uniqueStrings([...(job ? [job.conversation_id] : []), ...(stringArray(args.source_conversations) ?? [])]);
     const confidence = optionalNumber(args.confidence);
     validateDistillationCandidate({
       kind,
@@ -199,32 +255,45 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime): McpServ
         confidence
       });
     }
-    const result = await runtime.memory.distill({
-      accountId: runtime.accountId,
-      userId: runtime.userId,
-      kind,
-      content: requiredString(args.content, "content"),
-      projectId,
-      conversationId,
-      title,
-      tags: stringArray(args.tags),
-      sourceHarness,
-      artifactId: optionalString(args.artifact_id),
-      version: optionalString(args.version)
-      ,
-      evidenceRefs,
-      sourceConversations,
-      confidence,
-      contractVersion: DISTILLATION_CONTRACT_VERSION,
-      provenance: {
-        platform: runtime.source.platform,
-        transport: runtime.source.transport,
-        principal: runtime.source.principalId,
-        connection: runtime.source.connectionId,
-        account: runtime.accountId,
-        authenticated_account: runtime.source.authenticatedAccount
+    let result: unknown;
+    try {
+      result = await runtime.memory.distill({
+        accountId: runtime.accountId,
+        userId: runtime.userId,
+        kind,
+        content: requiredString(args.content, "content"),
+        projectId,
+        conversationId,
+        title,
+        tags: stringArray(args.tags),
+        sourceHarness,
+        artifactId: optionalString(args.artifact_id),
+        version: optionalString(args.version),
+        evidenceRefs,
+        sourceConversations,
+        confidence,
+        contractVersion: DISTILLATION_CONTRACT_VERSION,
+        provenance: {
+          platform: runtime.source.platform,
+          transport: runtime.source.transport,
+          principal: runtime.source.principalId,
+          connection: runtime.source.connectionId,
+          account: runtime.accountId,
+          authenticated_account: runtime.source.authenticatedAccount
+        }
+      });
+    } catch (error) {
+      if (jobId) {
+        await failDistillationJob(
+          stateRoot,
+          runtime.accountId,
+          jobId,
+          error instanceof Error ? error.message : String(error)
+        );
       }
-    });
+      throw error;
+    }
+    if (jobId) await completeDistillationJob(stateRoot, runtime.accountId, jobId, { kind, resultId: memoryResultId(result) });
     return jsonResult({
       ok: true,
       kind,
@@ -233,6 +302,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime): McpServ
       sourceHarness,
       nativeEvolution: false,
       contract: DISTILLATION_CONTRACT_VERSION,
+      job_id: jobId,
       memory: result
     });
   });
@@ -419,9 +489,11 @@ function parseArgs(argv: string[]): CliOptions {
         "Usage: memhub-mcp [options]",
         "       memhub-mcp account list|add|bind-email|delete|import-normify ...",
         "       memhub-mcp device list|add|revoke ...",
+        "       memhub-mcp admin-token show|rotate [--state-root PATH]",
         "",
         "Default transport: stdio.",
-        "HTTP binds only to 127.0.0.1. --public-host enables Cloudflare Access JWT identity.",
+        "HTTP binds only to 127.0.0.1. Local Control Plane requires the local admin token.",
+        "--public-host enables Cloudflare Access JWT identity for public Control Plane/MCP requests.",
         "Unknown Cloudflare emails are denied unless --allow-jit is explicitly set."
       ].join("\n") + "\n");
       process.exit(0);
@@ -439,6 +511,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }
   if (argv[0] === "device") {
     await runDeviceCommand(argv.slice(1));
+    return;
+  }
+  if (argv[0] === "admin-token") {
+    await runAdminTokenCommand(argv.slice(1));
     return;
   }
   const options = parseArgs(argv);
@@ -463,6 +539,7 @@ async function serveHttp(
   runtimeOptions: MemhubRuntimeOptions,
   options: { stateRoot: string; port: number; path: string; capturePath: string; publicHost?: string; allowJit: boolean }
 ): Promise<void> {
+  await ensureLocalAdminToken(options.stateRoot);
   const handlers = new Map<string, ReturnType<typeof toNodeHandler>>();
   const runtimes = new Map<string, MemhubRuntime>();
   const validateHost = options.publicHost === undefined
@@ -493,7 +570,7 @@ async function serveHttp(
     let handler = handlers.get(handlerKey);
     if (handler) return handler;
     handler = toNodeHandler(
-      createMcpHandler(() => createMemhubMcpServerForRuntime(runtimeFor(accountId, source))),
+      createMcpHandler(() => createMemhubMcpServerForRuntime(runtimeFor(accountId, source), options.stateRoot)),
       { onerror: (error) => console.error("[memhub] MCP HTTP error:", error.message) }
     );
     handlers.set(handlerKey, handler);
@@ -592,6 +669,13 @@ async function serveHttp(
             });
             if (ingestion.ingested) {
               await markCaptureIngested(options.stateRoot, device.account_id, stored.event.event_id);
+              const distillation = await maybeQueueThresholdDistillation({
+                stateRoot: options.stateRoot,
+                accountId: device.account_id,
+                projectId,
+                conversationId: stored.event.conversation_id
+              });
+              if (distillation) ingestion = { ...ingestion, distillation } as typeof ingestion & { distillation: unknown };
             }
           } catch (error) {
             response.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
@@ -619,30 +703,68 @@ async function serveHttp(
       }
 
       if (url.pathname === "/" || url.pathname === "/memhub" || url.pathname.startsWith("/memhub/admin")) {
-        if (options.publicHost === undefined) {
-          response.writeHead(404).end();
-          return;
+        const accounts = await listAccounts(options.stateRoot);
+        const localControl = isLocalControlRequest(request);
+        let summary: (typeof accounts)[number];
+        if (localControl) {
+          const token = basicPassword(singleHeader(request.headers.authorization));
+          if (!(await verifyLocalAdminToken(options.stateRoot, token))) {
+            response.writeHead(401, {
+              "content-type": "text/plain; charset=utf-8",
+              "cache-control": "no-store",
+              "www-authenticate": 'Basic realm="Memhub local admin", charset="UTF-8"'
+            }).end("Local administrator token required");
+            return;
+          }
+          summary = localAdminAccount(accounts, runtimeOptions.accountId ?? process.env.MEMHUB_LOCAL_ADMIN_ACCOUNT);
+        } else {
+          if (options.publicHost === undefined) {
+            response.writeHead(404).end();
+            return;
+          }
+          const assertion = singleHeader(request.headers["cf-access-jwt-assertion"]);
+          if (!assertion) {
+            response.writeHead(401, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" }).end("Cloudflare Access authentication required");
+            return;
+          }
+          const identity = await verifyCloudflareAccessJwt(options.stateRoot, options.publicHost, assertion);
+          const account = await resolveCloudflareAccount(options.stateRoot, identity, { allowJit: options.allowJit });
+          summary = accounts.find((item) => item.account_id === account.account_id)!;
         }
-        const assertion = singleHeader(request.headers["cf-access-jwt-assertion"]);
-        if (!assertion) {
-          response.writeHead(401, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" }).end("Cloudflare Access authentication required");
-          return;
-        }
-        const identity = await verifyCloudflareAccessJwt(options.stateRoot, options.publicHost, assertion);
-        const account = await resolveCloudflareAccount(options.stateRoot, identity, { allowJit: options.allowJit });
-        const summary = (await listAccounts(options.stateRoot)).find((item) => item.account_id === account.account_id)!;
         const isAdmin = summary.role === "admin";
         if (url.pathname.startsWith("/memhub/admin") && !isAdmin) {
           response.writeHead(403, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" }).end("Administrator access required");
           return;
         }
-        const runtime = runtimeFor(account.account_id);
+        const runtime = runtimeFor(summary.account_id);
         if (url.pathname === "/memhub/admin/api" && request.method === "GET") {
           const kind = url.searchParams.get("kind") ?? "overview";
+          if (kind === "captures") {
+            const captures = await listCaptureEvents(options.stateRoot, summary.account_id);
+            const items = captures.map((capture) => ({
+              ...capture,
+              status: capture.ingested
+                ? "ingested"
+                : capture.user_text && capture.assistant_text
+                  ? "complete_pending_ingest"
+                  : "partial",
+              scope: capture.project_hint ? `project:${capture.project_hint}` : "global_or_conversation_bound"
+            }));
+            response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" })
+              .end(JSON.stringify({ items, total: items.length }));
+            return;
+          }
+          if (kind === "distillation") {
+            const jobs = await listDistillationJobs(options.stateRoot, summary.account_id);
+            const config = await getDistillationConfig(options.stateRoot);
+            response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" })
+              .end(JSON.stringify({ items: jobs, total: jobs.length, config }));
+            return;
+          }
           const allowed = new Map([
             ["overview", "/api/v1/overview"], ["memories", "/api/v1/memories?limit=100"],
             ["episodes", "/api/v1/episodes"], ["skills", "/api/v1/skills?limit=100"],
-            ["world-models", "/api/v1/world-models?limit=100"], ["knowledge", "/api/v1/knowledge?limit=100"],
+            ["world-models", "/api/v1/world-models?limit=100"], ["knowledge", "/api/v1/policies?limit=100"],
             ["traces", "/api/v1/traces?limit=100"]
           ]);
           const target = allowed.get(kind);
@@ -655,7 +777,56 @@ async function serveHttp(
           const body = await readJsonBody(request) as Record<string, unknown>;
           const action = optionalString(body.action);
           const id = optionalString(body.id);
-          if (!action || !id) { response.writeHead(400).end(); return; }
+          if (!action) { response.writeHead(400).end(); return; }
+          if (action === "set-distillation-config") {
+            const config = await setDistillationConfig(options.stateRoot, {
+              ...(typeof body.auto_enabled === "boolean" ? { auto_enabled: body.auto_enabled } : {}),
+              ...(typeof body.turn_threshold === "number" ? { turn_threshold: body.turn_threshold } : {}),
+              ...(typeof body.idle_minutes === "number" ? { idle_minutes: body.idle_minutes } : {})
+            });
+            response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, config }));
+            return;
+          }
+          if (action === "set-account-role") {
+            const accountRef = optionalString(body.id);
+            const role = optionalString(body.role);
+            if (!accountRef || (role !== "admin" && role !== "user")) { response.writeHead(400).end(); return; }
+            const target = accounts.find((item) => item.account_id === accountRef || item.username === accountRef || item.cloudflare_email === accountRef.toLowerCase());
+            if (!target) { response.writeHead(404).end(); return; }
+            if (target.role === "admin" && role === "user" && accounts.filter((item) => item.role === "admin").length <= 1) {
+              response.writeHead(409, { "content-type": "application/json" }).end(JSON.stringify({ error: "cannot_demote_last_admin" }));
+              return;
+            }
+            await setAccountRole(options.stateRoot, accountRef, role);
+            response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, account_id: target.account_id, role }));
+            return;
+          }
+          if (!id) { response.writeHead(400).end(); return; }
+          if (action === "queue-distillation") {
+            const captures = await listCaptureEvents(options.stateRoot, summary.account_id);
+            const selected = captures.find((item) => item.event_id === id || item.conversation_id === id);
+            if (!selected) { response.writeHead(404).end(); return; }
+            const projectId = await runtime.router.currentProject(summary.account_id, selected.conversation_id);
+            const queued = await enqueueDistillationJob({
+              stateRoot: options.stateRoot,
+              accountId: summary.account_id,
+              projectId,
+              conversationId: selected.conversation_id,
+              captures: captures.filter((item) =>
+                item.conversation_id === selected.conversation_id &&
+                item.ingested &&
+                (projectId ? !item.project_hint || item.project_hint === projectId : !item.project_hint)
+              ),
+              reason: "manual"
+            });
+            response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, ...queued }));
+            return;
+          }
+          if (action === "retry-distillation") {
+            const retried = await retryDistillationJob(options.stateRoot, summary.account_id, id);
+            response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, job: retried }));
+            return;
+          }
           if (action === "delete-memory") await runtime.memoryClient.viewerDelete(`/api/v1/memory/${encodeURIComponent(id)}`);
           else if (action === "archive-memory") await runtime.memoryClient.viewerPost(`/api/v1/memory/${encodeURIComponent(id)}/archive`);
           else if (action === "archive-skill") await runtime.memoryClient.viewerPost("/api/v1/skills/archive", { skillId: id });
@@ -664,11 +835,11 @@ async function serveHttp(
           response.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
           return;
         }
-        const projects = await runtime.router.listProjects(account.account_id).catch(() => []);
-        const devices = await listDevices(options.stateRoot, account.account_id);
-        const accounts = isAdmin && url.pathname.startsWith("/memhub/admin") ? await listAccounts(options.stateRoot) : [];
+        const projects = await runtime.router.listProjects(summary.account_id).catch(() => []);
+        const devices = await listDevices(options.stateRoot, summary.account_id);
+        const visibleAccounts = isAdmin && url.pathname.startsWith("/memhub/admin") ? accounts : [];
         response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
-        response.end(renderConsole({ account: summary, projects, devices, accounts, adminView: url.pathname.startsWith("/memhub/admin") }));
+        response.end(renderConsole({ account: summary, projects, devices, accounts: visibleAccounts, adminView: url.pathname.startsWith("/memhub/admin"), localControl }));
         return;
       }
       // OAuth-capable MCP clients may canonicalize the resource URI with a
@@ -744,6 +915,72 @@ async function serveHttp(
   if (options.publicHost) {
     console.error(`[memhub] Cloudflare Access allowlist enabled for https://${options.publicHost}${options.path}`);
   }
+
+  const idleTimer = setInterval(() => {
+    void queueIdleDistillation(options.stateRoot, runtimeFor).catch((error) => {
+      console.error("[memhub] idle distillation scheduler:", error instanceof Error ? error.message : String(error));
+    });
+  }, 60_000);
+  idleTimer.unref();
+}
+
+async function maybeQueueThresholdDistillation(input: {
+  stateRoot: string;
+  accountId: string;
+  projectId: string | null;
+  conversationId: string;
+}): Promise<unknown | null> {
+  const config = await getDistillationConfig(input.stateRoot);
+  if (!config.auto_enabled) return null;
+  const jobs = await listDistillationJobs(input.stateRoot, input.accountId);
+  const used = new Set(jobs.filter((job) => job.conversation_id === input.conversationId && job.project_id === input.projectId).flatMap((job) => job.evidence_refs));
+  const allCaptures = (await listCaptureEvents(input.stateRoot, input.accountId))
+    .filter((item) => item.conversation_id === input.conversationId && item.ingested && item.user_text && item.assistant_text)
+    .filter((item) => input.projectId ? !item.project_hint || item.project_hint === input.projectId : !item.project_hint);
+  if (allCaptures.length < config.turn_threshold || allCaptures.length % config.turn_threshold !== 0) return null;
+  const captures = allCaptures.filter((item) => !used.has(`capture:${item.event_id}`));
+  if (captures.length === 0) return null;
+  return enqueueDistillationJob({
+    stateRoot: input.stateRoot,
+    accountId: input.accountId,
+    projectId: input.projectId,
+    conversationId: input.conversationId,
+    captures,
+    reason: "turn_threshold"
+  });
+}
+
+async function queueIdleDistillation(
+  stateRoot: string,
+  runtimeForAccount: (accountId: string) => MemhubRuntime
+): Promise<void> {
+  const config = await getDistillationConfig(stateRoot);
+  if (!config.auto_enabled) return;
+  const captures = await listCaptureEvents(stateRoot);
+  const groups = new Map<string, typeof captures>();
+  for (const capture of captures) {
+    if (!capture.ingested || !capture.user_text || !capture.assistant_text) continue;
+    const key = `${capture.account_id}\0${capture.conversation_id}`;
+    const group = groups.get(key) ?? [];
+    group.push(capture);
+    groups.set(key, group);
+  }
+  const cutoff = Date.now() - config.idle_minutes * 60_000;
+  for (const group of groups.values()) {
+    const latest = Math.max(...group.map((item) => Date.parse(item.timestamp)));
+    if (!Number.isFinite(latest) || latest > cutoff || group.length < 2) continue;
+    const accountId = group[0]!.account_id;
+    const conversationId = group[0]!.conversation_id;
+    const runtime = runtimeForAccount(accountId);
+    const projectId = await runtime.router.currentProject(accountId, conversationId);
+    const jobs = await listDistillationJobs(stateRoot, accountId);
+    const used = new Set(jobs.filter((job) => job.conversation_id === conversationId && job.project_id === projectId).flatMap((job) => job.evidence_refs));
+    const scoped = group
+      .filter((item) => projectId ? !item.project_hint || item.project_hint === projectId : !item.project_hint)
+      .filter((item) => !used.has(`capture:${item.event_id}`));
+    if (scoped.length === 0) continue;
+    await enqueueDistillationJob({ stateRoot, accountId, projectId, conversationId, captures: scoped, reason: "idle" });
+  }
 }
 
 async function runDeviceCommand(argv: string[]): Promise<void> {
@@ -783,6 +1020,24 @@ async function runDeviceCommand(argv: string[]): Promise<void> {
     return;
   }
   throw new Error(`unknown device action: ${action ?? "<missing>"}`);
+}
+
+async function runAdminTokenCommand(argv: string[]): Promise<void> {
+  let stateRoot = process.env.MEMHUB_STATE_ROOT ?? defaultStateRoot();
+  const args = [...argv];
+  for (let i = 0; i < args.length;) {
+    if (args[i] === "--state-root") {
+      const value = args[i + 1];
+      if (!value) throw new Error("--state-root requires a value");
+      stateRoot = value;
+      args.splice(i, 2);
+      continue;
+    }
+    i += 1;
+  }
+  const action = args[0] ?? "show";
+  if (action !== "show" && action !== "rotate") throw new Error("admin-token supports show or rotate");
+  process.stdout.write(await ensureLocalAdminToken(stateRoot, action === "rotate") + "\n");
 }
 
 async function runAccountCommand(argv: string[]): Promise<void> {
@@ -860,21 +1115,63 @@ function singleHeader(value: string | string[] | undefined): string | undefined 
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function basicPassword(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const match = /^Basic\s+(.+)$/i.exec(value.trim());
+  if (!match?.[1]) return undefined;
+  try {
+    const decoded = Buffer.from(match[1], "base64").toString("utf8");
+    const separator = decoded.indexOf(":");
+    return separator >= 0 ? decoded.slice(separator + 1) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isLocalControlRequest(request: import("node:http").IncomingMessage): boolean {
+  const remote = request.socket.remoteAddress ?? "";
+  const loopbackPeer = remote === "127.0.0.1" || remote === "::1" || remote.startsWith("::ffff:127.");
+  if (!loopbackPeer) return false;
+  const host = (singleHeader(request.headers.host) ?? "").toLowerCase();
+  const hostName = host.startsWith("[") ? host.slice(1, host.indexOf("]")) : host.split(":", 1)[0];
+  if (hostName !== "localhost" && hostName !== "127.0.0.1" && hostName !== "::1") return false;
+  if (singleHeader(request.headers["cf-access-jwt-assertion"]) || singleHeader(request.headers["cf-ray"]) || singleHeader(request.headers["cf-connecting-ip"])) return false;
+  return true;
+}
+
+function localAdminAccount(
+  accounts: Awaited<ReturnType<typeof listAccounts>>,
+  preferred?: string
+): Awaited<ReturnType<typeof listAccounts>>[number] {
+  const admins = accounts.filter((item) => item.role === "admin");
+  if (preferred) {
+    const match = admins.find((item) => item.account_id === preferred || item.username === preferred || item.cloudflare_email === preferred.toLowerCase());
+    if (match) return match;
+    throw new Error(`configured local admin account is not an administrator: ${preferred}`);
+  }
+  if (admins.length === 1) return admins[0]!;
+  if (admins.length === 0) throw new Error("local control plane requires at least one Memhub administrator account");
+  throw new Error("multiple administrator accounts exist; set MEMHUB_LOCAL_ADMIN_ACCOUNT to select the local control-plane identity");
+}
+
 function renderConsole(input: {
   account: Awaited<ReturnType<typeof listAccounts>>[number];
   projects: string[];
   devices: Awaited<ReturnType<typeof listDevices>>;
   accounts: Awaited<ReturnType<typeof listAccounts>>;
   adminView: boolean;
+  localControl: boolean;
 }): string {
   const e = escapeHtml;
   const nav = input.account.role === "admin"
     ? `<a href="/memhub">Workspace</a><a href="/memhub/admin">Admin</a>`
     : `<a href="/memhub">Workspace</a>`;
+  const authBoundary = input.localControl ? "Local token + loopback Host" : "Cloudflare Access";
+  const logoutLink = input.localControl ? "" : '<a class="logout" href="/cdn-cgi/access/logout" data-i18n="logout">退出</a>';
   const content = input.adminView
-    ? `<div class="admin-shell"><aside><div class="brand">Memhub <em>Control</em></div><button data-view="overview">◫ <span data-i18n="overview">总览</span></button><button data-view="memories">◇ <span data-i18n="memories">记忆</span></button><button data-view="episodes">◷ <span data-i18n="episodes">对话与 Episode</span></button><button data-view="traces">⌁ <span data-i18n="traces">原始轨迹</span></button><button data-view="skills">✦ <span data-i18n="skills">技能</span></button><button data-view="world-models">◎ <span data-i18n="world">世界模型</span></button><button data-view="knowledge">▤ <span data-i18n="knowledge">域经验</span></button><button data-view="accounts">♙ <span data-i18n="accounts">账号</span></button><div class="aside-foot">Cloudflare Access<br><small>Identity boundary</small></div></aside><div class="console"><div class="hero"><div><small data-i18n="control">MEMORY CONTROL PLANE</small><h1 data-i18n="title">长期记忆管理</h1><p data-i18n="subtitle">查看、追踪并管理从对话到技能与世界模型的各级沉淀。</p></div><div class="hero-actions"><button id="lang">EN</button><a class="logout" href="/cdn-cgi/access/logout" data-i18n="logout">退出</a></div></div><div id="account-panel" class="panel hidden"><h2 data-i18n="accounts">账号</h2><div class="grid">${input.accounts.map((a) => `<article><b>${e(a.cloudflare_email ?? a.username)}</b><span class="pill">${e(a.role)}</span><small>${e(a.account_id)}</small></article>`).join("")}</div></div><div id="data-panel" class="panel"><div class="panel-head"><div><h2 id="view-title">总览</h2><p id="view-desc" class="muted">正在读取 Memory Core…</p></div><input id="filter" placeholder="搜索 / Search"></div><div id="cards" class="stats"></div><div id="items" class="items"><div class="empty">Loading…</div></div></div></div></div><div id="drawer" class="drawer hidden"><button class="drawer-close" onclick="closeDrawer()">×</button><div id="drawer-body"></div></div><script>${consoleScript()}</script>`
-    : `<section><h2>我的 Memhub</h2><div class="stats"><article><b>${input.projects.length}</b><span>项目</span></article><article><b>${input.devices.length}</b><span>设备</span></article><article><b>${e(input.account.role)}</b><span>权限</span></article></div></section><section><h2>项目</h2><div class="grid">${input.projects.map((p) => `<article><b>${e(p)}</b><span>项目记忆空间</span></article>`).join("") || "<p class=\"muted\">暂无项目</p>"}</div></section><section><h2>连接设备</h2><div class="grid">${input.devices.map((d) => `<article><b>${e(d.name)}</b><span>${d.revoked_at ? "已撤销" : "已连接"}</span><small>${e(d.device_id)}</small></article>`).join("") || "<p class=\"muted\">暂无设备</p>"}</div></section><section><h2>记忆与沉淀</h2><p class="muted">Memory / Skill / Domain Experience 的浏览、保留、归档和删除控制面将在 Memory Core 管理 API 接通后显示在这里；账号隔离继续使用稳定 account_id。</p></section>`;
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Memhub Control Plane</title><style>${consoleCss()}</style></head><body><header><b>Memhub</b><nav>${nav}<span>${e(input.account.cloudflare_email ?? input.account.username)}</span>${input.adminView ? "" : '<a class="logout" href="/cdn-cgi/access/logout">退出</a>'}</nav></header><main class="${input.adminView ? "admin-main" : ""}">${content}</main></body></html>`;
+    ? `<div class="admin-shell"><aside><div class="brand">Memhub <em>Control</em></div><button data-view="overview">◫ <span data-i18n="overview">总览</span></button><button data-view="captures">◉ <span data-i18n="captures">原始捕获</span></button><button data-view="episodes">◷ <span data-i18n="episodes">对话与 Episode</span></button><button data-view="distillation">⌬ <span data-i18n="distillation">蒸馏任务</span></button><button data-view="memories">◇ <span data-i18n="memories">记忆</span></button><button data-view="traces">⌁ <span data-i18n="traces">L1 轨迹</span></button><button data-view="skills">✦ <span data-i18n="skills">技能</span></button><button data-view="world-models">◎ <span data-i18n="world">世界模型</span></button><button data-view="knowledge">▤ <span data-i18n="knowledge">L2 域知识</span></button><button data-view="accounts">♙ <span data-i18n="accounts">账号</span></button><div class="aside-foot">${e(authBoundary)}<br><small>Identity boundary</small></div></aside><div class="console"><div class="hero"><div><small data-i18n="control">MEMORY CONTROL PLANE</small><h1 data-i18n="title">长期记忆管理</h1><p data-i18n="subtitle">查看从 Raw Capture 到 Episode、蒸馏任务、Memory、Skill 与 World Model 的完整生命周期。</p></div><div class="hero-actions"><button id="lang">EN</button>${logoutLink}</div></div><div id="account-panel" class="panel hidden"><h2 data-i18n="accounts">账号</h2><div class="grid">${input.accounts.map((a) => `<article><b>${e(a.cloudflare_email ?? a.username)}</b><span class="pill">${e(a.role)}</span><small>${e(a.account_id)}</small><div class="actions"><button class="soft" onclick="accountRole('${e(a.account_id)}','admin')">Admin</button><button class="soft" onclick="accountRole('${e(a.account_id)}','user')">User</button></div></article>`).join("")}</div></div><div id="data-panel" class="panel"><div class="panel-head"><div><h2 id="view-title">总览</h2><p id="view-desc" class="muted">正在读取 Memory Core…</p></div><input id="filter" placeholder="搜索 / Search"></div><div id="cards" class="stats"></div><div id="items" class="items"><div class="empty">Loading…</div></div></div></div></div><div id="drawer" class="drawer hidden"><button class="drawer-close" onclick="closeDrawer()">×</button><div id="drawer-body"></div></div><script>${consoleScript()}</script>`
+    : `<section><h2>我的 Memhub</h2><div class="stats"><article><b>${input.projects.length}</b><span>项目</span></article><article><b>${input.devices.length}</b><span>设备</span></article><article><b>${e(input.account.role)}</b><span>权限</span></article></div></section><section><h2>项目</h2><div class="grid">${input.projects.map((p) => `<article><b>${e(p)}</b><span>项目记忆空间</span></article>`).join("") || "<p class=\"muted\">暂无项目</p>"}</div></section><section><h2>连接设备</h2><div class="grid">${input.devices.map((d) => `<article><b>${e(d.name)}</b><span>${d.revoked_at ? "已撤销" : "已连接"}</span><small>${e(d.device_id)}</small></article>`).join("") || "<p class=\"muted\">暂无设备</p>"}</div></section><section><h2>记忆与沉淀</h2><p class="muted">原始捕获、Episode、蒸馏任务、Memory、Skill、L2 与 L3 的治理入口位于管理员 Control Plane。普通用户页只展示当前稳定 account_id 自己的项目与设备。</p></section>`;
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Memhub Control Plane</title><style>${consoleCss()}</style></head><body><header><b>Memhub</b><nav>${nav}<span>${e(input.account.cloudflare_email ?? input.account.username)}</span>${input.adminView ? "" : logoutLink}</nav></header><main class="${input.adminView ? "admin-main" : ""}">${content}</main></body></html>`;
 }
 
 function consoleCss(): string { return `
@@ -882,17 +1179,20 @@ function consoleCss(): string { return `
 `; }
 
 function consoleScript(): string { return `
-const dict={zh:{overview:'总览',memories:'记忆',episodes:'对话与 Episode',traces:'原始轨迹',skills:'技能',world:'世界模型',knowledge:'域经验',accounts:'账号',control:'MEMORY CONTROL PLANE',title:'长期记忆管理',subtitle:'查看、追踪并管理从对话到技能与世界模型的各级沉淀。',logout:'退出'},en:{overview:'Overview',memories:'Memories',episodes:'Conversations & Episodes',traces:'Raw Traces',skills:'Skills',world:'World Models',knowledge:'Domain Experience',accounts:'Accounts',control:'MEMORY CONTROL PLANE',title:'Long-term Memory',subtitle:'Inspect and manage distilled knowledge from conversations through skills and world models.',logout:'Sign out'}};
+const dict={zh:{overview:'总览',captures:'原始捕获',memories:'记忆',episodes:'对话与 Episode',distillation:'蒸馏任务',traces:'L1 轨迹',skills:'技能',world:'世界模型',knowledge:'L2 域知识',accounts:'账号',control:'MEMORY CONTROL PLANE',title:'长期记忆管理',subtitle:'查看从 Raw Capture 到 Episode、蒸馏任务、Memory、Skill 与 World Model 的完整生命周期。',logout:'退出'},en:{overview:'Overview',captures:'Raw Captures',memories:'Memories',episodes:'Conversations & Episodes',distillation:'Distillation Jobs',traces:'L1 Traces',skills:'Skills',world:'World Models',knowledge:'L2 Knowledge',accounts:'Accounts',control:'MEMORY CONTROL PLANE',title:'Long-term Memory',subtitle:'Inspect the lifecycle from raw captures through episodes, distillation jobs, memories, skills and world models.',logout:'Sign out'}};
 let lang=localStorage.memhubLang||'zh', current='overview', payload=null;
-const titles={overview:['总览','Overview'],memories:['记忆','Memories'],episodes:['对话与 Episode','Conversations & Episodes'],traces:['原始轨迹','Raw Traces'],skills:['技能','Skills'],'world-models':['世界模型','World Models'],knowledge:['域经验','Domain Experience']};
+const titles={overview:['总览','Overview'],captures:['原始捕获','Raw Captures'],memories:['记忆','Memories'],episodes:['对话与 Episode','Conversations & Episodes'],distillation:['蒸馏任务','Distillation Jobs'],traces:['L1 轨迹','L1 Traces'],skills:['技能','Skills'],'world-models':['世界模型','World Models'],knowledge:['L2 域知识','L2 Knowledge']};
 function tr(){document.documentElement.lang=lang==='zh'?'zh-CN':'en';document.querySelectorAll('[data-i18n]').forEach(x=>x.textContent=dict[lang][x.dataset.i18n]||x.textContent);document.getElementById('lang').textContent=lang==='zh'?'EN':'中文';}
 function values(o){if(!o||typeof o!=='object')return[];for(const k of ['items','tasks','memories','episodes','skills','records'])if(Array.isArray(o[k]))return o[k];return[]}
-function textOf(x){return x.snippet||x.content||x.summary||x.description||x.title||x.text||JSON.stringify(x)}
-function render(data){payload=data;const items=values(data);const cards=document.getElementById('cards');const total=data?.total??items.length;cards.innerHTML='<article><b>'+total+'</b><span>'+(lang==='zh'?'当前条目':'Current items')+'</span></article><article><b>'+items.filter(x=>x.status==='activated').length+'</b><span>Activated</span></article><article><b>'+items.filter(x=>x.status==='archived').length+'</b><span>Archived</span></article>';filter();}
-function filter(){const q=document.getElementById('filter').value.toLowerCase();const items=values(payload).filter(x=>JSON.stringify(x).toLowerCase().includes(q));window.visibleItems=items;document.getElementById('items').innerHTML=items.length?items.map((x,i)=>'<div class="row" onclick="openItem('+i+')"><div><h3>'+esc(x.title||x.kind||x.type||x.id||'Item')+'</h3><small>'+esc(x.status||x.sourceAgent||x.source||'')+'</small></div><p>'+esc(textOf(x))+'</p><small>'+esc(x.updatedAt||x.createdAt||x.id||'')+'</small></div>').join(''):'<div class="empty">'+(lang==='zh'?'暂无内容':'No items')+'</div>'}
-function openItem(i){const x=window.visibleItems[i],id=x.id||x.memoryId||x.skillId;let actions='';if(id&&current==='memories')actions='<div class="actions"><button class="soft" onclick="event.stopPropagation();act(\'archive-memory\',\''+js(id)+'\')">Archive</button><button class="danger" onclick="event.stopPropagation();act(\'delete-memory\',\''+js(id)+'\')">Delete</button></div>';if(id&&current==='skills')actions='<div class="actions"><button class="soft" onclick="act(\'archive-skill\',\''+js(id)+'\')">Archive</button></div>';if(id&&current==='world-models')actions='<div class="actions"><button class="soft" onclick="act(\'archive-world-model\',\''+js(id)+'\')">Archive</button></div>';document.getElementById('drawer-body').innerHTML='<small>'+esc(current)+'</small><h2>'+esc(x.title||x.kind||x.id||'Detail')+'</h2><p>'+esc(textOf(x))+'</p>'+actions+'<h3>Metadata / Provenance</h3><pre>'+esc(JSON.stringify(x,null,2))+'</pre>';document.getElementById('drawer').classList.remove('hidden')}
+function textOf(x){if(current==='captures')return (x.user_text||'')+'\n→ '+(x.assistant_text||'');if(current==='distillation')return x.conversation_id+'\n'+(x.evidence?.length||0)+' evidence turns';return x.snippet||x.content||x.summary||x.description||x.title||x.text||JSON.stringify(x)}
+function itemId(x){return x.id||x.memoryId||x.skillId||x.event_id||x.job_id||x.conversation_id}
+function render(data){payload=data;const items=values(data),cards=document.getElementById('cards'),total=data?.total??items.length;let html='<article><b>'+total+'</b><span>'+(lang==='zh'?'当前条目':'Current items')+'</span></article><article><b>'+items.filter(x=>x.status==='pending'||x.status==='resolving').length+'</b><span>Pending</span></article><article><b>'+items.filter(x=>x.status==='failed').length+'</b><span>Failed</span></article>';if(current==='distillation'&&data.config){html+='<article><b>'+(data.config.auto_enabled?'ON':'OFF')+'</b><span>Auto queue · '+data.config.turn_threshold+' turns / '+data.config.idle_minutes+' min idle</span><button class="soft" onclick="configureAuto()">Configure</button></article>'}cards.innerHTML=html;filter();}
+function filter(){const q=document.getElementById('filter').value.toLowerCase();const items=values(payload).filter(x=>JSON.stringify(x).toLowerCase().includes(q));window.visibleItems=items;document.getElementById('items').innerHTML=items.length?items.map((x,i)=>'<div class="row" onclick="openItem('+i+')"><div><h3>'+esc(x.title||x.kind||x.type||x.event_id||x.job_id||x.id||'Item')+'</h3><small>'+esc(x.status||x.host||x.sourceAgent||x.source||'')+'</small></div><p>'+esc(textOf(x))+'</p><small>'+esc(x.updatedAt||x.updated_at||x.createdAt||x.created_at||x.timestamp||itemId(x)||'')+'</small></div>').join(''):'<div class="empty">'+(lang==='zh'?'暂无内容':'No items')+'</div>'}
+function openItem(i){const x=window.visibleItems[i],id=itemId(x);let actions='';if(id&&current==='captures')actions='<div class="actions"><button class="soft" onclick="event.stopPropagation();act(\'queue-distillation\',\''+js(x.event_id)+'\')">Queue distillation</button></div>';if(id&&current==='distillation'&&x.status==='failed')actions='<div class="actions"><button class="soft" onclick="event.stopPropagation();act(\'retry-distillation\',\''+js(x.job_id)+'\')">Retry failed job</button></div>';if(id&&current==='memories')actions='<div class="actions"><button class="soft" onclick="event.stopPropagation();act(\'archive-memory\',\''+js(id)+'\')">Archive</button><button class="danger" onclick="event.stopPropagation();act(\'delete-memory\',\''+js(id)+'\')">Delete</button></div>';if(id&&current==='skills')actions='<div class="actions"><button class="soft" onclick="act(\'archive-skill\',\''+js(id)+'\')">Archive</button></div>';if(id&&current==='world-models')actions='<div class="actions"><button class="soft" onclick="act(\'archive-world-model\',\''+js(id)+'\')">Archive</button></div>';document.getElementById('drawer-body').innerHTML='<small>'+esc(current)+'</small><h2>'+esc(x.title||x.kind||x.event_id||x.job_id||x.id||'Detail')+'</h2><p>'+esc(textOf(x))+'</p>'+actions+'<h3>Metadata / Provenance</h3><pre>'+esc(JSON.stringify(x,null,2))+'</pre>';document.getElementById('drawer').classList.remove('hidden')}
 function closeDrawer(){document.getElementById('drawer').classList.add('hidden')}function js(s){return String(s).replace(/[\\']/g,'\\$&')}async function act(action,id){if(!confirm((lang==='zh'?'确认执行：':'Confirm action: ')+action+'?'))return;const r=await fetch('/memhub/admin/action',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action,id})});if(!r.ok){alert(await r.text());return}closeDrawer();load(current)}
-async function load(view){current=view;document.querySelectorAll('aside button').forEach(b=>b.classList.toggle('active',b.dataset.view===view));if(view==='accounts'){document.getElementById('account-panel').classList.remove('hidden');document.getElementById('data-panel').classList.add('hidden');return}document.getElementById('account-panel').classList.add('hidden');document.getElementById('data-panel').classList.remove('hidden');document.getElementById('view-title').textContent=titles[view][lang==='zh'?0:1];document.getElementById('view-desc').textContent=lang==='zh'?'来自本机 Memory Core 的账号隔离数据':'Account-scoped data from the local Memory Core';document.getElementById('items').innerHTML='<div class="empty">Loading…</div>';try{const r=await fetch('/memhub/admin/api?kind='+encodeURIComponent(view));if(!r.ok)throw Error(await r.text());render(await r.json())}catch(e){document.getElementById('items').innerHTML='<div class="empty">'+esc(String(e))+'</div>'}}
+async function configureAuto(){const c=payload.config||{},enabled=confirm(lang==='zh'?'确定=开启自动形成蒸馏待办；取消=关闭。不会由 Memhub 后端调用模型。':'OK enables automatic distillation job creation; Cancel disables it. Memhub itself will not call a model.');const t=Number(prompt('Turn threshold',String(c.turn_threshold||8))),idle=Number(prompt('Idle minutes',String(c.idle_minutes||30)));const r=await fetch('/memhub/admin/action',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'set-distillation-config',auto_enabled:enabled,turn_threshold:t,idle_minutes:idle})});if(!r.ok){alert(await r.text());return}load('distillation')}
+async function accountRole(id,role){if(!confirm((lang==='zh'?'确认账号权限改为 ':'Change account role to ')+role+'?'))return;const r=await fetch('/memhub/admin/action',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'set-account-role',id,role})});if(!r.ok){alert(await r.text());return}location.reload()}
+async function load(view){current=view;document.querySelectorAll('aside button').forEach(b=>b.classList.toggle('active',b.dataset.view===view));if(view==='accounts'){document.getElementById('account-panel').classList.remove('hidden');document.getElementById('data-panel').classList.add('hidden');return}document.getElementById('account-panel').classList.add('hidden');document.getElementById('data-panel').classList.remove('hidden');document.getElementById('view-title').textContent=titles[view][lang==='zh'?0:1];document.getElementById('view-desc').textContent=(view==='captures'||view==='distillation')?(lang==='zh'?'Memhub Capture / Evidence 层数据':'Memhub capture / evidence-layer data'):(lang==='zh'?'来自 Memory Core 的账号隔离数据':'Account-scoped data from Memory Core');document.getElementById('items').innerHTML='<div class="empty">Loading…</div>';try{const r=await fetch('/memhub/admin/api?kind='+encodeURIComponent(view));if(!r.ok)throw Error(await r.text());render(await r.json())}catch(e){document.getElementById('items').innerHTML='<div class="empty">'+esc(String(e))+'</div>'}}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 document.querySelectorAll('aside button').forEach(b=>b.onclick=()=>load(b.dataset.view));document.getElementById('filter').oninput=filter;document.getElementById('lang').onclick=()=>{lang=lang==='zh'?'en':'zh';localStorage.memhubLang=lang;tr();load(current)};tr();load('overview');
 `; }
@@ -924,6 +1224,21 @@ function stringArray(value: unknown): string[] | undefined {
     .map((item) => item.trim())
     .filter(Boolean);
   return values.length ? [...new Set(values)] : undefined;
+}
+
+function uniqueStrings(values: string[]): string[] | undefined {
+  const normalized = values.map((value) => value.trim()).filter(Boolean);
+  return normalized.length ? [...new Set(normalized)] : undefined;
+}
+
+function memoryResultId(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  for (const key of ["id", "memoryId", "skillId"] as const) {
+    const candidate = record[key];
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+  }
+  return undefined;
 }
 
 function optionalInteger(value: unknown): number | undefined {

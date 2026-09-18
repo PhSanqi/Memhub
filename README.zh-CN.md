@@ -89,7 +89,7 @@ B 项目
 
 模型执行层规划为三种模式：
 
-1. **Direct Provider**：服务器显式配置模型 API / provider，后台自动跑沉淀。
+1. **Direct Provider**：Memory Core 在明确配置模型 API / provider 时可运行其原生模型任务；Memhub 不偷偷配置或调用模型。
 2. **Harness Worker**：服务器不保存模型 API Key，已经登录的 Codex / Claude / 其他 Harness 通过 MCP 拉取 evolution job，生成结构化候选，再提交给 Memhub 校验并 commit。
 3. **Deferred / Local-only**：没有可用模型时，L1 和记忆检索仍正常，需要模型的高级沉淀保持 pending，等以后有执行器再跑。
 
@@ -103,13 +103,19 @@ B 项目
 
 - `memmy_context`：组合个人记忆、项目记忆和权威项目架构；
 - `memmy_remember`：显式长期记忆；
-- `memhub_distill`：提交由当前 Harness 真正提炼出的 Skill、项目/个人总结或整理知识，但不绕过原生 L2/L3 演化；
+- `memhub_distill`：领取待蒸馏 evidence，或提交/跳过由当前 Harness 真正判断出的 Skill、项目/个人总结或整理知识，但不绕过原生 L2/L3 演化；
 - `memhub_evolution`：让已登录的 Harness 领取并完成原生 L3 World Model 任务，最终 scope/evidence/hash 校验仍由 Memory Core 执行；
 - `memmy_project`：项目查询和绑定。
 
 工具名暂时保留 `memmy_` 是为了兼容已有客户端，产品和发行名称已经是 Memhub。
 
 自动 capture 不依赖模型每轮主动调用 MCP。Plugin/Hook 把 turn 交给本地 Bridge，Bridge 先落本地队列，再上传服务器；断网不会丢。
+
+但“连接了 MCP”本身不等于“自动拿到整个聊天”。当前仓库真正已经实现自动 Raw Capture 的是 Codex/OpenAI lifecycle hook adapter。ChatGPT Web 仅连接远程 MCP 时，Memhub 只能在 ChatGPT 实际调用工具时获得上下文或写入；当前仓库也还没有 Claude/Gemini 的 lifecycle capture overlay。
+
+管理界面位于 `/memhub` 和 `/memhub/admin`。本机或 SSH tunnel 访问使用独立 local-admin token；公网访问继续要求 Cloudflare Access JWT → stable `account_id` → role 校验。管理员可以手动把 Raw Capture 排入待蒸馏任务，也可以选择开启自动“形成待办”。自动蒸馏默认关闭，而且即使开启也只生成 evidence job，不会由 Memhub 后端自行调用大模型消耗额度。
+
+详细见 [Control Plane、Capture 与 Distillation](docs/CONTROL_PLANE_AND_DISTILLATION.md)。
 
 ## 源码安装
 

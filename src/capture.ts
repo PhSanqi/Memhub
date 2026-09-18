@@ -191,6 +191,42 @@ export async function countCaptureEvents(stateRoot: string): Promise<number> {
   return count;
 }
 
+export async function listCaptureEvents(
+  stateRoot: string,
+  accountIdRaw?: string
+): Promise<Array<StoredCaptureEvent & { ingested: boolean }>> {
+  const root = join(resolve(stateRoot), "captures");
+  const accountKey = accountIdRaw
+    ? createHash("sha256").update(accountIdRaw.trim(), "utf8").digest("hex")
+    : undefined;
+  const results: Array<StoredCaptureEvent & { ingested: boolean }> = [];
+  let accounts;
+  try {
+    accounts = await readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    throw error;
+  }
+  for (const account of accounts) {
+    if (!account.isDirectory() || (accountKey && account.name !== accountKey)) continue;
+    const dir = join(root, account.name);
+    for (const file of await readdir(dir, { withFileTypes: true })) {
+      if (!file.isFile() || !file.name.endsWith(".json")) continue;
+      const path = join(dir, file.name);
+      const event = normalizeStoredCapture(JSON.parse(await readFile(path, "utf8")) as unknown);
+      let ingested = false;
+      try {
+        await readFile(`${path}.ingested`, "utf8");
+        ingested = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+      }
+      results.push({ ...event, ingested });
+    }
+  }
+  return results.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+}
+
 function normalizeStoredCapture(value: unknown): StoredCaptureEvent {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("stored capture is invalid");
   const record = value as Record<string, unknown>;

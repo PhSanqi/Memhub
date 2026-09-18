@@ -135,10 +135,7 @@ async function preflight() {
 }
 
 async function verify() {
-  const manifestPath = resolve(args.manifest ?? args._?.[0] ?? "");
-  if (!manifestPath || !existsSync(manifestPath)) {
-    fail("verify requires --manifest <manifest.json>");
-  }
+  const manifestPath = await resolveManifestPath("verify");
   requireFile(dbPath, "Memory database");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   if (manifest.format !== "memhub-core-migration-v2") {
@@ -189,10 +186,7 @@ async function verify() {
 }
 
 async function preserved() {
-  const manifestPath = resolve(args.manifest ?? args._?.[0] ?? "");
-  if (!manifestPath || !existsSync(manifestPath)) {
-    fail("preserved requires --manifest <manifest.json>");
-  }
+  const manifestPath = await resolveManifestPath("preserved");
   requireFile(dbPath, "Memory database");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   if (manifest.format !== "memhub-core-migration-v2") {
@@ -458,6 +452,31 @@ function quoteId(value) {
 
 function requireFile(path, label) {
   if (!existsSync(path)) fail(`${label} is missing`, { path });
+}
+
+async function resolveManifestPath(commandName) {
+  const explicit = args.manifest ?? args._?.[0];
+  if (explicit) {
+    const path = resolve(explicit);
+    if (!existsSync(path) || !(await stat(path)).isFile()) {
+      fail(`${commandName} manifest is missing or not a file`, { path });
+    }
+    return path;
+  }
+  let entries;
+  try {
+    entries = await readdir(migrationRoot, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      fail(`${commandName} requires a migration baseline; run preflight first`, { migrationRoot });
+    }
+    throw error;
+  }
+  for (const entry of entries.filter((item) => item.isDirectory()).sort((a, b) => b.name.localeCompare(a.name))) {
+    const candidate = join(migrationRoot, entry.name, "manifest.json");
+    if (existsSync(candidate) && (await stat(candidate)).isFile()) return candidate;
+  }
+  fail(`${commandName} requires a migration baseline; run preflight first`, { migrationRoot });
 }
 
 function parseArgs(values) {

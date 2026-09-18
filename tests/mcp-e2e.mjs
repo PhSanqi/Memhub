@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -8,7 +8,15 @@ import { fileURLToPath } from "node:url";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { MemhubBridgeQueue, saveBridgeConfig } from "../dist/bridge.js";
-import { createDevice, countCaptureEvents } from "../dist/capture.js";
+import { addAccount, ensureLocalAdminToken, setAccountRole } from "../dist/auth.js";
+import { createDevice, countCaptureEvents, listCaptureEvents } from "../dist/capture.js";
+import {
+  enqueueDistillationJob,
+  failDistillationJob,
+  leaseDistillationJob,
+  listDistillationJobs,
+  retryDistillationJob
+} from "../dist/distillation-jobs.js";
 
 const here = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const mcpEntry = resolve(here, "../dist/mcp.js");
@@ -108,6 +116,7 @@ const memoryPort = memory.address().port;
 try {
   await testStdio(memoryPort);
   await testHttp(memoryPort);
+  await testLocalAdmin(memoryPort);
   await testBridgeMcpProxy();
   console.log("memhub-mcp-e2e: ok");
 } finally {
@@ -171,6 +180,70 @@ async function testBridgeMcpProxy() {
     });
     await new Promise((resolveClose) => upstream.close(resolveClose));
   }
+}
+
+async function testLocalAdmin(memoryPort) {
+  const port = await freePort();
+  const stateRoot = join(root, "local-admin");
+  const account = await addAccount(stateRoot, "admin-test", "admin@example.com");
+  await setAccountRole(stateRoot, account.account_id, "admin");
+  const token = await ensureLocalAdminToken(stateRoot);
+  const child = spawn(process.execPath, [
+    mcpEntry,
+    "--http", String(port),
+    "--account", account.account_id,
+    "--memory-url", `http://127.0.0.1:${memoryPort}`,
+    "--state-root", stateRoot,
+    "--bindings", join(root, "local-admin-bindings.json"),
+    "--public-host", "memhub.example.test",
+    "--no-normify"
+  ], { env: { ...process.env }, stdio: ["ignore", "pipe", "pipe"] });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (data) => { stderr += data; });
+  try {
+    const deadline = Date.now() + 5_000;
+    while (!stderr.includes("listening on http://127.0.0.1:") && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    const anonymous = await fetch(`http://127.0.0.1:${port}/memhub/admin`);
+    assert.equal(anonymous.status, 401);
+    assert.match(anonymous.headers.get("www-authenticate") ?? "", /Memhub local admin/);
+    const authorization = `Basic ${Buffer.from(`memhub:${token}`).toString("base64")}`;
+    const authenticated = await fetch(`http://127.0.0.1:${port}/memhub/admin`, { headers: { authorization } });
+    assert.equal(authenticated.status, 200);
+    assert.match(await authenticated.text(), /Local token \+ loopback Host/);
+    const tunnelLike = await fetch(`http://127.0.0.1:${port}/memhub/admin`, {
+      headers: { authorization, "cf-ray": "test-ray" }
+    });
+    assert.equal(tunnelLike.status, 401);
+    assert.match(await tunnelLike.text(), /Cloudflare Access authentication required/);
+    const publicHostWithLocalToken = await rawHttp(port, "/memhub/admin", {
+      authorization,
+      host: "memhub.example.test"
+    });
+    assert.equal(publicHostWithLocalToken.status, 401);
+    assert.match(publicHostWithLocalToken.body, /Cloudflare Access authentication required/);
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise((resolveExit) => {
+      child.once("exit", resolveExit);
+      setTimeout(resolveExit, 500);
+    });
+  }
+}
+
+function rawHttp(port, path, headers = {}) {
+  return new Promise((resolvePromise, reject) => {
+    const request = httpRequest({ hostname: "127.0.0.1", port, path, method: "GET", headers }, (response) => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => { body += chunk; });
+      response.on("end", () => resolvePromise({ status: response.statusCode, headers: response.headers, body }));
+    });
+    request.once("error", reject);
+    request.end();
+  });
 }
 
 async function testStdio(memoryPort) {
@@ -306,6 +379,72 @@ async function testHttp(memoryPort) {
       requests.filter((entry) => entry.url?.startsWith("/api/v1/turns/") && entry.url.endsWith("/complete")).length,
       completeBeforePartial + 1
     );
+
+    assert.equal((await listDistillationJobs(stateRoot, "acct-test")).length, 0);
+    const capturesForDistillation = await listCaptureEvents(stateRoot, "acct-test");
+    const queued = await enqueueDistillationJob({
+      stateRoot,
+      accountId: "acct-test",
+      projectId: "aide",
+      conversationId: "partial-conversation",
+      captures: capturesForDistillation.filter((item) => item.conversation_id === "partial-conversation" && item.ingested),
+      reason: "manual"
+    });
+    assert.equal(queued.created, true);
+    const distillClient = new Client({ name: "memhub-distill-job-test", version: "1.0.0" });
+    const distillTransport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`));
+    try {
+      await distillClient.connect(distillTransport);
+      const next = await distillClient.callTool({
+        name: "memhub_distill",
+        arguments: { action: "next", scope: "project", project: "aide", source_harness: "test-harness" }
+      });
+      const nextPayload = JSON.parse(next.content[0].text);
+      assert.equal(nextPayload.job.job_id, queued.job.job_id);
+      assert.equal(nextPayload.job.evidence.length, 1);
+      assert.equal(nextPayload.job.evidence[0].user_text, "user side only");
+      const skipped = await distillClient.callTool({
+        name: "memhub_distill",
+        arguments: { action: "skip", job_id: queued.job.job_id }
+      });
+      assert.equal(JSON.parse(skipped.content[0].text).skipped, true);
+    } finally {
+      await distillClient.close();
+    }
+    const completedJob = (await listDistillationJobs(stateRoot, "acct-test")).find((item) => item.job_id === queued.job.job_id);
+    assert.equal(completedJob.status, "completed");
+    assert.equal(completedJob.result_kind, "noop");
+
+    const retrySource = capturesForDistillation.filter((item) => item.conversation_id === "capture-conversation" && item.ingested);
+    const retryQueued = await enqueueDistillationJob({
+      stateRoot,
+      accountId: "acct-test",
+      projectId: "aide",
+      conversationId: "capture-conversation",
+      captures: retrySource,
+      reason: "manual"
+    });
+    const retryLeased = await leaseDistillationJob(stateRoot, "acct-test", { projectId: "aide", harness: "retry-test" });
+    assert.equal(retryLeased.job_id, retryQueued.job.job_id);
+    assert.equal(retryLeased.attempts, 1);
+    await failDistillationJob(stateRoot, "acct-test", retryLeased.job_id, "simulated commit failure");
+    const failedJob = (await listDistillationJobs(stateRoot, "acct-test")).find((item) => item.job_id === retryLeased.job_id);
+    assert.equal(failedJob.status, "failed");
+    assert.match(failedJob.failure, /simulated commit failure/);
+    const duplicateAfterFailure = await enqueueDistillationJob({
+      stateRoot,
+      accountId: "acct-test",
+      projectId: "aide",
+      conversationId: "capture-conversation",
+      captures: retrySource,
+      reason: "manual"
+    });
+    assert.equal(duplicateAfterFailure.created, false);
+    assert.equal(duplicateAfterFailure.job.job_id, retryLeased.job_id);
+    const retried = await retryDistillationJob(stateRoot, "acct-test", retryLeased.job_id);
+    assert.equal(retried.status, "pending");
+    assert.equal(retried.evidence_hash, retryLeased.evidence_hash);
+    assert.equal(retried.failure, undefined);
 
     const bridgeRoot = join(root, "bridge");
     const queue = new MemhubBridgeQueue(bridgeRoot);

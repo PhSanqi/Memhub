@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
@@ -62,6 +62,34 @@ export async function setAccountRole(
     entry[1].role = role;
     await save(stateRoot, data);
   });
+}
+
+export async function ensureLocalAdminToken(stateRoot: string, rotate = false): Promise<string> {
+  const path = join(resolve(stateRoot), "local-admin-token");
+  if (!rotate) {
+    try {
+      const current = (await readFile(path, "utf8")).trim();
+      if (/^mhlocal_[A-Za-z0-9_-]{32,}$/.test(current)) return current;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+    }
+  }
+  const token = `mhlocal_${randomBytes(32).toString("base64url")}`;
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  await writeFile(temporary, token + "\n", { mode: 0o600 });
+  await rename(temporary, path);
+  return token;
+}
+
+export async function verifyLocalAdminToken(stateRoot: string, candidateRaw: string | undefined): Promise<boolean> {
+  if (!candidateRaw) return false;
+  let expected: string;
+  try { expected = (await readFile(join(resolve(stateRoot), "local-admin-token"), "utf8")).trim(); }
+  catch { return false; }
+  const left = Buffer.from(expected, "utf8");
+  const right = Buffer.from(candidateRaw.trim(), "utf8");
+  return left.length === right.length && timingSafeEqual(left, right);
 }
 
 export async function addAccount(

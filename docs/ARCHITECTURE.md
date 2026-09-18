@@ -15,7 +15,7 @@ that later distills them.
 - provenance: source platform/transport/principal/account/conversation/evidence.
 - distillation: the connected ChatGPT/Codex/Claude/DSH model performs
   semantic distillation. Memhub supplies the contract, evidence boundary,
-  schema validation, provenance and commit rules.
+  optional evidence jobs, schema validation, provenance and commit rules.
 - controlplane: inspection and governance; destructive administration stays
   out of the default five-tool MCP surface.
 
@@ -32,6 +32,13 @@ contract version with committed artifacts.
 
 Memhub intentionally does not require its own LLM API for semantic
 distillation. The connected MCP/harness model does that work.
+
+Distillation jobs are Memhub control-state, not a replacement evolution
+engine. Automatic job creation is opt-in and only forms evidence batches at a
+turn threshold or after conversation idle time; it never invokes a model. A
+Harness leases the evidence and explicitly submits a durable candidate or marks
+the batch as `noop`. Memory Core remains the owner of native Episode, L2, Skill
+and L3 lifecycle processing.
 
 ## Embedded-core consolidation
 

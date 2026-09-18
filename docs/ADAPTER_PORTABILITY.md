@@ -33,6 +33,7 @@ The model-visible tool contract stays stable:
 - `memmy_context`
 - `memmy_remember`
 - `memhub_distill`
+- `memhub_evolution`
 - `memmy_project`
 
 Tool names are compatibility contracts and are intentionally independent from the product/package name.
@@ -88,20 +89,16 @@ Capabilities:
 - deterministic capture and context injection;
 - richer device/runtime telemetry without scraping logs.
 
-## Current host strategy
+## Current implementation versus target
 
-| Host family | MCP | Installable plugin/extension | Lifecycle hooks suitable for capture | Memhub target |
-| --- | --- | --- | --- | --- |
-| ChatGPT hosted chat | Remote MCP/plugin-backed tools | Yes on supported surfaces | Hosted lifecycle is not a local hook surface | Level 0/1 |
-| Codex CLI / ChatGPT Work runtime | stdio + Streamable HTTP MCP | Agent Plugins / OpenAI plugins | Yes | Level 2 |
-| Claude Code | stdio + HTTP MCP | Claude-specific packaging/config | Yes, host-specific | Level 2 |
-| Gemini CLI | stdio + HTTP MCP | Gemini extensions | Yes | Level 2 |
-| VS Code | Agent Plugins MCP | Agent Plugins | Client-dependent | Level 1 first |
-| Cursor | Agent Plugins MCP | Agent Plugins | Client-dependent | Level 1 first |
-| GitHub Copilot | Agent Plugins MCP | Agent Plugins | Client-dependent | Level 1 first |
-| Kiro | Agent Plugins MCP | Agent Plugins | Client-dependent | Level 1 first |
-| Hermes / OpenClaw / similar | Agent Plugins MCP | Agent Plugins where supported | Client-dependent | Level 1 first |
-| CoWorker | native tool/plugin surface | Native | Native | Level 3 |
+| Host family | Current checked-in integration | Automatic raw capture now | Target |
+| --- | --- | --- | --- |
+| ChatGPT hosted chat | Remote MCP tools | No passive full-conversation capture | Level 0/1 unless a real host lifecycle API becomes available |
+| Codex/OpenAI hook-compatible harness | portable MCP plugin + `UserPromptSubmit`/`Stop` hooks | Yes | Level 2 |
+| Claude Code | MCP only in this repository | No checked-in capture adapter | Level 2 host overlay |
+| Gemini CLI | MCP only in this repository | No checked-in capture adapter | Level 2 host overlay |
+| VS Code / Cursor / Copilot / Kiro | MCP/plugin portability work only | Client-dependent; not implemented here | Level 1 first |
+| CoWorker | no checked-in Memhub native adapter in this repository | No | Level 3 native adapter |
 
 ## Capture belongs to the adapter, not to the LLM
 
@@ -120,10 +117,10 @@ local bridge queue
 capture API
        |
        v
-server/local distillation pipeline
+raw capture + Memory Core turn ingestion
 ```
 
-The first capture protocol supports monotonic fragments. Adapters that receive `UserPromptSubmit` and `Stop`/`AfterAgent` separately may emit both lifecycle fragments using the same stable `event_id`; the Bridge/Server fills only missing fields and rejects conflicting rewrites. Distillation begins only after both `user_text` and `assistant_text` are present.
+The first capture protocol supports monotonic fragments. Adapters that receive `UserPromptSubmit` and `Stop`/`AfterAgent` separately may emit both lifecycle fragments using the same stable `event_id`; the Bridge/Server fills only missing fields and rejects conflicting rewrites. Memory Core turn ingestion begins only after both `user_text` and `assistant_text` are present. Semantic distillation is a later, separate Harness job.
 
 The MCP tool `memmy_remember` remains useful for explicit semantic memory decisions, but it is not the primary transport for raw conversation history.
 

@@ -81,13 +81,28 @@ The current high-level MCP surface is intentionally small:
 
 - `memmy_context` — composed account/project memory plus authoritative project architecture;
 - `memmy_remember` — explicit durable memory;
-- `memhub_distill` — submit a Harness-produced Skill, scoped summary, or curated knowledge artifact without bypassing native L2/L3 evolution;
+- `memhub_distill` — lease pending evidence or submit/skip a Harness-produced Skill, scoped summary, or curated knowledge artifact without bypassing native L2/L3 evolution;
 - `memhub_evolution` — lease and complete native L3 World Model jobs with an already-authenticated Harness while Memory Core retains scope/evidence/hash validation;
 - `memmy_project` — project listing/binding.
 
 The tool names retain `memmy_` temporarily for compatibility. The product and distribution are Memhub.
 
 Background capture is separate from MCP. A host plugin/hook sends complete or partial turns to the local Bridge; the Bridge queues them durably and uploads them when connectivity is available.
+
+Automatic capture is a host capability, not an MCP side effect. The checked-in
+Codex/OpenAI hook adapter captures complete turns automatically. A plain hosted
+ChatGPT MCP connection does not passively stream the full conversation to
+Memhub, and the repository does not yet contain Claude/Gemini lifecycle capture
+overlays.
+
+The browser Control Plane is available at `/memhub` and `/memhub/admin`.
+Loopback administration uses a separate local-admin token; public administration
+continues to require Cloudflare Access identity plus the stable Memhub account
+role. Distillation evidence can be queued manually, while optional automatic
+job creation is disabled by default and never invokes a model itself.
+
+See [Control Plane, capture and distillation](docs/CONTROL_PLANE_AND_DISTILLATION.md)
+and [remote authentication](docs/REMOTE_AUTH.md).
 
 ## Install from source
 
