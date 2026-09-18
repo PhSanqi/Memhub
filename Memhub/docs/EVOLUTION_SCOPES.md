@@ -73,13 +73,27 @@ Memhub
 
 A harness worker may create memory/evolution candidates. It must not directly overwrite authoritative Normify architecture.
 
+### Harness distillation available now
+
+`memhub_distill` is the first implemented Harness-assisted path. It accepts an explicitly scoped artifact produced by an already-authenticated Harness:
+
+- `skill` -> Memory `Skill`, read-only from the native evolution pipeline's perspective;
+- `summary` -> curated L1 memory;
+- `knowledge` -> curated L1 memory.
+
+Global/project scope must be explicit. A project Skill is stored with that `projectId` and cannot merge into account-level or another project's native Skill evolution.
+
+Curated summaries and knowledge deliberately remain L1. They are not mislabeled as L2 policy or L3 World Model output.
+
+The next Harness-worker phase is the L3 lease/candidate/commit protocol below, which will reuse the existing L3 batch target hashes and evidence ownership checks instead of allowing arbitrary L3 writes.
+
 ### Deferred executor
 
 When no model executor is available, L1 capture and retrieval remain functional. Model-dependent jobs stay pending and can be processed later.
 
 ## Planned MCP worker surface
 
-The intended worker-oriented surface is separate from normal recall tools:
+The intended L3 worker-oriented surface is separate from normal recall/distillation tools:
 
 - `memhub_evolution_next` — lease one scoped pending job;
 - `memhub_evolution_submit` — submit a structured candidate;

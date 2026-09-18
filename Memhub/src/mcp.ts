@@ -124,6 +124,76 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime): McpServ
     return jsonResult({ ok: true, scope, project: projectId, memory: result });
   });
 
+  server.registerTool("memhub_distill", {
+    description: "提交由当前 Harness 提炼出的结构化沉淀。Skill 可写账号级或单项目级；summary/knowledge 作为 curated memory 保存，不会绕过原生 L2/L3 evolution。",
+    inputSchema: fromJsonSchema<Record<string, unknown>>({
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["skill", "summary", "knowledge"], description: "沉淀产物类型" },
+        content: { type: "string", description: "完整沉淀内容；Skill 应包含何时调用、步骤与边界" },
+        scope: { type: "string", enum: ["global", "project"], description: "账号级或项目级；必须明确" },
+        project: { type: "string", description: "project scope 的明确项目 slug" },
+        conversation_id: { type: "string", description: "可继承已绑定项目；不会跨项目猜测" },
+        title: { type: "string", description: "产物标题；Skill 必填，作为 Skill 名称" },
+        tags: { type: "array", items: { type: "string" } },
+        source_harness: { type: "string", description: "产生该沉淀的 Harness，例如 codex / claude-code" },
+        artifact_id: { type: "string", description: "Harness 侧稳定产物 ID；用于幂等重试" },
+        version: { type: "string", description: "Harness 侧产物版本；主要用于 Skill" }
+      },
+      required: ["kind", "content", "scope"],
+      additionalProperties: false
+    } as JsonSchemaType)
+  }, async (args) => {
+    const kind = requiredString(args.kind, "kind");
+    if (kind !== "skill" && kind !== "summary" && kind !== "knowledge") {
+      throw new TypeError("kind must be skill, summary, or knowledge");
+    }
+    const scope = requiredString(args.scope, "scope");
+    if (scope !== "global" && scope !== "project") {
+      throw new TypeError("scope must be global or project");
+    }
+    const title = optionalString(args.title);
+    if (kind === "skill" && !title) throw new TypeError("title is required for skill distillation");
+    const conversationId = optionalString(args.conversation_id);
+    let projectId = optionalString(args.project) ?? null;
+    if (scope === "project" && projectId === null && conversationId) {
+      projectId = await runtime.router.currentProject(runtime.accountId, conversationId);
+    }
+    if (scope === "project" && projectId === null) {
+      throw new Error("project-scoped distillation requires an explicit or conversation-bound project");
+    }
+    if (scope === "global") projectId = null;
+    if (projectId) {
+      const projects = await runtime.router.listProjects(runtime.accountId);
+      if (projects.length > 0 && !projects.includes(projectId)) {
+        throw new Error(`unknown project for account: ${projectId}`);
+      }
+    }
+    const sourceHarness = optionalString(args.source_harness) ?? "mcp-harness";
+    const result = await runtime.memory.distill({
+      accountId: runtime.accountId,
+      userId: runtime.userId,
+      kind,
+      content: requiredString(args.content, "content"),
+      projectId,
+      conversationId,
+      title,
+      tags: stringArray(args.tags),
+      sourceHarness,
+      artifactId: optionalString(args.artifact_id),
+      version: optionalString(args.version)
+    });
+    return jsonResult({
+      ok: true,
+      kind,
+      scope,
+      project: projectId,
+      sourceHarness,
+      nativeEvolution: false,
+      memory: result
+    });
+  });
+
   server.registerTool("memmy_project", {
     description: "列出、查看、绑定或解除当前会话项目，也可读取 Normify 权威项目架构。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({

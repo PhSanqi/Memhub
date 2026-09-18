@@ -29,6 +29,8 @@ export interface ContextMemorySource {
   }): Promise<unknown>;
 }
 
+export type DistilledArtifactKind = "skill" | "summary" | "knowledge";
+
 export class MemoryRestContextSource implements ContextMemorySource {
   constructor(private readonly client: LocalMemoryRestClient) {}
 
@@ -75,6 +77,53 @@ export class MemoryRestContextSource implements ContextMemorySource {
         ...(input.projectId ? [`project:${input.projectId}`] : ["global"]),
         ...(input.tags ?? [])
       ])
+    };
+    return this.client.addMemory(request);
+  }
+
+  distill(input: {
+    accountId: string;
+    userId: string;
+    kind: DistilledArtifactKind;
+    content: string;
+    projectId: string | null;
+    conversationId?: string;
+    title?: string;
+    tags?: string[];
+    sourceHarness: string;
+    artifactId?: string;
+    version?: string;
+  }): Promise<unknown> {
+    const namespace = namespaceFor(input, input.projectId);
+    const skill = input.kind === "skill";
+    const sourceHarness = requireNonEmpty(input.sourceHarness, "sourceHarness");
+    const stableArtifactId = input.artifactId?.trim() || stableDistillId(input);
+    const request = {
+      requestId: stableRequestId("distill", [
+        input.accountId,
+        input.projectId ?? "global",
+        input.kind,
+        sourceHarness,
+        stableArtifactId
+      ]),
+      adapterId: "memhub-distill",
+      namespace,
+      source: `memhub:${sourceHarness}`,
+      content: input.content,
+      title: input.title,
+      layer: skill ? "Skill" : "L1",
+      tags: unique([
+        "memhub",
+        "distilled",
+        `artifact:${input.kind}`,
+        ...(input.projectId ? [`project:${input.projectId}`] : ["global"]),
+        ...(input.tags ?? [])
+      ]),
+      ...(skill ? {
+        sourceAgentId: sourceHarness,
+        sourceSkillId: stableArtifactId,
+        ...(input.version?.trim() ? { sourceSkillVersion: input.version.trim() } : {})
+      } : {})
     };
     return this.client.addMemory(request);
   }
@@ -169,4 +218,22 @@ function requireNonEmpty(value: string, field: string): string {
   const normalized = value.trim();
   if (!normalized) throw new TypeError(`${field} must be non-empty`);
   return normalized;
+}
+
+function stableDistillId(input: {
+  kind: DistilledArtifactKind;
+  title?: string;
+  content: string;
+}): string {
+  return `distill_${createHash("sha256")
+    .update([input.kind, input.title?.trim() ?? "", input.content.trim()].join("\u0000"), "utf8")
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
+function stableRequestId(prefix: string, parts: readonly string[]): string {
+  return `${prefix}_${createHash("sha256")
+    .update(parts.join("\u0000"), "utf8")
+    .digest("hex")
+    .slice(0, 40)}`;
 }

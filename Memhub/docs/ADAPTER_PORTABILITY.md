@@ -32,6 +32,7 @@ The model-visible tool contract stays stable:
 
 - `memmy_context`
 - `memmy_remember`
+- `memhub_distill`
 - `memmy_project`
 
 Tool names are compatibility contracts and are intentionally independent from the product/package name.

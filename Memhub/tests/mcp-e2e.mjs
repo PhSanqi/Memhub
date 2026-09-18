@@ -30,6 +30,7 @@ const memory = createServer(async (request, response) => {
     return;
   }
   if (request.url === "/api/v1/memory/add") {
+    if (!acceptIdempotent(body, "memory.add", response)) return;
     response.end(JSON.stringify({ id: "new-memory", status: "activated" }));
     return;
   }
@@ -310,7 +311,7 @@ async function testHttp(memoryPort) {
       try {
         await bridgeClient.connect(bridgeTransport);
         const bridgeTools = await bridgeClient.listTools();
-        assert.deepEqual(bridgeTools.tools.map((tool) => tool.name).sort(), ["memmy_context", "memmy_project", "memmy_remember"]);
+        assert.deepEqual(bridgeTools.tools.map((tool) => tool.name).sort(), ["memhub_distill", "memmy_context", "memmy_project", "memmy_remember"]);
         const bridgeContext = await bridgeClient.callTool({
           name: "memmy_context",
           arguments: { query: "continue through local bridge", project: "aide", conversation_id: "bridge-proxy-chat" }
@@ -352,7 +353,7 @@ function acceptIdempotent(body, operation, response) {
 
 async function exerciseClient(client, conversationId) {
   const listed = await client.listTools();
-  assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["memmy_context", "memmy_project", "memmy_remember"]);
+  assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["memhub_distill", "memmy_context", "memmy_project", "memmy_remember"]);
   await client.callTool({ name: "memmy_project", arguments: { action: "bind", conversation_id: conversationId, project: "aide" } });
   const context = await client.callTool({ name: "memmy_context", arguments: { query: "continue", conversation_id: conversationId } });
   const capsule = JSON.parse(context.content[0].text);
@@ -363,6 +364,51 @@ async function exerciseClient(client, conversationId) {
   const lastWrite = [...requests].reverse().find((entry) => entry.url === "/api/v1/memory/add");
   assert.equal(lastWrite.body.namespace.projectId, "aide");
   assert.equal(lastWrite.body.namespace.tenantId, "acct-test");
+
+  await client.callTool({
+    name: "memhub_distill",
+    arguments: {
+      kind: "skill",
+      scope: "project",
+      conversation_id: conversationId,
+      title: "AIDE reconnect workflow",
+      content: "Use this when AIDE reconnect fails. Inspect state, repair the bridge, then verify reconnection.",
+      source_harness: "codex",
+      artifact_id: "aide-reconnect-v1",
+      version: "1"
+    }
+  });
+  const skillWrite = [...requests].reverse().find((entry) => entry.url === "/api/v1/memory/add");
+  assert.equal(skillWrite.body.layer, "Skill");
+  assert.equal(skillWrite.body.namespace.projectId, "aide");
+  assert.equal(skillWrite.body.namespace.tenantId, "acct-test");
+  assert.equal(skillWrite.body.sourceAgentId, "codex");
+  assert.equal(skillWrite.body.sourceSkillId, "aide-reconnect-v1");
+  assert.equal(skillWrite.body.sourceSkillVersion, "1");
+  assert.ok(skillWrite.body.tags.includes("artifact:skill"));
+  assert.ok(skillWrite.body.tags.includes("project:aide"));
+  assert.equal(typeof skillWrite.body.requestId, "string");
+
+  const summaryArgs = {
+    kind: "summary",
+    scope: "global",
+    title: `Cross-project working style ${conversationId}`,
+    content: "Prefer one shared private memory service with project isolation.",
+    source_harness: "codex",
+    artifact_id: `working-style-${conversationId}`
+  };
+  await client.callTool({ name: "memhub_distill", arguments: summaryArgs });
+  await client.callTool({ name: "memhub_distill", arguments: summaryArgs });
+  const summaryWrites = requests.filter((entry) =>
+    entry.url === "/api/v1/memory/add" &&
+    entry.body?.sourceSkillId === undefined &&
+    entry.body?.title === `Cross-project working style ${conversationId}`
+  );
+  assert.equal(summaryWrites.length, 2);
+  assert.equal(summaryWrites.at(-1).body.layer, "L1");
+  assert.equal(summaryWrites.at(-1).body.namespace.projectId, undefined);
+  assert.ok(summaryWrites.at(-1).body.tags.includes("artifact:summary"));
+  assert.equal(summaryWrites.at(-1).body.requestId, summaryWrites.at(-2).body.requestId);
 }
 
 function hit(id, snippet) {

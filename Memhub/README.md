@@ -39,6 +39,10 @@ If a unique project cannot be resolved, project memory is not returned.
 
 Stores an explicit durable fact/decision. `scope=project` requires either an explicit project or an existing conversation-to-project binding.
 
+### `memhub_distill`
+
+Stores a reusable artifact produced by an already-authenticated AI Harness. `kind=skill` is written as a real Memory `Skill`; `summary` and `knowledge` are curated L1 memories so they remain useful without pretending to be native L2 policy or L3 World Model output. Scope must be explicitly `global` or `project`, and project artifacts remain project-owned.
+
 ### `memmy_project`
 
 Lists projects, inspects/binds/unbinds the current conversation project, and reads the authoritative Normify architecture brief.
