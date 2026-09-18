@@ -26,6 +26,11 @@ export interface ContextMemorySource {
     conversationId?: string;
     title?: string;
     tags?: string[];
+    provenance?: Record<string, string | undefined>;
+    evidenceRefs?: string[];
+    sourceConversations?: string[];
+    confidence?: number;
+    contractVersion?: string;
   }): Promise<unknown>;
 }
 
@@ -63,17 +68,19 @@ export class MemoryRestContextSource implements ContextMemorySource {
     conversationId?: string;
     title?: string;
     tags?: string[];
+    provenance?: Record<string, string | undefined>;
   }): Promise<unknown> {
     const namespace = namespaceFor(input, input.projectId);
     const request = {
       adapterId: "memhub",
       namespace,
-      source: namespace.source,
+      source: provenanceSource(input.provenance),
       content: input.content,
       title: input.title,
       layer: "L1",
       tags: unique([
         "memhub",
+        ...provenanceTags(input.provenance),
         ...(input.projectId ? [`project:${input.projectId}`] : ["global"]),
         ...(input.tags ?? [])
       ])
@@ -93,6 +100,11 @@ export class MemoryRestContextSource implements ContextMemorySource {
     sourceHarness: string;
     artifactId?: string;
     version?: string;
+    provenance?: Record<string, string | undefined>;
+    evidenceRefs?: string[];
+    sourceConversations?: string[];
+    confidence?: number;
+    contractVersion?: string;
   }): Promise<unknown> {
     const namespace = namespaceFor(input, input.projectId);
     const skill = input.kind === "skill";
@@ -108,13 +120,18 @@ export class MemoryRestContextSource implements ContextMemorySource {
       ]),
       adapterId: "memhub-distill",
       namespace,
-      source: `memhub:${sourceHarness}`,
+      source: `memhub:${sourceHarness}:${provenanceSource(input.provenance)}`,
       content: input.content,
       title: input.title,
       layer: skill ? "Skill" : "L1",
       tags: unique([
         "memhub",
         "distilled",
+        ...(input.contractVersion ? [`distill-contract:${input.contractVersion}`] : []),
+        ...(input.confidence !== undefined ? [`confidence:${input.confidence}`] : []),
+        ...(input.evidenceRefs ?? []).map((ref) => `evidence:${ref}`),
+        ...(input.sourceConversations ?? []).map((ref) => `source-conversation:${ref}`),
+        ...provenanceTags(input.provenance),
         `artifact:${input.kind}`,
         ...(input.projectId ? [`project:${input.projectId}`] : ["global"]),
         ...(input.tags ?? [])
@@ -151,6 +168,19 @@ export class MemoryRestContextSource implements ContextMemorySource {
     };
     return this.client.search(request);
   }
+}
+
+function provenanceTags(provenance?: Record<string, string | undefined>): string[] {
+  if (!provenance) return [];
+  return Object.entries(provenance)
+    .filter((entry): entry is [string, string] => Boolean(entry[1]?.trim()))
+    .map(([key, value]) => `provenance:${key}:${value.trim()}`);
+}
+
+function provenanceSource(provenance?: Record<string, string | undefined>): string {
+  const platform = provenance?.platform?.trim() || "unknown";
+  const transport = provenance?.transport?.trim() || "unknown";
+  return `memhub:${platform}:${transport}`;
 }
 
 export function defaultMemoryUserId(accountId: string, ownerAccountId?: string, ownerUserId = "local-user"): string {

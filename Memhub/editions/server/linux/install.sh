@@ -17,9 +17,9 @@ PUBLIC_HOST="${MEMHUB_PUBLIC_HOST:-}"
 [[ -n "$NODE" ]] || { echo "Node.js 20+ is required" >&2; exit 2; }
 [[ -n "$NPM" ]] || { echo "npm is required" >&2; exit 2; }
 
-if [[ ! -f "$REPO_ROOT/Memory/dist/src/server/index.js" || ! -f "$REPO_ROOT/Memhub/dist/mcp.js" ]]; then
+if [[ ! -f "$REPO_ROOT/Memhub/vendor/memory-core/src/server/index.js" || ! -f "$REPO_ROOT/Memhub/dist/mcp.js" ]]; then
   echo "[memhub] build output missing; installing/building required workspaces"
-  (cd "$REPO_ROOT" && npm install --legacy-peer-deps && npm run build:headless -w @memmy/memory && npm --prefix Memhub run build --workspaces=false)
+  (cd "$REPO_ROOT" && npm install --legacy-peer-deps && npm --prefix Memhub run build --workspaces=false)
 fi
 
 mkdir -p "$STATE_ROOT" "$SERVER_STATE" "$MEMORY_DIR" "$HOME/.config/systemd/user"
@@ -60,19 +60,21 @@ MEMHUB_MEMORY_TOKEN=$MEMORY_TOKEN
 MEMHUB_MEMORY_URL=http://127.0.0.1:18960
 MEMHUB_STATE_ROOT=$SERVER_STATE
 MEMHUB_BINDINGS=$STATE_ROOT/conversation-project-bindings.json
-MEMHUB_NORMIFY=0
+MEMHUB_NORMIFY_ROOT=$REPO_ROOT/..
+MEMHUB_ARCHITECTURE_CORE=embedded
 EOF_ENV
 if [[ -n "$PUBLIC_HOST" ]]; then printf 'MEMHUB_PUBLIC_HOST=%s\n' "$PUBLIC_HOST" >> "$ENV_PATH"; fi
 chmod 600 "$ENV_PATH"
 
-cat > "$HOME/.config/systemd/user/memhub-memory.service" <<EOF_UNIT
+cat > "$HOME/.config/systemd/user/memhub-core.service" <<EOF_UNIT
 [Unit]
-Description=Memhub Server Memory Core
+Description=Memhub Embedded Memory Core
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=$NODE $REPO_ROOT/Memory/dist/src/server/index.js --config $CONFIG_PATH --host 127.0.0.1 --port 18960 --db $MEMORY_DIR/memory.sqlite
+WorkingDirectory=$REPO_ROOT/Memhub
+ExecStart=$NODE $REPO_ROOT/Memhub/vendor/memory-core/src/server/index.js --config $CONFIG_PATH --host 127.0.0.1 --port 18960 --db $MEMORY_DIR/memory.sqlite
 Restart=on-failure
 RestartSec=3s
 UMask=0077
@@ -86,14 +88,14 @@ if [[ -n "$PUBLIC_HOST" ]]; then EXTRA_HOST_ARGS="--public-host $PUBLIC_HOST"; f
 cat > "$HOME/.config/systemd/user/memhub-server.service" <<EOF_UNIT
 [Unit]
 Description=Memhub Server Gateway
-After=memhub-memory.service network-online.target
-Requires=memhub-memory.service
+After=memhub-core.service network-online.target
+Requires=memhub-core.service
 Wants=network-online.target
 
 [Service]
 Type=simple
 EnvironmentFile=$ENV_PATH
-ExecStart=$NODE $REPO_ROOT/Memhub/dist/mcp.js --http 3001 --http-path /memhub/mcp --capture-path /memhub/capture --state-root $SERVER_STATE --memory-url http://127.0.0.1:18960 $EXTRA_HOST_ARGS
+ExecStart=$NODE $REPO_ROOT/Memhub/dist/mcp.js --http 3001 --http-path /memhub/mcp --capture-path /memhub/capture --state-root $SERVER_STATE --memory-url http://127.0.0.1:18960 --normify-root $REPO_ROOT/.. $EXTRA_HOST_ARGS
 Restart=on-failure
 RestartSec=3s
 UMask=0077
@@ -103,7 +105,7 @@ WantedBy=default.target
 EOF_UNIT
 
 systemctl --user daemon-reload
-systemctl --user enable --now memhub-memory.service memhub-server.service
+systemctl --user enable --now memhub-core.service memhub-server.service
 
 echo "[memhub] Server Edition installed on loopback"
 echo "[memhub] Origin MCP:     http://127.0.0.1:3001/memhub/mcp"

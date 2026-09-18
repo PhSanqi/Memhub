@@ -7,6 +7,7 @@ const VERSION = 1;
 export interface MemhubAccountRecord {
   account_id: string;
   created_at: string;
+  role?: "user" | "admin";
   cloudflare?: {
     email: string;
     sub?: string;
@@ -23,6 +24,7 @@ export interface MemhubAccountSummary {
   account_id: string;
   created_at: string;
   cloudflare_email?: string;
+  role: "user" | "admin";
 }
 
 let mutationTail = Promise.resolve();
@@ -38,9 +40,28 @@ export async function listAccounts(stateRoot: string): Promise<MemhubAccountSumm
       username,
       account_id: record.account_id,
       created_at: record.created_at,
+      role: record.role === "admin" ? "admin" as const : "user" as const,
       ...(record.cloudflare ? { cloudflare_email: record.cloudflare.email } : {})
     }))
     .sort((left, right) => left.username.localeCompare(right.username));
+}
+
+export async function setAccountRole(
+  stateRoot: string,
+  accountRefRaw: string,
+  role: "user" | "admin"
+): Promise<void> {
+  const accountRef = accountRefRaw.trim();
+  if (!accountRef) throw new Error("account reference is required");
+  await withMutationLock(async () => {
+    const data = await load(stateRoot);
+    const entry = Object.entries(data.accounts).find(([username, record]) =>
+      username === accountRef || record.account_id === accountRef || record.cloudflare?.email === accountRef.toLowerCase()
+    );
+    if (!entry) throw new Error(`账号不存在：${accountRef}`);
+    entry[1].role = role;
+    await save(stateRoot, data);
+  });
 }
 
 export async function addAccount(
@@ -176,6 +197,7 @@ export async function importNormifyAccounts(
         created_at: typeof record.created_at === "string" && record.created_at.trim()
           ? record.created_at
           : new Date().toISOString(),
+        ...(record.role === "admin" ? { role: "admin" as const } : {}),
         ...(cloudflare ? { cloudflare } : {})
       };
       imported += 1;

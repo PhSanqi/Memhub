@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +7,8 @@ import {
   addAccount,
   importNormifyAccounts,
   listAccounts,
-  resolveCloudflareAccount
+  resolveCloudflareAccount,
+  setAccountRole
 } from "../dist/auth.js";
 import { importNormifyCloudflarePin } from "../dist/cloudflare.js";
 import { JsonConversationProjectBindingStore } from "../dist/binding-store.js";
@@ -15,6 +17,8 @@ import { ContextRouter } from "../dist/context-router.js";
 import { assertLoopbackMemoryEndpoint } from "../dist/local-memory-client.js";
 import { resolveProjectScope } from "../dist/project-scope.js";
 import { createDevice, normalizeCaptureEvent } from "../dist/capture.js";
+import { EmbeddedArchitectureSource } from "../dist/architecture-source.js";
+import { EmbeddedMemoryCore } from "../dist/embedded-memory-core.js";
 
 const root = await mkdtemp(join(tmpdir(), "memhub-core-"));
 const state = join(root, "state");
@@ -39,6 +43,19 @@ try {
   assert.doesNotThrow(() => assertLoopbackMemoryEndpoint("http://127.0.0.1:18960"));
   assert.doesNotThrow(() => assertLoopbackMemoryEndpoint("http://[::1]:18960"));
   assert.throws(() => assertLoopbackMemoryEndpoint("https://memory.example.test"), /non-loopback/);
+
+  const embeddedMemory = new EmbeddedMemoryCore({
+    stateRoot: join(root, "embedded-memory"),
+    configPath: join(root, "embedded-memory", "config.yaml"),
+    dbPath: join(root, "embedded-memory", "memory.sqlite")
+  });
+  assert.equal(existsSync(embeddedMemory.entrypoint), true);
+  const embeddedArchitecture = new EmbeddedArchitectureSource({ rootDir: normify });
+  assert.equal(existsSync(embeddedArchitecture.runtimeModule), true);
+  assert.match(
+    embeddedArchitecture.runtimeModule.replaceAll("\\", "/"),
+    /\/Memhub\/vendor\/normify\/lib\/generic\.js$/
+  );
 
   const calls = [];
   const memory = {
@@ -69,6 +86,8 @@ try {
   const owner = await addAccount(state, "owner", "owner@example.com");
   await assert.rejects(() => resolveCloudflareAccount(state, { sub: "unknown", email: "unknown@example.com" }), /允许列表/);
   assert.equal((await resolveCloudflareAccount(state, { sub: "owner-sub", email: "owner@example.com" })).account_id, owner.account_id);
+  await setAccountRole(state, owner.account_id, "admin");
+  assert.equal((await listAccounts(state)).find((item) => item.account_id === owner.account_id)?.role, "admin");
 
   assert.equal(normalizeCaptureEvent({
     event_id: "partial-turn",

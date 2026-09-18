@@ -55,6 +55,18 @@ export class LocalMemoryRestClient {
     return this.request("/api/v1/memory/add", request);
   }
 
+  viewerGet(path: string): Promise<unknown> {
+    return this.requestRaw(path, "GET");
+  }
+
+  viewerPost(path: string, body: Record<string, unknown> = {}): Promise<unknown> {
+    return this.requestRaw(path, "POST", body);
+  }
+
+  viewerDelete(path: string): Promise<unknown> {
+    return this.requestRaw(path, "DELETE");
+  }
+
   openSession(request: Record<string, unknown>): Promise<unknown> {
     return this.request("/api/v1/sessions/open", request);
   }
@@ -76,13 +88,18 @@ export class LocalMemoryRestClient {
   }
 
   private async request(path: string, body: Record<string, unknown>): Promise<unknown> {
+    return this.requestRaw(path, "POST", body);
+  }
+
+  private async requestRaw(path: string, method: "GET" | "POST" | "DELETE", body?: Record<string, unknown>): Promise<unknown> {
     const response = await this.fetchImpl(`${this.endpoint}${path}`, {
-      method: "POST",
+      method,
       headers: {
         "content-type": "application/json",
+        "x-memmy-viewer": "1",
         ...(this.token ? { authorization: `Bearer ${this.token}` } : {})
       },
-      body: JSON.stringify(body)
+      ...(body ? { body: JSON.stringify(body) } : {})
     });
     const text = await response.text();
     const payload = text ? safeJson(text) : undefined;

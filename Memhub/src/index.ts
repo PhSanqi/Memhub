@@ -1,4 +1,5 @@
 export * from "./architecture-source.js";
+export * from "./embedded-memory-core.js";
 export * from "./auth.js";
 export * from "./binding-store.js";
 export * from "./bridge.js";

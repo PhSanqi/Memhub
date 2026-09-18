@@ -404,6 +404,29 @@ async function exerciseClient(client, conversationId) {
   const lastWrite = [...requests].reverse().find((entry) => entry.url === "/api/v1/memory/add");
   assert.equal(lastWrite.body.namespace.projectId, "aide");
   assert.equal(lastWrite.body.namespace.tenantId, "acct-test");
+  assert.equal(lastWrite.body.source, "memhub:local:local");
+
+  const contractResult = await client.callTool({
+    name: "memhub_distill",
+    arguments: { inspect_contract: true }
+  });
+  const contractPayload = JSON.parse(contractResult.content[0].text);
+  assert.equal(contractPayload.contract.version, "memhub-distill-v1");
+  assert.equal(contractPayload.contract.executor, "connected_mcp_or_harness_model");
+
+  const writesBeforeDryRun = requests.filter((entry) => entry.url === "/api/v1/memory/add").length;
+  const dryRun = await client.callTool({
+    name: "memhub_distill",
+    arguments: {
+      kind: "knowledge",
+      scope: "global",
+      content: "Durable evidence-backed knowledge.",
+      evidence_refs: ["raw:dry-run"],
+      dry_run: true
+    }
+  });
+  assert.equal(JSON.parse(dryRun.content[0].text).dryRun, true);
+  assert.equal(requests.filter((entry) => entry.url === "/api/v1/memory/add").length, writesBeforeDryRun);
 
   await client.callTool({
     name: "memhub_distill",
@@ -415,7 +438,10 @@ async function exerciseClient(client, conversationId) {
       content: "Use this when AIDE reconnect fails. Inspect state, repair the bridge, then verify reconnection.",
       source_harness: "codex",
       artifact_id: "aide-reconnect-v1",
-      version: "1"
+      version: "1",
+      evidence_refs: ["raw:test-turn"],
+      source_conversations: [conversationId],
+      confidence: 0.9
     }
   });
   const skillWrite = [...requests].reverse().find((entry) => entry.url === "/api/v1/memory/add");
@@ -427,6 +453,9 @@ async function exerciseClient(client, conversationId) {
   assert.equal(skillWrite.body.sourceSkillVersion, "1");
   assert.ok(skillWrite.body.tags.includes("artifact:skill"));
   assert.ok(skillWrite.body.tags.includes("project:aide"));
+  assert.ok(skillWrite.body.tags.includes("distill-contract:memhub-distill-v1"));
+  assert.ok(skillWrite.body.tags.includes("evidence:raw:test-turn"));
+  assert.ok(skillWrite.body.tags.includes(`source-conversation:${conversationId}`));
   assert.equal(typeof skillWrite.body.requestId, "string");
 
   const summaryArgs = {

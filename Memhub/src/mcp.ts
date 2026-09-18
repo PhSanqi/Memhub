@@ -20,7 +20,8 @@ import {
   deleteAccount,
   importNormifyAccounts,
   listAccounts,
-  resolveCloudflareAccount
+  resolveCloudflareAccount,
+  setAccountRole
 } from "./auth.js";
 import { importNormifyCloudflarePin, verifyCloudflareAccessJwt } from "./cloudflare.js";
 import {
@@ -35,6 +36,11 @@ import {
 } from "./capture.js";
 import { ingestCaptureIntoMemory } from "./capture-ingest.js";
 import { createMemhubRuntime, type MemhubRuntime, type MemhubRuntimeOptions } from "./runtime.js";
+import {
+  DISTILLATION_CONTRACT_VERSION,
+  distillationContract,
+  validateDistillationCandidate
+} from "./distillation-contract.js";
 
 const VERSION = "0.1.0";
 
@@ -119,13 +125,21 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime): McpServ
       projectId,
       conversationId,
       title: optionalString(args.title),
-      tags: stringArray(args.tags)
+      tags: stringArray(args.tags),
+      provenance: {
+        platform: runtime.source.platform,
+        transport: runtime.source.transport,
+        principal: runtime.source.principalId,
+        connection: runtime.source.connectionId,
+        account: runtime.accountId,
+        authenticated_account: runtime.source.authenticatedAccount
+      }
     });
     return jsonResult({ ok: true, scope, project: projectId, memory: result });
   });
 
   server.registerTool("memhub_distill", {
-    description: "提交由当前 Harness 提炼出的结构化沉淀。Skill 可写账号级或单项目级；summary/knowledge 作为 curated memory 保存，不会绕过原生 L2/L3 evolution。",
+    description: "由当前 MCP/Harness 的 AI 完成内容蒸馏，Memhub 只提供并强制蒸馏契约、scope、证据引用、provenance 与写入校验。传 inspect_contract=true 可只读取规则而不写入。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
@@ -139,11 +153,17 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime): McpServ
         source_harness: { type: "string", description: "产生该沉淀的 Harness，例如 codex / claude-code" },
         artifact_id: { type: "string", description: "Harness 侧稳定产物 ID；用于幂等重试" },
         version: { type: "string", description: "Harness 侧产物版本；主要用于 Skill" }
+        ,evidence_refs: { type: "array", items: { type: "string" }, description: "支持该产物的 Memory/RawTurn/Episode 等稳定引用" }
+        ,source_conversations: { type: "array", items: { type: "string" }, description: "产物来源对话 ID；与 distilled_by 分开保存" }
+        ,confidence: { type: "number", minimum: 0, maximum: 1 }
+        ,inspect_contract: { type: "boolean", description: "只返回 Memhub 蒸馏规则，不写入任何内容" }
+        ,dry_run: { type: "boolean", description: "按当前契约校验候选与 scope，但不写入 Memory Core" }
       },
-      required: ["kind", "content", "scope"],
+      required: [],
       additionalProperties: false
     } as JsonSchemaType)
   }, async (args) => {
+    if (args.inspect_contract === true) return jsonResult({ contract: distillationContract() });
     const kind = requiredString(args.kind, "kind");
     if (kind !== "skill" && kind !== "summary" && kind !== "knowledge") {
       throw new TypeError("kind must be skill, summary, or knowledge");
@@ -157,6 +177,28 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime): McpServ
       conversationId: optionalString(args.conversation_id)
     });
     const sourceHarness = optionalString(args.source_harness) ?? "mcp-harness";
+    const evidenceRefs = stringArray(args.evidence_refs);
+    const sourceConversations = stringArray(args.source_conversations);
+    const confidence = optionalNumber(args.confidence);
+    validateDistillationCandidate({
+      kind,
+      content: requiredString(args.content, "content"),
+      evidence: { evidenceRefs, sourceConversations, confidence }
+    });
+    if (args.dry_run === true) {
+      return jsonResult({
+        ok: true,
+        dryRun: true,
+        kind,
+        scope,
+        project: projectId,
+        sourceHarness,
+        contract: DISTILLATION_CONTRACT_VERSION,
+        evidenceRefs,
+        sourceConversations,
+        confidence
+      });
+    }
     const result = await runtime.memory.distill({
       accountId: runtime.accountId,
       userId: runtime.userId,
@@ -169,6 +211,19 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime): McpServ
       sourceHarness,
       artifactId: optionalString(args.artifact_id),
       version: optionalString(args.version)
+      ,
+      evidenceRefs,
+      sourceConversations,
+      confidence,
+      contractVersion: DISTILLATION_CONTRACT_VERSION,
+      provenance: {
+        platform: runtime.source.platform,
+        transport: runtime.source.transport,
+        principal: runtime.source.principalId,
+        connection: runtime.source.connectionId,
+        account: runtime.accountId,
+        authenticated_account: runtime.source.authenticatedAccount
+      }
     });
     return jsonResult({
       ok: true,
@@ -177,6 +232,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime): McpServ
       project: projectId,
       sourceHarness,
       nativeEvolution: false,
+      contract: DISTILLATION_CONTRACT_VERSION,
       memory: result
     });
   });
@@ -417,23 +473,31 @@ async function serveHttp(
     ? localhostOriginValidation()
     : originValidation(["localhost", "127.0.0.1", "[::1]", options.publicHost]);
 
-  const runtimeFor = (accountId: string): MemhubRuntime => {
-    let runtime = runtimes.get(accountId);
+  const runtimeFor = (accountId: string, source = runtimeOptions.source): MemhubRuntime => {
+    const sourceKey = source
+      ? [source.platform, source.transport, source.principalId ?? "", source.connectionId ?? "", source.authenticatedAccount ?? ""].join("|")
+      : "default";
+    const runtimeKey = `${accountId}|${sourceKey}`;
+    let runtime = runtimes.get(runtimeKey);
     if (!runtime) {
-      runtime = createMemhubRuntime({ ...runtimeOptions, accountId });
-      runtimes.set(accountId, runtime);
+      runtime = createMemhubRuntime({ ...runtimeOptions, accountId, source });
+      runtimes.set(runtimeKey, runtime);
     }
     return runtime;
   };
 
-  const handlerFor = (accountId: string) => {
-    let handler = handlers.get(accountId);
+  const handlerFor = (accountId: string, source = runtimeOptions.source) => {
+    const sourceKey = source
+      ? [source.platform, source.transport, source.principalId ?? "", source.connectionId ?? "", source.authenticatedAccount ?? ""].join("|")
+      : "default";
+    const handlerKey = `${accountId}|${sourceKey}`;
+    let handler = handlers.get(handlerKey);
     if (handler) return handler;
     handler = toNodeHandler(
-      createMcpHandler(() => createMemhubMcpServerForRuntime(runtimeFor(accountId))),
+      createMcpHandler(() => createMemhubMcpServerForRuntime(runtimeFor(accountId, source))),
       { onerror: (error) => console.error("[memhub] MCP HTTP error:", error.message) }
     );
-    handlers.set(accountId, handler);
+    handlers.set(handlerKey, handler);
     return handler;
   };
 
@@ -554,7 +618,67 @@ async function serveHttp(
         }));
         return;
       }
-      if (url.pathname !== options.path) {
+
+      if (url.pathname === "/" || url.pathname === "/memhub" || url.pathname.startsWith("/memhub/admin")) {
+        if (options.publicHost === undefined) {
+          response.writeHead(404).end();
+          return;
+        }
+        const assertion = singleHeader(request.headers["cf-access-jwt-assertion"]);
+        if (!assertion) {
+          response.writeHead(401, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" }).end("Cloudflare Access authentication required");
+          return;
+        }
+        const identity = await verifyCloudflareAccessJwt(options.stateRoot, options.publicHost, assertion);
+        const account = await resolveCloudflareAccount(options.stateRoot, identity, { allowJit: options.allowJit });
+        const summary = (await listAccounts(options.stateRoot)).find((item) => item.account_id === account.account_id)!;
+        const isAdmin = summary.role === "admin";
+        if (url.pathname.startsWith("/memhub/admin") && !isAdmin) {
+          response.writeHead(403, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" }).end("Administrator access required");
+          return;
+        }
+        const runtime = runtimeFor(account.account_id);
+        if (url.pathname === "/memhub/admin/api" && request.method === "GET") {
+          const kind = url.searchParams.get("kind") ?? "overview";
+          const allowed = new Map([
+            ["overview", "/api/v1/overview"], ["memories", "/api/v1/memories?limit=100"],
+            ["episodes", "/api/v1/episodes"], ["skills", "/api/v1/skills?limit=100"],
+            ["world-models", "/api/v1/world-models?limit=100"], ["knowledge", "/api/v1/knowledge?limit=100"],
+            ["traces", "/api/v1/traces?limit=100"]
+          ]);
+          const target = allowed.get(kind);
+          if (!target) { response.writeHead(400).end(); return; }
+          const payload = await runtime.memoryClient.viewerGet(target);
+          response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(payload));
+          return;
+        }
+        if (url.pathname === "/memhub/admin/action" && request.method === "POST") {
+          const body = await readJsonBody(request) as Record<string, unknown>;
+          const action = optionalString(body.action);
+          const id = optionalString(body.id);
+          if (!action || !id) { response.writeHead(400).end(); return; }
+          if (action === "delete-memory") await runtime.memoryClient.viewerDelete(`/api/v1/memory/${encodeURIComponent(id)}`);
+          else if (action === "archive-memory") await runtime.memoryClient.viewerPost(`/api/v1/memory/${encodeURIComponent(id)}/archive`);
+          else if (action === "archive-skill") await runtime.memoryClient.viewerPost("/api/v1/skills/archive", { skillId: id });
+          else if (action === "archive-world-model") await runtime.memoryClient.viewerPost(`/api/v1/world-models/${encodeURIComponent(id)}/archive`);
+          else { response.writeHead(400).end(); return; }
+          response.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
+          return;
+        }
+        const projects = await runtime.router.listProjects(account.account_id).catch(() => []);
+        const devices = await listDevices(options.stateRoot, account.account_id);
+        const accounts = isAdmin && url.pathname.startsWith("/memhub/admin") ? await listAccounts(options.stateRoot) : [];
+        response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+        response.end(renderConsole({ account: summary, projects, devices, accounts, adminView: url.pathname.startsWith("/memhub/admin") }));
+        return;
+      }
+      // OAuth-capable MCP clients may canonicalize the resource URI with a
+      // trailing slash. Cloudflare Managed OAuth protects both forms, so the
+      // origin must treat both forms as the same MCP endpoint.
+      const mcpPath = url.pathname.endsWith("/") && url.pathname.length > 1
+        ? url.pathname.slice(0, -1)
+        : url.pathname;
+      if (mcpPath !== options.path) {
         response.writeHead(404).end();
         return;
       }
@@ -572,7 +696,12 @@ async function serveHttp(
           response.end(JSON.stringify({ error: "invalid_or_revoked_device" }));
           return;
         }
-        handlerFor(device.account_id)(request, response);
+        handlerFor(device.account_id, {
+          platform: device.name || "device",
+          transport: "device-token",
+          principalId: `device:${device.device_id}`,
+          connectionId: device.device_id
+        })(request, response);
         return;
       }
 
@@ -584,7 +713,13 @@ async function serveHttp(
       }
       const identity = await verifyCloudflareAccessJwt(options.stateRoot, options.publicHost, assertion);
       const account = await resolveCloudflareAccount(options.stateRoot, identity, { allowJit: options.allowJit });
-      handlerFor(account.account_id)(request, response);
+      handlerFor(account.account_id, {
+        platform: "chatgpt",
+        transport: "mcp",
+        principalId: identity.sub ? `cloudflare:${identity.sub}` : `cloudflare-email:${identity.email}`,
+        connectionId: "cloudflare-managed-oauth",
+        authenticatedAccount: identity.email
+      })(request, response);
     })().catch((error) => {
       console.error("[memhub] HTTP identity error:", error);
       if (!response.headersSent) {
@@ -681,6 +816,12 @@ async function runAccountCommand(argv: string[]): Promise<void> {
     process.stdout.write("email bound\n");
     return;
   }
+  if (action === "role") {
+    if (!args[1] || (args[2] !== "admin" && args[2] !== "user")) throw new Error("account role requires username/account_id/email and admin|user");
+    await setAccountRole(stateRoot, args[1], args[2]);
+    process.stdout.write("account role updated\n");
+    return;
+  }
   if (action === "delete") {
     if (!args[1]) throw new Error("account delete requires username");
     await deleteAccount(stateRoot, args[1]);
@@ -720,6 +861,47 @@ function singleHeader(value: string | string[] | undefined): string | undefined 
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function renderConsole(input: {
+  account: Awaited<ReturnType<typeof listAccounts>>[number];
+  projects: string[];
+  devices: Awaited<ReturnType<typeof listDevices>>;
+  accounts: Awaited<ReturnType<typeof listAccounts>>;
+  adminView: boolean;
+}): string {
+  const e = escapeHtml;
+  const nav = input.account.role === "admin"
+    ? `<a href="/memhub">Workspace</a><a href="/memhub/admin">Admin</a>`
+    : `<a href="/memhub">Workspace</a>`;
+  const content = input.adminView
+    ? `<div class="admin-shell"><aside><div class="brand">Memhub <em>Control</em></div><button data-view="overview">◫ <span data-i18n="overview">总览</span></button><button data-view="memories">◇ <span data-i18n="memories">记忆</span></button><button data-view="episodes">◷ <span data-i18n="episodes">对话与 Episode</span></button><button data-view="traces">⌁ <span data-i18n="traces">原始轨迹</span></button><button data-view="skills">✦ <span data-i18n="skills">技能</span></button><button data-view="world-models">◎ <span data-i18n="world">世界模型</span></button><button data-view="knowledge">▤ <span data-i18n="knowledge">域经验</span></button><button data-view="accounts">♙ <span data-i18n="accounts">账号</span></button><div class="aside-foot">Cloudflare Access<br><small>Identity boundary</small></div></aside><div class="console"><div class="hero"><div><small data-i18n="control">MEMORY CONTROL PLANE</small><h1 data-i18n="title">长期记忆管理</h1><p data-i18n="subtitle">查看、追踪并管理从对话到技能与世界模型的各级沉淀。</p></div><div class="hero-actions"><button id="lang">EN</button><a class="logout" href="/cdn-cgi/access/logout" data-i18n="logout">退出</a></div></div><div id="account-panel" class="panel hidden"><h2 data-i18n="accounts">账号</h2><div class="grid">${input.accounts.map((a) => `<article><b>${e(a.cloudflare_email ?? a.username)}</b><span class="pill">${e(a.role)}</span><small>${e(a.account_id)}</small></article>`).join("")}</div></div><div id="data-panel" class="panel"><div class="panel-head"><div><h2 id="view-title">总览</h2><p id="view-desc" class="muted">正在读取 Memory Core…</p></div><input id="filter" placeholder="搜索 / Search"></div><div id="cards" class="stats"></div><div id="items" class="items"><div class="empty">Loading…</div></div></div></div></div><div id="drawer" class="drawer hidden"><button class="drawer-close" onclick="closeDrawer()">×</button><div id="drawer-body"></div></div><script>${consoleScript()}</script>`
+    : `<section><h2>我的 Memhub</h2><div class="stats"><article><b>${input.projects.length}</b><span>项目</span></article><article><b>${input.devices.length}</b><span>设备</span></article><article><b>${e(input.account.role)}</b><span>权限</span></article></div></section><section><h2>项目</h2><div class="grid">${input.projects.map((p) => `<article><b>${e(p)}</b><span>项目记忆空间</span></article>`).join("") || "<p class=\"muted\">暂无项目</p>"}</div></section><section><h2>连接设备</h2><div class="grid">${input.devices.map((d) => `<article><b>${e(d.name)}</b><span>${d.revoked_at ? "已撤销" : "已连接"}</span><small>${e(d.device_id)}</small></article>`).join("") || "<p class=\"muted\">暂无设备</p>"}</div></section><section><h2>记忆与沉淀</h2><p class="muted">Memory / Skill / Domain Experience 的浏览、保留、归档和删除控制面将在 Memory Core 管理 API 接通后显示在这里；账号隔离继续使用稳定 account_id。</p></section>`;
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Memhub Control Plane</title><style>${consoleCss()}</style></head><body><header><b>Memhub</b><nav>${nav}<span>${e(input.account.cloudflare_email ?? input.account.username)}</span>${input.adminView ? "" : '<a class="logout" href="/cdn-cgi/access/logout">退出</a>'}</nav></header><main class="${input.adminView ? "admin-main" : ""}">${content}</main></body></html>`;
+}
+
+function consoleCss(): string { return `
+*{box-sizing:border-box}body{margin:0;font:14px Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:#f7fbff;color:#17324d}header{height:54px;display:flex;justify-content:space-between;align-items:center;padding:0 28px;background:rgba(255,255,255,.92);border-bottom:1px solid #dbeaf5}nav{display:flex;gap:18px;align-items:center}a{color:#2877a8;text-decoration:none}.logout,#lang{border:1px solid #c9dfec;background:white;border-radius:10px;padding:8px 13px;color:#35657e}.admin-main{max-width:none;margin:0;padding:0}.admin-shell{display:grid;grid-template-columns:220px 1fr;min-height:calc(100vh - 54px)}aside{padding:24px 14px;background:#eef8fc;border-right:1px solid #d6eaf3}.brand{font-size:19px;font-weight:750;padding:0 12px 24px}.brand em{font-style:normal;color:#4aa6c6}aside button{width:100%;text-align:left;border:0;background:transparent;padding:11px 12px;margin:3px 0;border-radius:10px;color:#42667a;font-weight:600}aside button:hover,aside button.active{background:#dff2f8;color:#147b9f}.aside-foot{position:sticky;top:calc(100vh - 130px);padding:18px 12px;color:#7595a5}.console{padding:30px 4vw 60px;max-width:1500px}.hero{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;padding:12px 2px 25px}.hero small{letter-spacing:.16em;color:#4a9ab8;font-weight:800}.hero h1{font-size:32px;margin:8px 0;color:#153d57}.hero p{margin:0;color:#6c8a9a}.hero-actions{display:flex;gap:9px}.panel{background:white;border:1px solid #dcebf2;box-shadow:0 8px 30px rgba(35,111,143,.06);border-radius:18px;padding:22px;margin-bottom:18px}.panel-head{display:flex;justify-content:space-between;gap:20px;align-items:center}.panel-head input{width:min(320px,40vw);border:1px solid #d3e5ee;border-radius:11px;padding:10px 13px;outline:none}.stats,.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:18px 0}.stats article,.grid article{padding:16px;border:1px solid #deedf3;background:#fbfeff;border-radius:13px;display:flex;flex-direction:column;gap:6px}.stats b{font-size:25px;color:#197b9e}.pill{align-self:flex-start;background:#e1f5f6;color:#237f88;border-radius:999px;padding:3px 8px}.items{display:flex;flex-direction:column;gap:9px}.row{cursor:pointer;border:1px solid #e2edf2;border-radius:12px;padding:14px 16px;background:#fff;display:grid;grid-template-columns:minmax(140px,1fr) minmax(220px,3fr) auto;gap:14px;align-items:start}.row:hover{border-color:#a9d7e7;background:#fbfeff}.row h3{font-size:14px;margin:0 0 5px;color:#24526c}.row p{margin:0;color:#587688;white-space:pre-wrap;overflow-wrap:anywhere;max-height:100px;overflow:hidden}.row small{color:#91a7b3}.empty{padding:48px;text-align:center;color:#8ca3af}.hidden{display:none!important}.muted{color:#7793a2}article small{overflow-wrap:anywhere}.drawer{position:fixed;z-index:20;right:0;top:54px;width:min(600px,94vw);height:calc(100vh - 54px);overflow:auto;background:#fff;border-left:1px solid #d6e8f0;box-shadow:-18px 0 50px rgba(24,86,112,.12);padding:30px}.drawer-close{float:right;border:0;background:#eef7fa;border-radius:50%;width:34px;height:34px;font-size:22px}.drawer pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f7fbfd;border:1px solid #e1edf2;border-radius:12px;padding:14px;font-size:12px}.actions{display:flex;gap:8px;margin:20px 0}.danger,.soft{border:1px solid #d8e7ed;background:#f7fbfc;border-radius:9px;padding:8px 12px}.danger{color:#a43b43;border-color:#efcdd0;background:#fff9f9}@media(max-width:760px){.admin-shell{grid-template-columns:1fr}aside{display:flex;overflow:auto;padding:8px;position:sticky;top:54px;z-index:2}aside .brand,.aside-foot{display:none}aside button{min-width:max-content}.console{padding:18px}.hero{flex-direction:column}.row{grid-template-columns:1fr}.panel-head{align-items:flex-start;flex-direction:column}.panel-head input{width:100%}}
+`; }
+
+function consoleScript(): string { return `
+const dict={zh:{overview:'总览',memories:'记忆',episodes:'对话与 Episode',traces:'原始轨迹',skills:'技能',world:'世界模型',knowledge:'域经验',accounts:'账号',control:'MEMORY CONTROL PLANE',title:'长期记忆管理',subtitle:'查看、追踪并管理从对话到技能与世界模型的各级沉淀。',logout:'退出'},en:{overview:'Overview',memories:'Memories',episodes:'Conversations & Episodes',traces:'Raw Traces',skills:'Skills',world:'World Models',knowledge:'Domain Experience',accounts:'Accounts',control:'MEMORY CONTROL PLANE',title:'Long-term Memory',subtitle:'Inspect and manage distilled knowledge from conversations through skills and world models.',logout:'Sign out'}};
+let lang=localStorage.memhubLang||'zh', current='overview', payload=null;
+const titles={overview:['总览','Overview'],memories:['记忆','Memories'],episodes:['对话与 Episode','Conversations & Episodes'],traces:['原始轨迹','Raw Traces'],skills:['技能','Skills'],'world-models':['世界模型','World Models'],knowledge:['域经验','Domain Experience']};
+function tr(){document.documentElement.lang=lang==='zh'?'zh-CN':'en';document.querySelectorAll('[data-i18n]').forEach(x=>x.textContent=dict[lang][x.dataset.i18n]||x.textContent);document.getElementById('lang').textContent=lang==='zh'?'EN':'中文';}
+function values(o){if(!o||typeof o!=='object')return[];for(const k of ['items','tasks','memories','episodes','skills','records'])if(Array.isArray(o[k]))return o[k];return[]}
+function textOf(x){return x.snippet||x.content||x.summary||x.description||x.title||x.text||JSON.stringify(x)}
+function render(data){payload=data;const items=values(data);const cards=document.getElementById('cards');const total=data?.total??items.length;cards.innerHTML='<article><b>'+total+'</b><span>'+(lang==='zh'?'当前条目':'Current items')+'</span></article><article><b>'+items.filter(x=>x.status==='activated').length+'</b><span>Activated</span></article><article><b>'+items.filter(x=>x.status==='archived').length+'</b><span>Archived</span></article>';filter();}
+function filter(){const q=document.getElementById('filter').value.toLowerCase();const items=values(payload).filter(x=>JSON.stringify(x).toLowerCase().includes(q));window.visibleItems=items;document.getElementById('items').innerHTML=items.length?items.map((x,i)=>'<div class="row" onclick="openItem('+i+')"><div><h3>'+esc(x.title||x.kind||x.type||x.id||'Item')+'</h3><small>'+esc(x.status||x.sourceAgent||x.source||'')+'</small></div><p>'+esc(textOf(x))+'</p><small>'+esc(x.updatedAt||x.createdAt||x.id||'')+'</small></div>').join(''):'<div class="empty">'+(lang==='zh'?'暂无内容':'No items')+'</div>'}
+function openItem(i){const x=window.visibleItems[i],id=x.id||x.memoryId||x.skillId;let actions='';if(id&&current==='memories')actions='<div class="actions"><button class="soft" onclick="event.stopPropagation();act(\'archive-memory\',\''+js(id)+'\')">Archive</button><button class="danger" onclick="event.stopPropagation();act(\'delete-memory\',\''+js(id)+'\')">Delete</button></div>';if(id&&current==='skills')actions='<div class="actions"><button class="soft" onclick="act(\'archive-skill\',\''+js(id)+'\')">Archive</button></div>';if(id&&current==='world-models')actions='<div class="actions"><button class="soft" onclick="act(\'archive-world-model\',\''+js(id)+'\')">Archive</button></div>';document.getElementById('drawer-body').innerHTML='<small>'+esc(current)+'</small><h2>'+esc(x.title||x.kind||x.id||'Detail')+'</h2><p>'+esc(textOf(x))+'</p>'+actions+'<h3>Metadata / Provenance</h3><pre>'+esc(JSON.stringify(x,null,2))+'</pre>';document.getElementById('drawer').classList.remove('hidden')}
+function closeDrawer(){document.getElementById('drawer').classList.add('hidden')}function js(s){return String(s).replace(/[\\']/g,'\\$&')}async function act(action,id){if(!confirm((lang==='zh'?'确认执行：':'Confirm action: ')+action+'?'))return;const r=await fetch('/memhub/admin/action',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action,id})});if(!r.ok){alert(await r.text());return}closeDrawer();load(current)}
+async function load(view){current=view;document.querySelectorAll('aside button').forEach(b=>b.classList.toggle('active',b.dataset.view===view));if(view==='accounts'){document.getElementById('account-panel').classList.remove('hidden');document.getElementById('data-panel').classList.add('hidden');return}document.getElementById('account-panel').classList.add('hidden');document.getElementById('data-panel').classList.remove('hidden');document.getElementById('view-title').textContent=titles[view][lang==='zh'?0:1];document.getElementById('view-desc').textContent=lang==='zh'?'来自本机 Memory Core 的账号隔离数据':'Account-scoped data from the local Memory Core';document.getElementById('items').innerHTML='<div class="empty">Loading…</div>';try{const r=await fetch('/memhub/admin/api?kind='+encodeURIComponent(view));if(!r.ok)throw Error(await r.text());render(await r.json())}catch(e){document.getElementById('items').innerHTML='<div class="empty">'+esc(String(e))+'</div>'}}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+document.querySelectorAll('aside button').forEach(b=>b.onclick=()=>load(b.dataset.view));document.getElementById('filter').oninput=filter;document.getElementById('lang').onclick=()=>{lang=lang==='zh'?'en':'zh';localStorage.memhubLang=lang;tr();load(current)};tr();load('overview');
+`; }
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
+}
+
 function jsonResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
 }
@@ -747,6 +929,12 @@ function stringArray(value: unknown): string[] | undefined {
 
 function optionalInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : undefined;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new TypeError("value must be a finite number");
+  return value;
 }
 
 function objectValue(value: unknown, field: string): Record<string, unknown> {

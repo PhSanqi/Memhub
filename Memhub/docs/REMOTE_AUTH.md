@@ -1,5 +1,13 @@
 # Remote authentication modes
 
+## Human identity and Control Plane
+
+Server Edition deliberately uses Cloudflare Access as the single human identity provider. Memhub validates the signed Access JWT (issuer, audience, signature, `sub`, and verified `email`) and maps it to a stable internal `account_id`. `sub` is preferred for an existing binding; verified email is the continuity fallback because Cloudflare may issue a new `sub` if a user is removed and re-added to the Zero Trust organization.
+
+The browser Control Plane is available at `/memhub`; administrators also get `/memhub/admin`. Roles are stored on the stable Memhub account, not trusted from browser headers. `/cdn-cgi/access/logout` is used for the UI logout action so the Cloudflare Access application session is cleared rather than merely hiding the Memhub page.
+
+Machine credentials remain separate from human login: a device token selects an already-bound Memhub `account_id`; it does not create or merge a human account.
+
 Memhub has two remote-client classes. They intentionally use different authentication flows.
 
 ## 1. Local Bridge / installed plugin

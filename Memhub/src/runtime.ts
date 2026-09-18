@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   NormifyCliArchitectureSource,
+  EmbeddedArchitectureSource,
   NullProjectArchitectureSource,
   type ProjectArchitectureSource
 } from "./architecture-source.js";
@@ -20,6 +21,15 @@ export interface MemhubRuntimeOptions {
   disableNormify?: boolean;
   ownerAccountId?: string;
   ownerUserId?: string;
+  source?: MemhubSourceContext;
+}
+
+export interface MemhubSourceContext {
+  platform: string;
+  transport: string;
+  principalId?: string;
+  connectionId?: string;
+  authenticatedAccount?: string;
 }
 
 export interface MemhubRuntime {
@@ -29,6 +39,7 @@ export interface MemhubRuntime {
   router: ContextRouter;
   memory: MemoryRestContextSource;
   architecture: ProjectArchitectureSource;
+  source: MemhubSourceContext;
 }
 
 export function createMemhubRuntime(options: MemhubRuntimeOptions = {}): MemhubRuntime {
@@ -48,13 +59,19 @@ export function createMemhubRuntime(options: MemhubRuntimeOptions = {}): MemhubR
   const memory = new MemoryRestContextSource(memoryClient);
   const architecture = options.disableNormify || process.env.MEMHUB_NORMIFY === "0"
     ? new NullProjectArchitectureSource()
-    : new NormifyCliArchitectureSource({
+    : process.env.MEMHUB_ARCHITECTURE_CORE === "legacy-cli"
+      ? new NormifyCliArchitectureSource({
         rootDir: resolve(options.normifyRoot ?? process.env.MEMHUB_NORMIFY_ROOT ?? process.cwd()),
         command: options.normifyCommand ?? process.env.MEMHUB_NORMIFY_COMMAND ?? "normify"
+      })
+      : new EmbeddedArchitectureSource({
+        rootDir: resolve(options.normifyRoot ?? process.env.MEMHUB_NORMIFY_ROOT ?? process.cwd()),
+        runtimeModule: process.env.MEMHUB_ARCHITECTURE_RUNTIME
       });
   const bindings = new JsonConversationProjectBindingStore(bindingsPath);
   const router = new ContextRouter(memory, architecture, bindings);
-  return { accountId, userId, memoryClient, router, memory, architecture };
+  const source = options.source ?? { platform: "local", transport: "local" };
+  return { accountId, userId, memoryClient, router, memory, architecture, source };
 }
 
 function requireNonEmpty(value: string, field: string): string {
