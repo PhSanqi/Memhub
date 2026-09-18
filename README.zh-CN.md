@@ -34,7 +34,7 @@ AI Harness / Plugin / Remote MCP
 Memhub 使用同一套核心代码提供两个 Edition：
 
 ```text
-Memhub/editions/
+editions/
 ├── local/
 │   ├── linux/
 │   └── windows/
@@ -51,7 +51,7 @@ Memhub/editions/
 
 服务器作为唯一长期记忆源。各设备只运行本地 Bridge，通过 Cloudflare Access 等认证反向代理上传 turn；线上 AI 也可以直接通过远程 MCP 使用同一服务器。
 
-详细设计见 [Edition 设计](Memhub/docs/EDITIONS.md)。
+详细设计见 [Edition 设计](docs/EDITIONS.md)。
 
 ## 记忆沉淀能力仍然保留
 
@@ -95,7 +95,7 @@ B 项目
 
 这意味着“用已经登录的 Codex/Claude 帮 Memhub 提炼 Skill/项目认知”是正式设计，而不是临时 hack。
 
-详细见 [沉淀与 Scope 模型](Memhub/docs/EVOLUTION_SCOPES.md)。
+详细见 [沉淀与 Scope 模型](docs/EVOLUTION_SCOPES.md)。
 
 ## MCP 与自动采集
 
@@ -118,7 +118,7 @@ B 项目
 Local Linux：
 
 ```bash
-bash Memhub/editions/local/linux/install.sh
+bash editions/local/linux/install.sh
 ```
 
 Local Windows：
@@ -130,7 +130,7 @@ powershell -ExecutionPolicy Bypass -File .\Memhub\editions\local\windows\install
 Server Linux：
 
 ```bash
-MEMHUB_USERNAME=owner bash Memhub/editions/server/linux/install.sh
+MEMHUB_USERNAME=owner bash editions/server/linux/install.sh
 ```
 
 Server Windows：

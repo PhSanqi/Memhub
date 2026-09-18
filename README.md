@@ -34,7 +34,7 @@ AI host / plugin / remote MCP
 Memhub supports two editions built from the same core:
 
 ```text
-Memhub/editions/
+editions/
 ├── local/
 │   ├── linux/
 │   └── windows/
@@ -51,7 +51,7 @@ Everything runs on one machine. No VPS or Cloudflare is required. MCP, capture, 
 
 One server becomes the source of truth. Devices run the local Bridge and send captured turns through an authenticated reverse proxy such as Cloudflare Access. Remote MCP clients can use the same server endpoint.
 
-See [Memhub edition design](Memhub/docs/EDITIONS.md).
+See [Memhub edition design](docs/EDITIONS.md).
 
 ## Durable knowledge and evolution
 
@@ -73,7 +73,7 @@ Memhub's target evolution execution model supports three backends:
 2. **Harness worker** — an already authenticated Codex/Claude/other harness pulls an evolution job over MCP, produces a structured candidate, and submits it for validation/commit.
 3. **Deferred/local-only** — raw memory remains usable while model-dependent jobs stay pending until an executor becomes available.
 
-See [Evolution and scope model](Memhub/docs/EVOLUTION_SCOPES.md).
+See [Evolution and scope model](docs/EVOLUTION_SCOPES.md).
 
 ## MCP and capture
 
@@ -96,7 +96,7 @@ Node.js 20+ is required. The first source install may run the workspace build.
 Local Linux:
 
 ```bash
-bash Memhub/editions/local/linux/install.sh
+bash editions/local/linux/install.sh
 ```
 
 Local Windows (PowerShell):
@@ -108,7 +108,7 @@ powershell -ExecutionPolicy Bypass -File .\Memhub\editions\local\windows\install
 Server Linux:
 
 ```bash
-MEMHUB_USERNAME=owner bash Memhub/editions/server/linux/install.sh
+MEMHUB_USERNAME=owner bash editions/server/linux/install.sh
 ```
 
 Server Windows:

@@ -1,29 +1,43 @@
 {
-  "name": "memhub-monorepo",
+  "name": "memhub",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Private project-aware memory and context hub for AI harnesses.",
-  "workspaces": [
-    "AgentSourceCore",
-    "Memory",
-    "Memhub"
-  ],
-  "scripts": {
-    "build": "npm run build -w @memmy/agent-source-core && npm run build:headless -w @memmy/memory && npm run build -w memhub",
-    "build:memory": "npm run build -w @memmy/memory",
-    "build:memhub": "npm run build -w memhub",
-    "test:memhub": "npm run test -w memhub",
-    "test:scope": "vitest run Memory/tests/service/evolution/project-skill-scope.test.ts Memory/tests/project-retrieval-scope.test.ts Memory/tests/repository/project-scope-sql.test.ts Memory/tests/privacy-network-policy.test.ts",
-    "typecheck:memhub": "npm run typecheck -w memhub",
-    "test:evolution": "vitest run Memory/tests/service/evolution/external-l3-harness.test.ts Memory/tests/contract/external-l3-rest.test.ts Memory/tests/service/evolution/l3-world-model.test.ts Memory/tests/service/session/session-lifecycle.test.ts",
-    "test": "npm run test:memhub && npm run test:scope && npm run test:evolution"
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "memhub": "./dist/mcp.js",
+    "memhub-mcp": "./dist/mcp.js",
+    "memhub-bridge": "./dist/bridge.js"
   },
-  "engines": {
-    "node": ">=20"
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node tests/core-e2e.mjs && node tests/mcp-e2e.mjs && node tests/openai-adapter-e2e.mjs",
+    "core:preflight": "node scripts/core-migration.mjs preflight",
+    "core:verify": "node scripts/core-migration.mjs verify",
+    "core:preserved": "node scripts/core-migration.mjs preserved"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.8.0",
+    "@modelcontextprotocol/node": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "better-sqlite3": "^12.6.3",
+    "dotenv": "^16.6.1",
+    "fast-xml-parser": "^5.8.0",
+    "fzstd": "^0.1.1",
+    "ignore": "^7.0.5",
+    "jose": "^6.2.12",
+    "jsonc-parser": "^3.3.1",
+    "smol-toml": "^1.8.0",
+    "sqlite-vec": "0.1.9",
+    "tiktoken": "^1.0.22",
+    "typescript": "^6.0.3",
+    "yaml": "^2.9.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.7"
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@types/node": "^25.9.1"
   }
 }

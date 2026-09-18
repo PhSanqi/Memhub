@@ -1,15 +1,11 @@
 {
+  "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
-    "skipLibCheck": true,
     "outDir": "dist",
-    "rootDir": "Memory",
+    "rootDir": "src",
+    "declaration": true,
     "types": ["node"]
   },
-  "include": ["Memory/src/**/*.ts", "Memory/tests/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
 }

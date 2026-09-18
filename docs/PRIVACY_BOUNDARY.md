@@ -6,7 +6,9 @@ Memmy stores conversation history, durable user memory and project context. In t
 
 Memory Core is **local-only**. Merely configuring a remote URL does not authorize data egress.
 
-The first enforcement point is `Memory/src/privacy/network-policy.ts`. The following core paths use it:
+The first enforcement point is the vendored Memory Core at
+`vendor/memory-core/src/privacy/network-policy.js`. The following core
+paths use it:
 
 - model/embedding HTTP requests;
 - remote storage backend construction;
@@ -34,7 +36,10 @@ The baseline contains several different kinds of network behavior. They must not
 
 ### Memory-content egress paths
 
-`Memory/src/model/http.ts` can send prompts, summaries, evolution input and embedding input to configured model providers. `openmem-cloud-rest` represents a remote storage mode. These are private-data egress paths and are now default-denied by the core privacy boundary.
+`vendor/memory-core/src/model/http.js` can send prompts, summaries,
+evolution input and embedding input to configured model providers.
+`openmem-cloud-rest` represents a remote storage mode. These are private-data
+egress paths and are default-denied by the core privacy boundary.
 
 ### Adapter-to-Memory transport
 
@@ -56,7 +61,7 @@ Internet AI host
 Cloudflare Access / tunnel
      |
      v
-Memmy MCP Gateway (identity + account scope)
+Memhub MCP Gateway (identity + account scope)
      |
      | loopback only
      v
@@ -73,13 +78,9 @@ Remote model/storage support is deferred, not silently trusted. If it is reintro
 
 An authorization should record at least: account, data class/capability, destination, purpose, creation time and revocation state. A generic provider login must never imply permission to process every memory class.
 
-## What is deliberately not changed yet
+## Current ownership
 
-- Existing local memory schema and L1/L2/L3 algorithms.
-- Agent source import/scanning.
-- L3 project/global ownership rules.
-- Installed production service under `~/.local/share/memmy-agent/current`.
-- Existing Agent/Goal/Channel source code; these are deferred until the new MCP/context path is working end to end.
-- Legacy agent integration transport copies in Hermes/OpenClaw/DeepSeek/OpenCode/resume-hook templates. They are inventoried network-capable surfaces, not approved remote-memory paths.
-
-This keeps the first change reversible while establishing an enforceable boundary before deeper restructuring.
+- Memhub owns the vendored Memory Core runtime and AgentSourceCore helper.
+- Memhub owns the embedded architecture runtime.
+- The production Memory Core remains loopback-only.
+- Legacy standalone Memory/AgentSourceCore/Normify source trees are retired.
