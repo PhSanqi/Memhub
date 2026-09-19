@@ -1,7 +1,7 @@
 import type { ProjectScopeResolution } from "./project-scope.js";
 
 export type ContextAuthority = "remembered" | "authoritative" | "observed";
-export type ContextScope = "global" | "project" | "conversation";
+export type ContextScope = "global" | "project" | "conversation" | "capability";
 
 export interface ContextItem {
   id: string;
@@ -21,6 +21,7 @@ export interface ContextCapsuleInput {
   resolution: ProjectScopeResolution;
   globalMemory?: readonly ContextItem[];
   projectMemory?: readonly ContextItem[];
+  reusableSkills?: readonly ContextItem[];
   projectArchitecture?: readonly ContextItem[];
   recentSession?: readonly ContextItem[];
 }
@@ -33,6 +34,7 @@ export interface ContextCapsule {
   recallScope: ProjectScopeResolution["recallScope"];
   globalMemory: ContextItem[];
   projectMemory: ContextItem[];
+  reusableSkills: ContextItem[];
   projectArchitecture: ContextItem[];
   recentSession: ContextItem[];
   ambiguities: string[];
@@ -52,6 +54,8 @@ export function buildContextCapsule(input: ContextCapsuleInput): ContextCapsule 
 
   const globalMemory = filterItems(input.globalMemory, (item) => item.scope === "global");
   const recentSession = filterItems(input.recentSession, (item) => item.scope === "conversation");
+  const reusableSkills = filterItems(input.reusableSkills, (item) =>
+    item.scope === "capability" && item.authority === "remembered");
 
   const allowProject = input.resolution.recallScope === "global_and_project" && resolvedProjectId !== null;
   const projectMemory = allowProject
@@ -71,6 +75,7 @@ export function buildContextCapsule(input: ContextCapsuleInput): ContextCapsule 
     recallScope: input.resolution.recallScope,
     globalMemory,
     projectMemory,
+    reusableSkills,
     projectArchitecture,
     recentSession,
     ambiguities: input.resolution.source === "ambiguous"

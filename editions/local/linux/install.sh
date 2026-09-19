@@ -43,7 +43,7 @@ const config = {
       endpoint: 'http://127.0.0.1:18960', token
     },
     algorithm: { enableMemoryAdd: true, enableMemorySearch: true, enableQueryRewrite: false },
-    agentAccess: { autoScanKnownAgents: true, watchFileChanges: true, autoInjectSkill: false }
+    agentAccess: { autoScanKnownAgents: false, watchFileChanges: false, autoInjectSkill: false }
   },
   providers: {},
   modelAssignments: { default: null, memorySummary: null, memoryEvolution: null, embedding: null, asr: null, imageGeneration: null },
@@ -124,7 +124,7 @@ Requires=memhub-core.service
 [Service]
 Type=simple
 EnvironmentFile=$ENV_PATH
-ExecStart=$NODE $REPO_ROOT/dist/mcp.js --http 3001 --http-path /memhub/mcp --capture-path /memhub/capture --state-root $SERVER_STATE --memory-url http://127.0.0.1:18960
+ExecStart=$NODE $REPO_ROOT/dist/mcp.js --http 3001 --http-path /memhub/mcp --capture-path /memhub/capture --state-root $SERVER_STATE --memory-url http://127.0.0.1:18960 --normify-root $REPO_ROOT/..
 Restart=on-failure
 RestartSec=3s
 UMask=0077

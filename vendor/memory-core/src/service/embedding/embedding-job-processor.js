@@ -295,6 +295,8 @@ export class EmbeddingJobProcessor {
         return decision?.status === "rejected";
     }
     captureUserMemoryFromDecision(sourceMemory, trace, decision, job, at) {
+        if (memoryHasImportPipeline(sourceMemory))
+            return undefined;
         const content = decision.userMemoryAction === "correct_existing"
             ? decision.correctedUserMemoryContent?.trim() ?? ""
             : trace.userText.trim();

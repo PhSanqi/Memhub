@@ -32,6 +32,9 @@ class HttpLlmClient {
         this.options = options;
     }
     isConfigured() {
+        if (this.config.selectionError) {
+            return false;
+        }
         if (!this.config.provider || this.config.provider === "local_only") {
             return false;
         }

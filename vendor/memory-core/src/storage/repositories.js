@@ -2038,7 +2038,7 @@ export class RuntimeRepository {
             });
         })();
     }
-    leaseQueuedJobs(limit = 10, leaseSeconds = 60, targetMemoryIds, priorityCohortOnly = false) {
+    leaseQueuedJobs(limit = 10, leaseSeconds = 60, targetMemoryIds, priorityCohortOnly = false, excludedJobTypes = []) {
         if (targetMemoryIds?.length === 0) {
             return [];
         }
@@ -2046,6 +2046,9 @@ export class RuntimeRepository {
         const leaseUntil = new Date(Date.now() + leaseSeconds * 1000).toISOString();
         const targetFilter = targetMemoryIds
             ? `AND target_memory_id IN (${targetMemoryIds.map(() => "?").join(", ")})`
+            : "";
+        const jobTypeFilter = excludedJobTypes.length > 0
+            ? `AND job_type NOT IN (${excludedJobTypes.map(() => "?").join(", ")})`
             : "";
         const transaction = this.db.transaction(() => {
             const candidates = this.db
@@ -2083,6 +2086,7 @@ export class RuntimeRepository {
                json_extract(payload_json, '$.runAfter') IS NULL
                OR CAST(json_extract(payload_json, '$.runAfter') AS TEXT) <= ?
              )
+             ${jobTypeFilter}
              AND (
                job_type <> 'l3_world_model_update'
                OR (
@@ -2109,7 +2113,7 @@ export class RuntimeRepository {
              ${targetFilter}
            ORDER BY ${evolutionJobOrderSql()}
            LIMIT ?`)
-                .all(at, at, ...(targetMemoryIds ?? []), limit);
+                .all(at, at, ...excludedJobTypes, ...(targetMemoryIds ?? []), limit);
             const queuePriority = candidates[0]?.queue_priority;
             const rows = priorityCohortOnly && queuePriority !== undefined
                 ? candidates.filter((row) => row.queue_priority === queuePriority)
@@ -3581,6 +3585,21 @@ export class ProjectEnvironmentRepository {
         this.db.prepare(`UPDATE l3_world_model_project_environment_state
        SET status = 'failed', last_error = ?, updated_at = ?
        WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`).run(error, at, userId, projectId, scanId);
+    }
+    markUnavailable(userId, projectId, scanId, reason, at = nowIso()) {
+        this.db.prepare(`UPDATE l3_world_model_project_environment_state
+       SET project_kind = 'unknown',
+           status = 'uninitialized',
+           current_scan_id = NULL,
+           last_error = ?,
+           updated_at = ?
+       WHERE user_id = ? AND project_id = ? AND current_scan_id = ?`).run(
+            `stale_workspace: ${reason}`,
+            at,
+            userId,
+            projectId,
+            scanId
+        );
     }
 }
 function projectEnvironmentStateFromSql(row) {

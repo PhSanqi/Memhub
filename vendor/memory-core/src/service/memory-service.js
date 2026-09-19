@@ -231,6 +231,7 @@ export class MemoryService {
             repos: this.repos,
             get embedder() { return workerRunnerOwner.embedder; },
             get capture() { return workerRunnerOwner.config.algorithm.capture; },
+            evolutionModelConfigured: () => workerRunnerOwner.skillLlm.isConfigured(),
             embeddingRetryWorkerId: this.embeddingRetryWorkerId,
             memoryAddEnabled: this.memoryAddEnabled.bind(this),
             nowIso,

@@ -108,6 +108,23 @@ powershell -ExecutionPolicy Bypass -File .\editions\server\windows\install.ps1 -
 
 为了获得更连续的体验，建议让 Agent 在每一轮有实际任务的对话开始时先读取 Memhub，上下文使用前先清理无关或过时噪声；任务结束时只写回真正长期有效的事实、决定、偏好和纠正，而不是把每一句聊天都当成长期记忆。
 
+### 项目路由与长期内容维护
+
+项目解析按“当前轮”进行，而不是把整个 conversation 永久锁死到一个项目。当前轮明确的项目、workspace 或唯一项目证据可以覆盖旧 conversation binding；旧 binding 只在本轮没有项目证据时兜底。业务记忆和 authoritative architecture 仍严格属于 primary project，其他项目只能通过独立 capability 通道复用明确的 Skill artifact。
+
+四个发行版都默认关闭 AgentSource 历史自动扫描；即使手动导入旧 AgentSource 历史，导入 trace 也不会再自动升级成长期 `user_memories`。
+
+长期内容维护采用只读优先：
+
+```bash
+npm run memory:audit
+npm run memory:repair
+npm run normify:audit
+npm run normify:migrate
+```
+
+`memory:repair` 在改动长期状态前会先生成 SQLite 备份和 JSON report。没有可用 evolution model 时，L3 / Project Environment 任务保持 queued，不再消耗重试次数进入 dead-letter。
+
 ### 网页入口
 
 使用 Server Edition 时：
