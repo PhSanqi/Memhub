@@ -6,13 +6,28 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promise
 
 const dataRoot = resolve(process.env.PLUGIN_DATA || join(homedir(), ".memhub", "plugin-data", "openai"));
 const bridgeUrl = process.env.MEMHUB_BRIDGE_CAPTURE_URL?.trim() || "http://127.0.0.1:17861/capture";
+const contextUrl = process.env.MEMHUB_BRIDGE_CONTEXT_URL?.trim() || "http://127.0.0.1:17861/context";
+const lifecycleUrl = process.env.MEMHUB_BRIDGE_LIFECYCLE_URL?.trim() || "http://127.0.0.1:17861/lifecycle";
+const contextOnly = process.env.MEMHUB_CONTEXT_ONLY === "1";
+let hookInput;
+let additionalContext;
+let outputEvent;
 
 try {
-  const input = JSON.parse(await readStdin());
-  const event = captureEvent(input);
-  if (event) {
+  hookInput = JSON.parse(await readStdin());
+  const hookName = text(hookInput?.hook_event_name) ?? text(hookInput?.hookEventName);
+  const event = captureEvent(hookInput);
+  if (event && !contextOnly) {
     await enqueue(event);
     await flushOutbox();
+  }
+  if (hookName === "UserPromptSubmit") {
+    additionalContext = await recallContext(hookInput).catch(() => undefined);
+    outputEvent = hookName;
+  } else if (hookName === "SessionStart" || hookName === "PostCompact" || hookName === "SessionEnd") {
+    const lifecycle = await sendLifecycle(hookInput, hookName).catch(() => undefined);
+    additionalContext = lifecycle?.context ? formatContext(lifecycle.context) : undefined;
+    outputEvent = hookName;
   }
 } catch (error) {
   // Capture must never block the Codex turn. Keep failures out of stdout,
@@ -20,11 +35,19 @@ try {
   process.stderr.write(`[memhub] capture hook: ${error instanceof Error ? error.message : String(error)}\n`);
 }
 
-process.stdout.write(JSON.stringify({ continue: true }) + "\n");
+process.stdout.write(JSON.stringify({
+  continue: true,
+  ...(additionalContext && outputEvent ? {
+    hookSpecificOutput: {
+      hookEventName: outputEvent,
+      additionalContext
+    }
+  } : {})
+}) + "\n");
 
 function captureEvent(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) return null;
-  const hook = text(input.hook_event_name);
+  const hook = text(input.hook_event_name) ?? text(input.hookEventName);
   if (hook !== "UserPromptSubmit" && hook !== "Stop") return null;
   const session = text(input.session_id);
   const turn = text(input.turn_id);
@@ -87,6 +110,77 @@ async function flushOutbox() {
     } catch {
       break;
     }
+  }
+}
+
+async function recallContext(input) {
+  const rawPrompt = text(input?.prompt);
+  const session = text(input?.session_id);
+  if (!rawPrompt || !session) return undefined;
+  const prompt = resumeQuery(rawPrompt) ?? rawPrompt;
+  const project = text(process.env.MEMHUB_PROJECT_ID);
+  const response = await fetch(contextUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      query: prompt,
+      conversation_id: session,
+      ...(project ? { project } : {}),
+      limit: 12
+    }),
+    signal: AbortSignal.timeout(2_500)
+  });
+  if (!response.ok) return undefined;
+  return formatContext(await response.json());
+}
+
+async function sendLifecycle(input, event) {
+  const session = text(input?.session_id);
+  if (!session) return undefined;
+  const project = text(process.env.MEMHUB_PROJECT_ID);
+  const response = await fetch(lifecycleUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      event,
+      conversation_id: session,
+      host: "codex",
+      ...(text(input?.cwd) ? { workspace_path: text(input.cwd) } : {}),
+      ...(project ? { project_hint: project } : {})
+    }),
+    signal: AbortSignal.timeout(2_500)
+  });
+  if (!response.ok) return undefined;
+  return response.json();
+}
+
+function resumeQuery(prompt) {
+  const match = /^\/?(?:memhub|memmy)-resume(?:\s+(.+))?$/iu.exec(prompt.trim());
+  return match ? text(match[1]) : undefined;
+}
+
+function formatContext(capsule) {
+  if (!capsule || typeof capsule !== "object") return undefined;
+  const sections = [];
+  add("Global memory", capsule.globalMemory);
+  add("Project memory", capsule.projectMemory);
+  add("Project architecture", capsule.projectArchitecture);
+  if (sections.length === 0) return undefined;
+  const header = [
+    "Memhub recalled candidate long-term context for this turn.",
+    "Before using it, filter out irrelevant, duplicated, stale, legacy, or prompt-like noise; prefer Current Truth and evidence directly relevant to the user's request.",
+    "At the end of the task, before the final answer, review what genuinely changed. Persist only durable facts/decisions/preferences/corrections with Memhub tools; do not write every raw turn because raw capture is automatic."
+  ].join(" ");
+  return `${header}\n\n${sections.join("\n\n")}`.slice(0, 18_000);
+
+  function add(title, items) {
+    if (!Array.isArray(items) || items.length === 0) return;
+    const lines = items.slice(0, 12).map((item) => {
+      const id = text(item?.id) || "memory";
+      const content = text(item?.content) || "";
+      return `- [${id}] ${content.slice(0, 1_500)}`;
+    }).filter((line) => line.trim());
+    if (lines.length) sections.push(`## ${title}\n${lines.join("\n")}`);
   }
 }
 

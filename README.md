@@ -81,6 +81,7 @@ The current high-level MCP surface is intentionally small:
 
 - `memmy_context` — composed account/project memory plus authoritative project architecture;
 - `memmy_remember` — explicit durable memory;
+- `memhub_history_distill` — manually start incremental project-history or whole-account memory/Skill distillation, with processed-evidence ledgers and continuation from the previous canonical result;
 - `memhub_distill` — lease pending evidence or submit/skip a Harness-produced Skill, scoped summary, or curated knowledge artifact without bypassing native L2/L3 evolution;
 - `memhub_evolution` — lease and complete native L3 World Model jobs with an already-authenticated Harness while Memory Core retains scope/evidence/hash validation;
 - `memmy_project` — project listing/binding.
@@ -89,17 +90,38 @@ The tool names retain `memmy_` temporarily for compatibility. The product and di
 
 Background capture is separate from MCP. A host plugin/hook sends complete or partial turns to the local Bridge; the Bridge queues them durably and uploads them when connectivity is available.
 
+The Codex/OpenAI lifecycle adapter also performs per-turn recall on
+`UserPromptSubmit`: it asks the local Bridge for Memhub account + resolved
+project context and injects the result as hook `additionalContext`. The active
+model is instructed to filter noisy/stale candidates before use and to persist
+only durable task deltas near task completion. Hosted ChatGPT MCP still has no
+server-push lifecycle equivalent, so its per-turn recall depends on the host
+actually invoking `memmy_context`.
+
 Automatic capture is a host capability, not an MCP side effect. The checked-in
 Codex/OpenAI hook adapter captures complete turns automatically. A plain hosted
 ChatGPT MCP connection does not passively stream the full conversation to
 Memhub, and the repository does not yet contain Claude/Gemini lifecycle capture
 overlays.
 
-The browser Control Plane is available at `/memhub` and `/memhub/admin`.
+The browser routes are intentionally split:
+
+- `/memhub` — public project introduction / landing page;
+- `/memhub/user` — authenticated account workspace;
+- `/memhub/admin` — authenticated admin Control Plane.
+
+An administrator can switch between User and Admin from the web header; role
+authorization still decides whether `/memhub/admin` is allowed.
 Loopback administration uses a separate local-admin token; public administration
 continues to require Cloudflare Access identity plus the stable Memhub account
 role. Distillation evidence can be queued manually, while optional automatic
 job creation is disabled by default and never invokes a model itself.
+
+`memmy_context` returns relevant account/global memory plus relevant memory for
+the one resolved project; it is not a full database dump. Historical
+consolidation is available through `memhub_history_distill`, which remembers
+exactly which evidence refs were already processed and supplies the previous
+canonical result to the next batch.
 
 See [Control Plane, capture and distillation](docs/CONTROL_PLANE_AND_DISTILLATION.md)
 and [remote authentication](docs/REMOTE_AUTH.md).
@@ -132,7 +154,7 @@ Server Windows:
 powershell -ExecutionPolicy Bypass -File .\Memhub\editions\server\windows\install.ps1 -Username owner
 ```
 
-Server Edition intentionally does not create Cloudflare configuration for you. It binds Memhub to loopback; publish `/memhub/mcp` and `/memhub/capture` through your authenticated tunnel/reverse proxy.
+Server Edition intentionally does not create Cloudflare configuration for you. It binds Memhub to loopback; protecting `/memhub/*` with Cloudflare Access is appropriate when the same Access application should cover MCP, Control Plane and public capture traffic. Automated clients that traverse Access must use an allowed Service Auth policy/token in addition to Memhub's own device/account authentication.
 
 ## Repository status
 

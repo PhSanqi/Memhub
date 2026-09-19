@@ -32,6 +32,7 @@ The model-visible tool contract stays stable:
 
 - `memmy_context`
 - `memmy_remember`
+- `memhub_history_distill`
 - `memhub_distill`
 - `memhub_evolution`
 - `memmy_project`

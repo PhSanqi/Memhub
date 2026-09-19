@@ -153,6 +153,16 @@ export async function serveBridge(options: { stateRoot: string; host?: string; p
         await proxyMcp(request, response, config);
         return;
       }
+      if (request.method === "POST" && url.pathname === "/context") {
+        const config = await loadBridgeConfig(options.stateRoot);
+        await proxyContext(request, response, config);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/lifecycle") {
+        const config = await loadBridgeConfig(options.stateRoot);
+        await proxyLifecycle(request, response, config);
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/flush") {
         return json(response, 200, await queue.flush(await loadBridgeConfig(options.stateRoot)));
       }
@@ -298,6 +308,79 @@ async function proxyMcp(
   } finally {
     reader.releaseLock();
   }
+}
+
+async function proxyContext(
+  request: import("node:http").IncomingMessage,
+  response: import("node:http").ServerResponse,
+  config: BridgeConfig
+): Promise<void> {
+  const body = JSON.stringify(await readJsonBody(request));
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    authorization: `Bearer ${config.device_token}`
+  };
+  if (config.cloudflare_access_client_id && config.cloudflare_access_client_secret) {
+    headers["CF-Access-Client-Id"] = config.cloudflare_access_client_id;
+    headers["CF-Access-Client-Secret"] = config.cloudflare_access_client_secret;
+  }
+  const upstream = await fetch(contextEndpoint(config.capture_endpoint), {
+    method: "POST",
+    headers,
+    body,
+    redirect: "error",
+    signal: AbortSignal.timeout(15_000)
+  });
+  const text = await upstream.text();
+  response.writeHead(upstream.status, {
+    "content-type": upstream.headers.get("content-type") ?? "application/json",
+    "cache-control": "no-store"
+  });
+  response.end(text);
+}
+
+async function proxyLifecycle(
+  request: import("node:http").IncomingMessage,
+  response: import("node:http").ServerResponse,
+  config: BridgeConfig
+): Promise<void> {
+  const body = JSON.stringify(await readJsonBody(request));
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    authorization: `Bearer ${config.device_token}`
+  };
+  if (config.cloudflare_access_client_id && config.cloudflare_access_client_secret) {
+    headers["CF-Access-Client-Id"] = config.cloudflare_access_client_id;
+    headers["CF-Access-Client-Secret"] = config.cloudflare_access_client_secret;
+  }
+  const upstream = await fetch(siblingEndpoint(config.capture_endpoint, "lifecycle"), {
+    method: "POST",
+    headers,
+    body,
+    redirect: "error",
+    signal: AbortSignal.timeout(15_000)
+  });
+  const text = await upstream.text();
+  response.writeHead(upstream.status, {
+    "content-type": upstream.headers.get("content-type") ?? "application/json",
+    "cache-control": "no-store"
+  });
+  response.end(text);
+}
+
+function contextEndpoint(captureEndpoint: string): string {
+  return siblingEndpoint(captureEndpoint, "context");
+}
+
+function siblingEndpoint(baseEndpoint: string, leaf: string): string {
+  const url = new URL(baseEndpoint);
+  const segments = url.pathname.split("/").filter(Boolean);
+  if (segments.length === 0) throw new Error("endpoint path is empty");
+  segments[segments.length - 1] = leaf;
+  url.pathname = `/${segments.join("/")}`;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
 }
 
 function singleRequestHeader(value: string | string[] | undefined): string | undefined {

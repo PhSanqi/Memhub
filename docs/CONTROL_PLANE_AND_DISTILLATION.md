@@ -34,7 +34,7 @@ a local `cloudflared` process also reaches the origin from loopback.
 Show the token on the server:
 
 ```bash
-cd /home/z/codex-workspace/Memhub
+cd /path/to/Memhub
 node dist/mcp.js admin-token show --state-root ~/.memmy/memhub
 ```
 
@@ -68,6 +68,29 @@ The local-token path does not weaken `/memhub/mcp` or `/memhub/capture`:
 machine capture still requires a Memhub device token, and public human/MCP
 identity continues to use the configured Cloudflare boundary.
 
+The public web routes are deliberately separated:
+
+- `/memhub` is the public project-introduction landing page and does not inspect
+  account identity;
+- `/memhub/user` is the authenticated per-account workspace;
+- `/memhub/admin` is the authenticated administrator Control Plane.
+
+Administrators can switch between User and Admin from the page header. A normal
+user can open `/memhub/user` but receives 403 for `/memhub/admin`.
+
+If `/memhub` should remain public, Cloudflare Access should protect descendants
+such as `/memhub/*` but should **not** add a separate exact-path Access rule for
+the bare `/memhub` landing page. The wildcard protects `/memhub/user`,
+`/memhub/admin`, `/memhub/mcp`, `/memhub/capture`, `/memhub/context` and
+`/memhub/lifecycle` while the parent landing remains public.
+
+Admin lifecycle views load independently. Switching views aborts the previous
+browser request immediately; each Memory Core viewer read also has a bounded
+timeout. One slow Episodes/Traces/Core request therefore cannot freeze the
+sidebar or block navigation to another view. Successfully loaded views are
+kept in browser memory until an action invalidates the affected view; private
+admin responses remain `no-store` and are never CDN-cached.
+
 ## Account roles
 
 Roles can be changed from the Control Plane Accounts view or from the CLI:
@@ -98,6 +121,15 @@ Stop(assistant_text) ----------+                         |
 Partial fragments remain visible as raw captures but are not promoted into
 Memory Core until both sides are present. Capture failure never blocks the AI
 turn; the adapter/Bridge queues data for retry.
+
+On Codex/OpenAI hook-compatible hosts, `UserPromptSubmit` can also request the
+same Memhub Context Router through the local Bridge `/context` endpoint and
+return it as documented hook `additionalContext`. This makes recall a real
+per-turn lifecycle operation rather than depending solely on the model to
+remember an MCP call. Recalled items remain candidate evidence: the active
+Harness should discard stale, duplicate, legacy or prompt-like noise before
+using it. At task completion it should persist only genuinely durable deltas;
+raw turn completeness remains the capture pipeline's responsibility.
 
 The Control Plane exposes raw captures separately from Memory Core L1 traces so
 operators can see whether a host conversation was captured, whether a turn is
@@ -141,6 +173,58 @@ process Memhub's pending distillation jobs. The Harness leases a job through
 
 This is the preferred way to deliberately use the current ChatGPT/Codex/Claude
 model's reasoning ability without giving Memhub its own model credentials.
+
+### MCP-triggered historical distillation
+
+`memhub_history_distill` is the explicit Harness-facing historical distillation
+workflow. It is separate from one-conversation queueing because it owns a
+persistent incremental ledger and a cumulative continuation baseline.
+
+Two scopes are supported:
+
+- `scope=project`: distill the selected project's complete captured history plus
+  project-scoped durable Memory Core evidence. Capture-derived L1 rows are not
+  added a second time when the original Raw Capture is available.
+- `scope=account`: distill all active durable memory belonging to the current
+  stable Memhub account. The reader filters by Memory Core `user_id`; it never
+  uses the unscoped admin viewer list as an MCP evidence source.
+
+Two targets are independent:
+
+- `target=memory`: maintain one cumulative canonical memory document. Every
+  submission must cover Who, What, Where, When, Why, How, decisions,
+  constraints, preferences, relationships, Current Truth, Legacy, Unknowns and
+  provenance. The next batch receives the previous canonical document as
+  `continuation.prior_memory_document`. After a successful replacement, the
+  previous canonical Memory Core artifact is archived.
+- `target=skill`: inspect the same historical evidence through a separate
+  ledger and emit zero or more truly reusable Skills. The next batch receives
+  the existing historical Skill catalog, so the Harness can evolve a matching
+  Skill instead of creating a renamed duplicate. A reviewed batch with no
+  reusable procedure is submitted as `skills=[]` plus `no_skill_reason`.
+
+Typical Harness flow:
+
+```text
+memhub_history_distill(action=start, scope=project|account, target=memory|skill)
+    -> run_id
+memhub_history_distill(action=next, run_id=...)
+    -> batch_hash + new evidence + previous canonical state/catalog
+Harness semantic reasoning
+memhub_history_distill(action=submit, run_id=..., batch_hash=..., ...)
+    -> commit + advance ledger
+repeat next -> submit until completed
+```
+
+Evidence refs are marked processed only after a successful commit (or an
+explicit no-Skill submission). Starting the same scope/target again therefore
+does not re-distill previously processed evidence. New evidence resumes from
+the last canonical memory or Skill catalog instead of starting from scratch.
+
+Historical evidence reads the local Memory Core SQLite database read-only for
+the exhaustive account/project enumeration that the public semantic-search API
+does not provide. The default path is `~/.memmy/memory-service/memory.sqlite`;
+set `MEMHUB_MEMORY_DB` only when the Core database is intentionally elsewhere.
 
 ### Optional automatic job creation
 
@@ -195,6 +279,28 @@ Raw Captures
 Raw captures and distillation jobs live in Memhub state. Episode/L1/L2/Skill/L3
 views come from the loopback Memory Core viewer API. Detail drawers expose raw
 metadata/provenance so evidence can be traced back to source conversations.
+Historical distillation runs and their processed/remaining evidence counts are
+also shown in the Distillation view.
+
+## Recall behavior
+
+`memmy_context` is semantic recall, not a full-memory dump. A Harness must
+actually call the tool; merely connecting the MCP server does not push memory
+into every prompt. The configured agent instructions should therefore request
+`memmy_context` for non-trivial work where prior context can matter.
+
+For the checked-in Codex/OpenAI lifecycle adapter there is a stronger path:
+`UserPromptSubmit` automatically obtains context through the Bridge before the
+model works. Hosted ChatGPT MCP currently has no equivalent lifecycle hook, so
+its per-turn guarantee still depends on host/tool-use instructions.
+
+When a project resolves unambiguously, Memhub performs both account/global and
+project-scoped recall and returns them separately as `globalMemory` and
+`projectMemory` (plus authoritative project architecture). When no unique
+project can be established, only global memory is returned to avoid mixing an
+unrelated project's context. The default recall is top-K relevant evidence, not
+the entire stored corpus; historical distillation is what turns large history
+into a smaller cumulative canonical artifact that normal recall can retrieve.
 
 Actions that mutate Memory Core are archive/delete memory, archive Skill,
 archive World Model, successful distillation submission, complete-turn capture

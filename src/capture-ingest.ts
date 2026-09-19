@@ -37,10 +37,7 @@ export async function ingestCaptureIntoMemory(input: {
   // Memory sessions are project-scoped. A host conversation that switches
   // projects therefore gets a new Memory session while retaining its host
   // conversation_id in provenance/bindings.
-  const sessionId = deterministicId(
-    "mhcap_session",
-    `${runtime.accountId}\0${event.host}\0${event.conversation_id}\0${projectId ?? "global"}`
-  );
+  const sessionId = captureSessionId(runtime.accountId, event.host, event.conversation_id, projectId);
   const turnId = deterministicId(
     "mhcap_turn",
     `${runtime.accountId}\0${event.host}\0${event.event_id}`
@@ -120,6 +117,10 @@ export async function ingestCaptureIntoMemory(input: {
 
 function deterministicId(prefix: string, source: string): string {
   return `${prefix}_${createHash("sha256").update(source, "utf8").digest("hex").slice(0, 40)}`;
+}
+
+export function captureSessionId(accountId: string, host: string, conversationId: string, projectId: string | null): string {
+  return deterministicId("mhcap_session", `${accountId}\0${host}\0${conversationId}\0${projectId ?? "global"}`);
 }
 
 function unique(values: readonly string[]): string[] {

@@ -103,6 +103,7 @@ B 项目
 
 - `memmy_context`：组合个人记忆、项目记忆和权威项目架构；
 - `memmy_remember`：显式长期记忆；
+- `memhub_history_distill`：由 ChatGPT/Codex 等 Harness 手动发起项目历史或账号全部记忆/Skill 的增量蒸馏；服务端记录已处理 evidence，并把上一次规范化结果接给下一批；
 - `memhub_distill`：领取待蒸馏 evidence，或提交/跳过由当前 Harness 真正判断出的 Skill、项目/个人总结或整理知识，但不绕过原生 L2/L3 演化；
 - `memhub_evolution`：让已登录的 Harness 领取并完成原生 L3 World Model 任务，最终 scope/evidence/hash 校验仍由 Memory Core 执行；
 - `memmy_project`：项目查询和绑定。
@@ -111,9 +112,13 @@ B 项目
 
 自动 capture 不依赖模型每轮主动调用 MCP。Plugin/Hook 把 turn 交给本地 Bridge，Bridge 先落本地队列，再上传服务器；断网不会丢。
 
+Codex/OpenAI lifecycle adapter 现在还会在每次 `UserPromptSubmit` 时通过本地 Bridge 自动读取 Memhub 的账号/全局 + 已解析项目上下文，并作为 hook `additionalContext` 注入当前模型。模型应先清理无关、过时、Legacy、重复或 prompt-like 噪声再使用；任务结束前只回写真正耐久的新事实/决定/偏好/纠正。ChatGPT Web 普通 MCP 目前没有等价 lifecycle hook，因此仍取决于 Host/Agent 指令实际调用 `memmy_context`。
+
 但“连接了 MCP”本身不等于“自动拿到整个聊天”。当前仓库真正已经实现自动 Raw Capture 的是 Codex/OpenAI lifecycle hook adapter。ChatGPT Web 仅连接远程 MCP 时，Memhub 只能在 ChatGPT 实际调用工具时获得上下文或写入；当前仓库也还没有 Claude/Gemini 的 lifecycle capture overlay。
 
-管理界面位于 `/memhub` 和 `/memhub/admin`。本机或 SSH tunnel 访问使用独立 local-admin token；公网访问继续要求 Cloudflare Access JWT → stable `account_id` → role 校验。管理员可以手动把 Raw Capture 排入待蒸馏任务，也可以选择开启自动“形成待办”。自动蒸馏默认关闭，而且即使开启也只生成 evidence job，不会由 Memhub 后端自行调用大模型消耗额度。
+Web 路由现在明确拆分：`/memhub` 是公开的项目介绍入口，`/memhub/user` 是认证后的用户工作区，`/memhub/admin` 是管理员 Control Plane。管理员可以直接在网页顶部切换 User/Admin 视图；是否能进入 `/memhub/admin` 仍由 stable `account_id` 的 `admin` role 决定。本机或 SSH tunnel 管理继续使用独立 local-admin token；公网用户页和管理页继续要求 Cloudflare Access JWT → stable `account_id` → role 校验。管理员可以手动把 Raw Capture 排入待蒸馏任务，也可以选择开启自动“形成待办”。自动蒸馏默认关闭，而且即使开启也只生成 evidence job，不会由 Memhub 后端自行调用大模型消耗额度。
+
+`memmy_context` 不是全库 dump：当项目能够唯一解析时，它会同时返回相关的账号/全局记忆和该项目记忆；项目不明确时只返回全局，避免串项目。需要把大段历史整理成连续、可召回的规范化记忆时，使用 `memhub_history_distill`。它对 `project` 与 `account`、`memory` 与 `skill` 分别维护 processed-evidence ledger，因此已经处理过的内容不会在后续运行中重复蒸馏。
 
 详细见 [Control Plane、Capture 与 Distillation](docs/CONTROL_PLANE_AND_DISTILLATION.md)。
 
@@ -145,7 +150,7 @@ Server Windows：
 powershell -ExecutionPolicy Bypass -File .\Memhub\editions\server\windows\install.ps1 -Username owner
 ```
 
-Server Edition 只监听 loopback，不会替你自动创建 Cloudflare 配置。将 `/memhub/mcp` 和 `/memhub/capture` 通过你自己的认证 Tunnel / 反向代理发布即可。
+Server Edition 只监听 loopback，不会替你自动创建 Cloudflare 配置。如果同一个 Access Application 要保护 MCP、Control Plane 与公网 capture，可以把路径覆盖到 `/memhub/*`；任何通过 Access 的自动化客户端还必须配置允许的 Service Auth policy/token，Memhub 自身的 device/account 鉴权仍然保留。
 
 ## 当前状态与上游来源
 

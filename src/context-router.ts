@@ -51,7 +51,7 @@ export class ContextRouter {
       await this.bindings.bind(accountId, conversationId, resolution.projectId);
     }
 
-    const limit = Math.min(50, Math.max(1, Math.trunc(input.limit ?? 8)));
+    const limit = Math.min(50, Math.max(1, Math.trunc(input.limit ?? 12)));
     const recalled = await this.memory.recall({
       accountId,
       userId,

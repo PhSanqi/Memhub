@@ -55,16 +55,16 @@ export class LocalMemoryRestClient {
     return this.request("/api/v1/memory/add", request);
   }
 
-  viewerGet(path: string): Promise<unknown> {
-    return this.requestRaw(path, "GET");
+  viewerGet(path: string, timeoutMs = 5_000): Promise<unknown> {
+    return this.requestRaw(path, "GET", undefined, timeoutMs);
   }
 
-  viewerPost(path: string, body: Record<string, unknown> = {}): Promise<unknown> {
-    return this.requestRaw(path, "POST", body);
+  viewerPost(path: string, body: Record<string, unknown> = {}, timeoutMs = 10_000): Promise<unknown> {
+    return this.requestRaw(path, "POST", body, timeoutMs);
   }
 
-  viewerDelete(path: string): Promise<unknown> {
-    return this.requestRaw(path, "DELETE");
+  viewerDelete(path: string, timeoutMs = 10_000): Promise<unknown> {
+    return this.requestRaw(path, "DELETE", undefined, timeoutMs);
   }
 
   openSession(request: Record<string, unknown>): Promise<unknown> {
@@ -79,6 +79,14 @@ export class LocalMemoryRestClient {
     return this.request(`/api/v1/turns/${encodeURIComponent(turnId)}/complete`, request);
   }
 
+  closeSession(sessionId: string, request: Record<string, unknown>): Promise<unknown> {
+    return this.request(`/api/v1/sessions/${encodeURIComponent(sessionId)}/close`, request);
+  }
+
+  l3Boundary(sessionId: string, request: Record<string, unknown>): Promise<unknown> {
+    return this.request(`/api/v1/sessions/${encodeURIComponent(sessionId)}/l3-world-model-boundary`, request);
+  }
+
   leaseExternalL3(request: Record<string, unknown>): Promise<unknown> {
     return this.request("/api/v1/evolution/l3/lease", request);
   }
@@ -91,7 +99,12 @@ export class LocalMemoryRestClient {
     return this.requestRaw(path, "POST", body);
   }
 
-  private async requestRaw(path: string, method: "GET" | "POST" | "DELETE", body?: Record<string, unknown>): Promise<unknown> {
+  private async requestRaw(
+    path: string,
+    method: "GET" | "POST" | "DELETE",
+    body?: Record<string, unknown>,
+    timeoutMs = 15_000
+  ): Promise<unknown> {
     const response = await this.fetchImpl(`${this.endpoint}${path}`, {
       method,
       headers: {
@@ -99,7 +112,8 @@ export class LocalMemoryRestClient {
         "x-memmy-viewer": "1",
         ...(this.token ? { authorization: `Bearer ${this.token}` } : {})
       },
-      ...(body ? { body: JSON.stringify(body) } : {})
+      ...(body ? { body: JSON.stringify(body) } : {}),
+      signal: AbortSignal.timeout(timeoutMs)
     });
     const text = await response.text();
     const payload = text ? safeJson(text) : undefined;

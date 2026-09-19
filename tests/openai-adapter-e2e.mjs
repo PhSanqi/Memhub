@@ -14,6 +14,8 @@ const env = {
   ...process.env,
   PLUGIN_DATA: dataRoot,
   MEMHUB_BRIDGE_CAPTURE_URL: `http://127.0.0.1:${port}/capture`,
+  MEMHUB_BRIDGE_CONTEXT_URL: `http://127.0.0.1:${port}/context`,
+  MEMHUB_BRIDGE_LIFECYCLE_URL: `http://127.0.0.1:${port}/lifecycle`,
   MEMHUB_PROJECT_ID: "aide"
 };
 
@@ -34,6 +36,32 @@ try {
     let raw = "";
     for await (const chunk of request) raw += chunk;
     received.push({ url: request.url, body: JSON.parse(raw || "{}") });
+    if (request.url === "/context") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        resolvedProjectId: "aide",
+        recallScope: "global_and_project",
+        globalMemory: [{ id: "g1", content: "durable global preference" }],
+        projectMemory: [{ id: "p1", content: "current aide project decision" }],
+        projectArchitecture: []
+      }));
+      return;
+    }
+    if (request.url === "/lifecycle") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        ok: true,
+        event: received.at(-1).body.event,
+        context: received.at(-1).body.event === "SessionEnd" ? undefined : {
+          resolvedProjectId: "aide",
+          recallScope: "global_and_project",
+          globalMemory: [{ id: "g2", content: "session durable context" }],
+          projectMemory: [],
+          projectArchitecture: []
+        }
+      }));
+      return;
+    }
     response.writeHead(202, { "content-type": "application/json" });
     response.end(JSON.stringify({ accepted: true }));
   });
@@ -42,6 +70,42 @@ try {
     bridge.listen(port, "127.0.0.1", ready);
   });
   try {
+    const contextResult = await runHook({
+      session_id: "codex-session-context",
+      turn_id: "codex-turn-context",
+      cwd: "/workspace/aide",
+      hook_event_name: "UserPromptSubmit",
+      model: "gpt-test",
+      prompt: "continue with prior decisions"
+    }, { ...env, MEMHUB_CONTEXT_ONLY: "1" });
+    const contextOutput = JSON.parse(contextResult.stdout);
+    assert.equal(contextOutput.continue, true);
+    assert.equal(contextOutput.hookSpecificOutput.hookEventName, "UserPromptSubmit");
+    assert.match(contextOutput.hookSpecificOutput.additionalContext, /durable global preference/);
+    assert.match(contextOutput.hookSpecificOutput.additionalContext, /current aide project decision/);
+
+    const sessionStart = JSON.parse((await runHook({
+      session_id: "codex-session-lifecycle",
+      cwd: "/workspace/aide",
+      hook_event_name: "SessionStart"
+    }, env)).stdout);
+    assert.equal(sessionStart.hookSpecificOutput.hookEventName, "SessionStart");
+    assert.match(sessionStart.hookSpecificOutput.additionalContext, /session durable context/);
+
+    const postCompact = JSON.parse((await runHook({
+      session_id: "codex-session-lifecycle",
+      cwd: "/workspace/aide",
+      hook_event_name: "PostCompact"
+    }, env)).stdout);
+    assert.equal(postCompact.hookSpecificOutput.hookEventName, "PostCompact");
+    assert.match(postCompact.hookSpecificOutput.additionalContext, /session durable context/);
+
+    assert.deepEqual(JSON.parse((await runHook({
+      session_id: "codex-session-lifecycle",
+      cwd: "/workspace/aide",
+      hook_event_name: "SessionEnd"
+    }, env)).stdout), { continue: true });
+
     const stopResult = await runHook({
       session_id: "codex-session-1",
       turn_id: "codex-turn-1",
@@ -56,15 +120,17 @@ try {
     await new Promise((resolveClose) => bridge.close(resolveClose));
   }
 
-  assert.equal(received.length, 1);
-  assert.equal(received[0].url, "/capture");
-  assert.equal(received[0].body.event_id, "codex:codex-session-1:codex-turn-1");
-  assert.equal(received[0].body.conversation_id, "codex-session-1");
-  assert.equal(received[0].body.turn_id, "codex-turn-1");
-  assert.equal(received[0].body.user_text, "continue the implementation");
-  assert.equal(received[0].body.assistant_text, "implementation complete");
-  assert.equal(received[0].body.workspace_path, "/workspace/aide");
-  assert.equal(received[0].body.project_hint, "aide");
+  const captureRequests = received.filter((item) => item.url === "/capture");
+  assert.equal(captureRequests.length, 1);
+  assert.equal(captureRequests[0].body.event_id, "codex:codex-session-1:codex-turn-1");
+  assert.equal(captureRequests[0].body.conversation_id, "codex-session-1");
+  assert.equal(captureRequests[0].body.turn_id, "codex-turn-1");
+  assert.equal(captureRequests[0].body.user_text, "continue the implementation");
+  assert.equal(captureRequests[0].body.assistant_text, "implementation complete");
+  assert.equal(captureRequests[0].body.workspace_path, "/workspace/aide");
+  assert.equal(captureRequests[0].body.project_hint, "aide");
+  const lifecycleRequests = received.filter((item) => item.url === "/lifecycle");
+  assert.deepEqual(lifecycleRequests.map((item) => item.body.event), ["SessionStart", "PostCompact", "SessionEnd"]);
   assert.equal((await readdir(join(dataRoot, "outbox"))).filter((name) => name.endsWith(".json")).length, 0);
 
   console.log("memhub-openai-adapter-e2e: ok");

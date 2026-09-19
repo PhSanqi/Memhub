@@ -17,7 +17,7 @@ that later distills them.
   semantic distillation. Memhub supplies the contract, evidence boundary,
   optional evidence jobs, schema validation, provenance and commit rules.
 - controlplane: inspection and governance; destructive administration stays
-  out of the default five-tool MCP surface.
+  out of the default six-tool MCP surface.
 
 Content source and distillation executor are different fields. A ChatGPT
 conversation distilled by Codex remains sourced from ChatGPT and records Codex
@@ -32,6 +32,16 @@ contract version with committed artifacts.
 
 Memhub intentionally does not require its own LLM API for semantic
 distillation. The connected MCP/harness model does that work.
+
+`memhub_history_distill` is the explicit incremental historical workflow. It
+maintains a per-account/per-project and per-target evidence ledger, so a
+processed evidence ref is not proposed again. Memory-target runs carry the
+previous canonical document forward into the next batch; Skill-target runs
+carry an existing Skill catalog forward for duplicate detection/evolution.
+Project-history evidence combines complete Raw Captures with non-duplicate
+project-scoped Memory Core evidence. Account-history evidence is enumerated
+read-only from the local Core database and filtered by the runtime `user_id`;
+the unscoped viewer list is never used as an MCP evidence boundary.
 
 Distillation jobs are Memhub control-state, not a replacement evolution
 engine. Automatic job creation is opt-in and only forms evidence batches at a
