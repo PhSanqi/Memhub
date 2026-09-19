@@ -259,21 +259,32 @@ async function testLocalAdmin(memoryPort) {
     assert.match(authenticatedHtml, /Local token \+ loopback Host/);
     assert.match(authenticatedHtml, /MEMORY CONTROL PLANE/);
     assert.match(authenticatedHtml, /refreshButton\.id="refresh"/);
+    assert.match(authenticatedHtml, /id="theme-toggle"/);
+    assert.match(authenticatedHtml, /localStorage\.memhubTheme/);
+    assert.match(authenticatedHtml, /localStorage\.memhubLang/);
     const landing = await fetch(`http://127.0.0.1:${port}/memhub`);
     assert.equal(landing.status, 200);
     const landingHtml = await landing.text();
     assert.match(landingHtml, /PROJECT-AWARE LONG-TERM MEMORY/);
     assert.match(landingHtml, /FOUR RELEASE SURFACES/);
     assert.match(landingHtml, /github\.com\/PhSanqi\/Memhub/);
+    assert.match(landingHtml, /id="theme-toggle"/);
+    assert.match(landingHtml, /id="lang-toggle"/);
+    assert.match(landingHtml, /data-zh="项目感知长期记忆"/);
+    assert.match(landingHtml, /data-en="Memory that stays connected to the work\."/);
     const workspaceView = await fetch(`http://127.0.0.1:${port}/memhub/user`, { headers: { authorization } });
     assert.equal(workspaceView.status, 200);
     const workspaceHtml = await workspaceView.text();
-    assert.match(workspaceHtml, />User<\/a><a class="view-switch/);
-    assert.match(workspaceHtml, /ACCOUNT WORKSPACE/);
-    assert.match(workspaceHtml, /PROJECT MEMORY/);
-    assert.match(workspaceHtml, /DEVICE ACCESS/);
-    assert.match(workspaceHtml, /GOVERNANCE BOUNDARY/);
+    assert.match(workspaceHtml, /data-en="Workspace"/);
+    assert.match(workspaceHtml, /data-en="ACCOUNT WORKSPACE"/);
+    assert.match(workspaceHtml, /data-en="PROJECT MEMORY"/);
+    assert.match(workspaceHtml, /data-en="DEVICE ACCESS"/);
+    assert.match(workspaceHtml, /data-en="GOVERNANCE BOUNDARY"/);
     assert.match(workspaceHtml, /class="user-body"/);
+    assert.match(workspaceHtml, /id="theme-toggle"/);
+    assert.match(workspaceHtml, /id="lang-toggle"/);
+    assert.match(workspaceHtml, /localStorage\.memhubTheme/);
+    assert.match(workspaceHtml, /localStorage\.memhubLang/);
     const tunnelLike = await fetch(`http://127.0.0.1:${port}/memhub/admin`, {
       headers: { authorization, "cf-ray": "test-ray" }
     });
