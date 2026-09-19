@@ -54,7 +54,7 @@ try {
   assert.equal(existsSync(embeddedArchitecture.runtimeModule), true);
   assert.match(
     embeddedArchitecture.runtimeModule.replaceAll("\\", "/"),
-    /\/Memhub\/vendor\/normify\/lib\/generic\.js$/
+    /\/vendor\/normify\/lib\/generic\.js$/
   );
 
   const calls = [];
