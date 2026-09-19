@@ -26,6 +26,17 @@ const bridgeEntry = resolve(here, "../dist/bridge.js");
 const root = await mkdtemp(join(tmpdir(), "memhub-mcp-"));
 const historyDbPath = join(root, "history.sqlite");
 const historyDb = new Database(historyDbPath);
+
+function assertInlineScriptsParse(html) {
+  const open = "<scr" + "ipt>";
+  const close = "</scr" + "ipt>";
+  const scripts = html.split(open).slice(1).map((part) => part.split(close)[0]);
+  assert.ok(scripts.length > 0, "expected at least one inline script");
+  for (const script of scripts) {
+    assert.doesNotThrow(() => new Function(script));
+  }
+}
+
 historyDb.exec(`
   CREATE TABLE memories (
     id TEXT PRIMARY KEY, user_id TEXT NOT NULL, conversation_id TEXT, memory_value TEXT NOT NULL,
@@ -256,6 +267,7 @@ async function testLocalAdmin(memoryPort) {
     const authenticated = await fetch(`http://127.0.0.1:${port}/memhub/admin`, { headers: { authorization } });
     assert.equal(authenticated.status, 200);
     const authenticatedHtml = await authenticated.text();
+    assertInlineScriptsParse(authenticatedHtml);
     assert.match(authenticatedHtml, /Local token \+ loopback Host/);
     assert.match(authenticatedHtml, /MEMORY CONTROL PLANE/);
     assert.match(authenticatedHtml, /refreshButton\.id="refresh"/);
@@ -266,9 +278,16 @@ async function testLocalAdmin(memoryPort) {
     assert.match(authenticatedHtml, /data-view="projects"/);
     assert.match(authenticatedHtml, /function renderOverview/);
     assert.match(authenticatedHtml, /首屏不请求 Memory Core/);
+    assert.match(authenticatedHtml, /class="site-header"/);
+    assert.match(authenticatedHtml, /class="site-brand"/);
+    assert.match(authenticatedHtml, /aria-live="polite"/);
+    assert.match(authenticatedHtml, /role="dialog"/);
+    assert.match(authenticatedHtml, /refreshButton\.disabled=true/);
+    assert.match(authenticatedHtml, /prefers-reduced-motion:reduce/);
     const landing = await fetch(`http://127.0.0.1:${port}/memhub`);
     assert.equal(landing.status, 200);
     const landingHtml = await landing.text();
+    assertInlineScriptsParse(landingHtml);
     assert.match(landingHtml, /PROJECT-AWARE LONG-TERM MEMORY/);
     assert.match(landingHtml, /FOUR RELEASE SURFACES/);
     assert.match(landingHtml, /github\.com\/PhSanqi\/Memhub/);
@@ -277,9 +296,12 @@ async function testLocalAdmin(memoryPort) {
     assert.match(landingHtml, /data-zh="项目感知长期记忆"/);
     assert.match(landingHtml, /data-en="Memory that stays connected to the work\."/);
     assert.match(landingHtml, /data-theme="light"/);
+    assert.match(landingHtml, /landing-brand site-brand/);
+    assert.match(landingHtml, /prefers-reduced-motion:reduce/);
     const workspaceView = await fetch(`http://127.0.0.1:${port}/memhub/user`, { headers: { authorization } });
     assert.equal(workspaceView.status, 200);
     const workspaceHtml = await workspaceView.text();
+    assertInlineScriptsParse(workspaceHtml);
     assert.match(workspaceHtml, /data-en="Workspace"/);
     assert.match(workspaceHtml, /data-en="ACCOUNT WORKSPACE"/);
     assert.match(workspaceHtml, /data-en="PROJECT MEMORY"/);
@@ -291,6 +313,8 @@ async function testLocalAdmin(memoryPort) {
     assert.match(workspaceHtml, /localStorage\.memhubTheme/);
     assert.match(workspaceHtml, /localStorage\.memhubLang/);
     assert.match(workspaceHtml, /data-theme="light"/);
+    assert.match(workspaceHtml, /class="site-header"/);
+    assert.match(workspaceHtml, /class="site-brand"/);
     const projectView = await fetch(`http://127.0.0.1:${port}/memhub/admin/api?kind=projects`, { headers: { authorization } });
     assert.equal(projectView.status, 200);
     const projectPayload = await projectView.json();
