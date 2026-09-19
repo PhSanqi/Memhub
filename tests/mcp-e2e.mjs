@@ -255,13 +255,25 @@ async function testLocalAdmin(memoryPort) {
     const authorization = `Basic ${Buffer.from(`memhub:${token}`).toString("base64")}`;
     const authenticated = await fetch(`http://127.0.0.1:${port}/memhub/admin`, { headers: { authorization } });
     assert.equal(authenticated.status, 200);
-    assert.match(await authenticated.text(), /Local token \+ loopback Host/);
+    const authenticatedHtml = await authenticated.text();
+    assert.match(authenticatedHtml, /Local token \+ loopback Host/);
+    assert.match(authenticatedHtml, /MEMORY CONTROL PLANE/);
+    assert.match(authenticatedHtml, /refreshButton\.id="refresh"/);
     const landing = await fetch(`http://127.0.0.1:${port}/memhub`);
     assert.equal(landing.status, 200);
-    assert.match(await landing.text(), /LONG-TERM MEMORY INFRASTRUCTURE/);
+    const landingHtml = await landing.text();
+    assert.match(landingHtml, /PROJECT-AWARE LONG-TERM MEMORY/);
+    assert.match(landingHtml, /FOUR RELEASE SURFACES/);
+    assert.match(landingHtml, /github\.com\/PhSanqi\/Memhub/);
     const workspaceView = await fetch(`http://127.0.0.1:${port}/memhub/user`, { headers: { authorization } });
     assert.equal(workspaceView.status, 200);
-    assert.match(await workspaceView.text(), />User<\/a><a class="view-switch/);
+    const workspaceHtml = await workspaceView.text();
+    assert.match(workspaceHtml, />User<\/a><a class="view-switch/);
+    assert.match(workspaceHtml, /ACCOUNT WORKSPACE/);
+    assert.match(workspaceHtml, /PROJECT MEMORY/);
+    assert.match(workspaceHtml, /DEVICE ACCESS/);
+    assert.match(workspaceHtml, /GOVERNANCE BOUNDARY/);
+    assert.match(workspaceHtml, /class="user-body"/);
     const tunnelLike = await fetch(`http://127.0.0.1:${port}/memhub/admin`, {
       headers: { authorization, "cf-ray": "test-ray" }
     });
@@ -747,6 +759,8 @@ function historySkillDocument(title) {
 async function exerciseClient(client, conversationId) {
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["memhub_distill", "memhub_evolution", "memhub_history_distill", "memmy_context", "memmy_project", "memmy_remember"]);
+  assert.match(listed.tools.find((tool) => tool.name === "memmy_context")?.description ?? "", /先用本工具.*conversation_id.*memmy_project action=current/);
+  assert.match(listed.tools.find((tool) => tool.name === "memmy_project")?.description ?? "", /先完成 memmy_context.*action=current/);
   await client.callTool({ name: "memmy_project", arguments: { action: "bind", conversation_id: conversationId, project: "aide" } });
   const context = await client.callTool({ name: "memmy_context", arguments: { query: "continue", conversation_id: conversationId } });
   const capsule = JSON.parse(context.content[0].text);
