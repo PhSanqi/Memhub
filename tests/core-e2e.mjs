@@ -19,6 +19,7 @@ import { resolveProjectScope } from "../dist/project-scope.js";
 import { createDevice, normalizeCaptureEvent } from "../dist/capture.js";
 import { EmbeddedArchitectureSource } from "../dist/architecture-source.js";
 import { EmbeddedMemoryCore } from "../dist/embedded-memory-core.js";
+import { JsonProjectRegistry, projectSimilarity } from "../dist/project-registry.js";
 import { createNormifyRuntime } from "../vendor/normify/lib/generic.js";
 
 const root = await mkdtemp(join(tmpdir(), "memhub-core-"));
@@ -116,6 +117,67 @@ try {
   assert.equal((await router.context({ accountId: "acct", userId: "user", query: "回 aide", conversationId: "chat", semanticProjectIds: ["aide"] })).resolvedProjectId, "aide");
   assert.equal((await router.context({ accountId: "acct", userId: "user", query: "转到 memmy", conversationId: "chat", projectId: "memmy" })).resolvedProjectId, "memmy");
   assert.deepEqual(calls, ["aide", "aide", "memmy", "memmy", "aide", "memmy"]);
+
+  const projectRegistry = new JsonProjectRegistry(join(state, "project-registry.json"));
+  const reconciled = await projectRegistry.reconcile("acct", [
+    "oursmemory", "OursMemory", "Memhub", "memhub", "DevSpaceControl"
+  ]);
+  assert.deepEqual(reconciled.map((item) => item.projectId), ["DevSpaceControl", "memhub", "oursmemory"]);
+  assert.equal(await projectRegistry.resolve("acct", "OursMemory"), "oursmemory");
+  assert.equal(await projectRegistry.resolve("acct", "MEMHUB"), "memhub");
+  assert.equal(projectSimilarity("OursMemory", "oursmemory"), 1);
+  const ours = await projectRegistry.update("acct", "oursmemory", {
+    description: "Long-term memory research and implementation project."
+  });
+  assert.match(ours.description, /Long-term memory/);
+  const suggestion = await projectRegistry.suggest("acct", "OursMemori", 3);
+  assert.equal(suggestion[0]?.projectId, "oursmemory");
+  await projectRegistry.create("acct", {
+    projectId: "ours-memory-next",
+    description: "Temporary successor project used to verify logical merge."
+  });
+  await projectRegistry.merge("acct", "ours-memory-next", "oursmemory");
+  assert.equal(await projectRegistry.resolve("acct", "ours-memory-next"), "oursmemory");
+  assert.ok((await projectRegistry.storageIds("acct", "oursmemory")).includes("ours-memory-next"));
+  await projectRegistry.create("acct", { projectId: "throwaway", description: "Disposable test project." });
+  await projectRegistry.delete("acct", "throwaway");
+  assert.equal(await projectRegistry.resolve("acct", "throwaway"), null);
+
+  const aliasCalls = [];
+  const aliasMemory = {
+    async recall(input) {
+      aliasCalls.push(input);
+      return {
+        globalMemory: [],
+        projectMemory: input.projectId
+          ? [{ id: "alias-p", content: "alias project", authority: "remembered", scope: "project", source: "test", projectId: input.projectId }]
+          : [],
+        reusableSkills: []
+      };
+    },
+    async remember() { return { ok: true }; }
+  };
+  const aliasArchitecture = {
+    async listProjects() { return ["oursmemory", "OursMemory"]; },
+    async getProjectArchitecture({ projectId }) {
+      return [{ id: "arch-alias", content: projectId, authority: "authoritative", scope: "project", source: "normify", projectId }];
+    }
+  };
+  const aliasRouter = new ContextRouter(
+    aliasMemory,
+    aliasArchitecture,
+    new JsonConversationProjectBindingStore(join(root, "alias-bindings.json")),
+    projectRegistry
+  );
+  const aliasCapsule = await aliasRouter.context({
+    accountId: "acct",
+    userId: "user",
+    query: "继续 OursMemory",
+    conversationId: "alias-chat",
+    knownProjectIds: ["oursmemory", "OursMemory"]
+  });
+  assert.equal(aliasCapsule.resolvedProjectId, "oursmemory");
+  assert.ok(aliasCalls[0].projectStorageIds.includes("OursMemory"));
 
   const owner = await addAccount(state, "owner", "owner@example.com");
   await assert.rejects(() => resolveCloudflareAccount(state, { sub: "unknown", email: "unknown@example.com" }), /允许列表/);

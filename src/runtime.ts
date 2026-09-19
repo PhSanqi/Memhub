@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   EmbeddedArchitectureSource,
   NullProjectArchitectureSource,
@@ -9,6 +9,7 @@ import { JsonConversationProjectBindingStore } from "./binding-store.js";
 import { ContextRouter } from "./context-router.js";
 import { LocalMemoryRestClient } from "./local-memory-client.js";
 import { defaultMemoryUserId, MemoryRestContextSource } from "./memory-source.js";
+import { JsonProjectRegistry } from "./project-registry.js";
 
 export interface MemhubRuntimeOptions {
   accountId?: string;
@@ -16,6 +17,7 @@ export interface MemhubRuntimeOptions {
   memoryToken?: string;
   bindingsPath?: string;
   normifyRoot?: string;
+  projectRegistryPath?: string;
   disableNormify?: boolean;
   ownerAccountId?: string;
   ownerUserId?: string;
@@ -37,6 +39,7 @@ export interface MemhubRuntime {
   router: ContextRouter;
   memory: MemoryRestContextSource;
   architecture: ProjectArchitectureSource;
+  projects: JsonProjectRegistry;
   source: MemhubSourceContext;
 }
 
@@ -62,9 +65,14 @@ export function createMemhubRuntime(options: MemhubRuntimeOptions = {}): MemhubR
       runtimeModule: process.env.MEMHUB_ARCHITECTURE_RUNTIME
     });
   const bindings = new JsonConversationProjectBindingStore(bindingsPath);
-  const router = new ContextRouter(memory, architecture, bindings);
+  const projects = new JsonProjectRegistry(resolve(
+    options.projectRegistryPath ??
+    process.env.MEMHUB_PROJECT_REGISTRY ??
+    join(dirname(bindingsPath), "project-registry.json")
+  ));
+  const router = new ContextRouter(memory, architecture, bindings, projects);
   const source = options.source ?? { platform: "local", transport: "local" };
-  return { accountId, userId, memoryClient, router, memory, architecture, source };
+  return { accountId, userId, memoryClient, router, memory, architecture, projects, source };
 }
 
 function requireNonEmpty(value: string, field: string): string {
