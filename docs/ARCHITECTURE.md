@@ -10,7 +10,11 @@ that later distills them.
 - gateway: Remote MCP, capture and web control-plane HTTP boundary.
 - identity: Cloudflare identity -> stable Memhub account_id; devices remain
   account-bound principals rather than independent human identities.
-- projects: deterministic project resolution. Ambiguity is global-only.
+- projects: turn-scoped primary-project resolution. Current-turn evidence
+  overrides an older conversation binding; ambiguity is global-only.
+- capabilities: reusable Skill artifacts may be recalled across projects into
+  a separate capability channel. Project business memory and architecture do
+  not cross that boundary.
 - memory: account/project memory access over the Memhub-owned embedded Memory Core.
 - provenance: source platform/transport/principal/account/conversation/evidence.
 - distillation: the connected ChatGPT/Codex/Claude/DSH model performs
@@ -60,7 +64,11 @@ Memhub now vendors the runtime cores needed by the server distribution:
 3. the host-independent architecture engine under vendor/normify.
 
 The architecture adapter uses the embedded engine; the external Normify
-CLI/MCP is not required. EmbeddedMemoryCore can launch the vendored headless
+CLI/MCP is not required. Account-scoped `.normify/accounts/<hash>/normify-*`
+trees are authoritative. For migration compatibility, a repo-local
+`normify-*/modules` tree may be read as a bounded fallback and copied into
+the account tree with `scripts/normify-migration.mjs`.
+EmbeddedMemoryCore can launch the vendored headless
 memory service. Existing ~/.memmy config/database files are adopted in place
 when present so current data is preserved; a clean installation uses
 ~/.memhub/core. The server systemd deployment now runs the Memhub-owned
@@ -82,4 +90,21 @@ the schema and durable tables, and provides an exact post-cutover verifier.
 See [CORE_MIGRATION.md](CORE_MIGRATION.md).
 
 The `memhub.core` architecture module is active for this implementation.
+
+## Long-term-content hygiene
+
+All editions disable automatic AgentSource history scanning by default. Legacy
+history import is explicit and does not create durable `user_memories` from
+imported prompts. The high-level Memhub recall adapter also requires explicit
+`global` or `project:<id>` scope tags before a Memory Core hit can enter
+global/project context.
+
+Model-dependent L3 and Project Environment jobs are excluded from the internal
+worker when no evolution model is configured. They remain available for a
+future provider or external Harness executor instead of exhausting attempts
+into dead-letter.
+
+`scripts/long-term-repair.mjs` audits legacy scope contamination, known
+harness-prompt user memories and historical model-unavailable dead letters.
+Apply mode takes an online SQLite backup and emits a machine-readable report.
 

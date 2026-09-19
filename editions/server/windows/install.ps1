@@ -18,6 +18,7 @@ New-Item -ItemType Directory -Force -Path $StateRoot,$ServerState,$MemoryDir,$Ru
 
 $MemoryEntry = Join-Path $RepoRoot "vendor\memory-core\src\server\index.js"
 $McpEntry = Join-Path $RepoRoot "dist\mcp.js"
+$NormifyRoot = Split-Path $RepoRoot -Parent
 $NodeModules = Join-Path $RepoRoot "node_modules"
 if (-not (Test-Path $NodeModules)) {
   Push-Location $RepoRoot
@@ -47,7 +48,7 @@ $Config = @{
     version = 1; userId = "local-user"; roleRouting = @{ summary = "follow"; evolution = "follow" }
     storage = @{ mode = "local"; backend = "sqlite"; sqlitePath = (Join-Path $MemoryDir "memory.sqlite"); endpoint = "http://127.0.0.1:18960"; token = $MemoryToken }
     algorithm = @{ enableMemoryAdd = $true; enableMemorySearch = $true; enableQueryRewrite = $false }
-    agentAccess = @{ autoScanKnownAgents = $true; watchFileChanges = $true; autoInjectSkill = $false }
+    agentAccess = @{ autoScanKnownAgents = $false; watchFileChanges = $false; autoInjectSkill = $false }
   }
   providers = @{}; modelAssignments = @{ default = $null; memorySummary = $null; memoryEvolution = $null; embedding = $null; asr = $null; imageGeneration = $null }; modelPresets = @{}; app = @{}
 }
@@ -78,7 +79,7 @@ set "MEMHUB_MEMORY_URL=http://127.0.0.1:18960"
 set "MEMHUB_STATE_ROOT=$ServerState"
 set "MEMHUB_BINDINGS=$StateRoot\conversation-project-bindings.json"
 set "MEMHUB_ARCHITECTURE_CORE=embedded"
-$PublicEnv"$Node" "$McpEntry" --http 3001 --http-path /memhub/mcp --capture-path /memhub/capture --state-root "$ServerState" --memory-url http://127.0.0.1:18960$PublicArg
+$PublicEnv"$Node" "$McpEntry" --http 3001 --http-path /memhub/mcp --capture-path /memhub/capture --state-root "$ServerState" --memory-url http://127.0.0.1:18960 --normify-root "$NormifyRoot"$PublicArg
 "@ | Set-Content -Encoding ASCII $GatewayLauncher
 try { & icacls.exe $StateRoot /inheritance:r /grant:r "$env:USERNAME:(OI)(CI)F" | Out-Null } catch {}
 

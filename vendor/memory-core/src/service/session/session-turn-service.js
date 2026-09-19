@@ -2239,6 +2239,10 @@ export class SessionTurnService {
                 jobs: upsert.created ? this.userMemoryEmbeddingJobs(inserted, rawTurn, at) : []
             };
         }
+        if (Array.isArray(request.tags) &&
+            request.tags.some((tag) => typeof tag === "string" && tag.trim().toLowerCase() === "agent-source")) {
+            return { memoryIds: [], jobs: [] };
+        }
         if (this.deps.llm.isConfigured())
             return { memoryIds: [], jobs: [] };
         const content = rawTurn.userText?.trim() ?? "";

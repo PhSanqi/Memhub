@@ -71,7 +71,7 @@ Memhub's target evolution execution model supports three backends:
 
 1. **Direct provider** — the server uses an explicitly configured model provider/API key.
 2. **Harness worker** — an already authenticated Codex/Claude/other harness pulls an evolution job over MCP, produces a structured candidate, and submits it for validation/commit.
-3. **Deferred/local-only** — raw memory remains usable while model-dependent jobs stay pending until an executor becomes available.
+3. **Deferred/local-only** — raw memory remains usable while L3 / Project Environment model jobs remain queued/deferred; an unavailable model no longer burns retries into dead-letter while waiting for an executor.
 
 See [Evolution and scope model](docs/EVOLUTION_SCOPES.md).
 
@@ -117,11 +117,36 @@ continues to require Cloudflare Access identity plus the stable Memhub account
 role. Distillation evidence can be queued manually, while optional automatic
 job creation is disabled by default and never invokes a model itself.
 
-`memmy_context` returns relevant account/global memory plus relevant memory for
-the one resolved project; it is not a full database dump. Historical
-consolidation is available through `memhub_history_distill`, which remembers
-exactly which evidence refs were already processed and supplies the previous
-canonical result to the next batch.
+`memmy_context` is turn-scoped rather than conversation-locked. Explicit
+project/workspace/unique project evidence from the current turn overrides an
+older conversation binding; that binding is only a fallback when the turn has
+no project evidence. Business project memory and authoritative architecture
+remain isolated to one primary project. Other projects may contribute only
+explicit Skill artifacts through the separate `reusableSkills` capability
+channel.
+
+AgentSource history scanning is opt-in in all four editions. Continuous memory
+should normally enter through Memhub capture/lifecycle. Even when legacy
+AgentSource history is imported manually, imported traces are not promoted into
+durable user preferences.
+
+Long-term maintenance is read-first:
+
+```bash
+npm run memory:audit
+npm run memory:repair
+npm run normify:audit
+npm run normify:migrate
+```
+
+`memory:repair` creates an online SQLite backup and JSON report before apply.
+Authoritative architecture is account-scoped; a valid legacy repo-local
+`normify-*` tree can be used as a bounded read-only fallback and explicitly
+copied with `normify:migrate`.
+
+Historical consolidation is available through `memhub_history_distill`,
+which remembers exactly which evidence refs were already processed and
+supplies the previous canonical result to the next batch.
 
 See [Control Plane, capture and distillation](docs/CONTROL_PLANE_AND_DISTILLATION.md)
 and [remote authentication](docs/REMOTE_AUTH.md).

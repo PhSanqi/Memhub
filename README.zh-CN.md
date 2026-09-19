@@ -91,7 +91,7 @@ B 项目
 
 1. **Direct Provider**：Memory Core 在明确配置模型 API / provider 时可运行其原生模型任务；Memhub 不偷偷配置或调用模型。
 2. **Harness Worker**：服务器不保存模型 API Key，已经登录的 Codex / Claude / 其他 Harness 通过 MCP 拉取 evolution job，生成结构化候选，再提交给 Memhub 校验并 commit。
-3. **Deferred / Local-only**：没有可用模型时，L1 和记忆检索仍正常，需要模型的高级沉淀保持 pending，等以后有执行器再跑。
+3. **Deferred / Local-only**：没有可用模型时，L1 和记忆检索仍正常；L3 / Project Environment 等模型任务保持 queued/deferred，不再因为“模型未配置”消耗重试次数进入 dead-letter，等以后有执行器再跑。
 
 这意味着“用已经登录的 Codex/Claude 帮 Memhub 提炼 Skill/项目认知”是正式设计，而不是临时 hack。
 
@@ -118,7 +118,22 @@ Codex/OpenAI lifecycle adapter 现在还会在每次 `UserPromptSubmit` 时通�
 
 Web 路由现在明确拆分：`/memhub` 是公开的项目介绍入口，`/memhub/user` 是认证后的用户工作区，`/memhub/admin` 是管理员 Control Plane。管理员可以直接在网页顶部切换 User/Admin 视图；是否能进入 `/memhub/admin` 仍由 stable `account_id` 的 `admin` role 决定。本机或 SSH tunnel 管理继续使用独立 local-admin token；公网用户页和管理页继续要求 Cloudflare Access JWT → stable `account_id` → role 校验。管理员可以手动把 Raw Capture 排入待蒸馏任务，也可以选择开启自动“形成待办”。自动蒸馏默认关闭，而且即使开启也只生成 evidence job，不会由 Memhub 后端自行调用大模型消耗额度。
 
-`memmy_context` 不是全库 dump：当项目能够唯一解析时，它会同时返回相关的账号/全局记忆和该项目记忆；项目不明确时只返回全局，避免串项目。需要把大段历史整理成连续、可召回的规范化记忆时，使用 `memhub_history_distill`。它对 `project` 与 `account`、`memory` 与 `skill` 分别维护 processed-evidence ledger，因此已经处理过的内容不会在后续运行中重复蒸馏。
+`memmy_context` 不是全库 dump。每一轮都会重新判断 primary project：当前轮显式项目、workspace、唯一项目名/semantic candidate 优先于旧 conversation binding；conversation binding 只在本轮没有项目证据时兜底，因此同一个聊天可以安全切换项目。业务 `projectMemory` / authoritative architecture 仍只来自一个 primary project；其他项目只允许通过独立 `reusableSkills` capability 通道贡献带 `artifact:skill` 的 Skill，不会把其业务 Current Truth 混进当前项目。项目不明确时只返回全局，避免串项目。
+
+AgentSource 历史扫描现在默认关闭（四个发行版一致）。持续记忆优先走 Memhub capture/lifecycle；如果确实需要导入旧 Agent 历史，再显式开启 AgentSource。即使手动导入，AgentSource trace 也不会再自动升级成 `user_memories`。
+
+长期内容治理提供只读优先的检查/修复命令：
+
+```bash
+npm run memory:audit
+npm run memory:repair
+npm run normify:audit
+npm run normify:migrate
+```
+
+`memory:repair` 在修改 SQLite 前会先生成在线备份和 JSON report。Normify 默认使用 account-scoped authoritative tree；尚未迁移但具有合法 `modules/` 的旧 repo-local `normify-*` 可以只读 fallback，并通过 `normify:migrate` 显式迁移。
+
+需要把大段历史整理成连续、可召回的规范化记忆时，使用 `memhub_history_distill`。它对 `project` 与 `account`、`memory` 与 `skill` 分别维护 processed-evidence ledger，因此已经处理过的内容不会在后续运行中重复蒸馏。
 
 详细见 [Control Plane、Capture 与 Distillation](docs/CONTROL_PLANE_AND_DISTILLATION.md)。
 
