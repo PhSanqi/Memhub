@@ -17,11 +17,17 @@ New-Item -ItemType Directory -Force -Path $StateRoot,$ServerState,$MemoryDir,$Ru
 $MemoryEntry = Join-Path $RepoRoot "vendor\memory-core\src\server\index.js"
 $McpEntry = Join-Path $RepoRoot "dist\mcp.js"
 $BridgeEntry = Join-Path $RepoRoot "dist\bridge.js"
+$NodeModules = Join-Path $RepoRoot "node_modules"
+if (-not (Test-Path $NodeModules)) {
+  Push-Location $RepoRoot
+  try {
+    & $Npm ci --workspaces=false
+    if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
+  } finally { Pop-Location }
+}
 if (-not $SkipBuild -and (!(Test-Path $MemoryEntry) -or !(Test-Path $McpEntry) -or !(Test-Path $BridgeEntry))) {
   Push-Location $RepoRoot
   try {
-    & $Npm install --workspaces=false
-    if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
     & $Npm run build
     if ($LASTEXITCODE -ne 0) { throw "Memhub build failed" }
   } finally { Pop-Location }

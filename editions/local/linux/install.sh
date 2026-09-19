@@ -15,11 +15,14 @@ NPM="${NPM:-$(command -v npm || true)}"
 [[ -n "$NPM" ]] || { echo "npm is required" >&2; exit 2; }
 
 ensure_build() {
-  if [[ -f "$REPO_ROOT/vendor/memory-core/src/server/index.js" && -f "$REPO_ROOT/dist/mcp.js" && -f "$REPO_ROOT/dist/bridge.js" ]]; then
-    return
+  if [[ ! -d "$REPO_ROOT/node_modules" ]]; then
+    echo "[memhub] dependencies missing; installing from lockfile"
+    (cd "$REPO_ROOT" && npm ci --workspaces=false)
   fi
-  echo "[memhub] build output missing; installing/building required workspaces"
-  (cd "$REPO_ROOT" && npm install && npm run build)
+  if [[ ! -f "$REPO_ROOT/vendor/memory-core/src/server/index.js" || ! -f "$REPO_ROOT/dist/mcp.js" || ! -f "$REPO_ROOT/dist/bridge.js" ]]; then
+    echo "[memhub] build output missing; building Memhub"
+    (cd "$REPO_ROOT" && npm run build)
+  fi
 }
 
 ensure_build

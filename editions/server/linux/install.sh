@@ -17,9 +17,13 @@ PUBLIC_HOST="${MEMHUB_PUBLIC_HOST:-}"
 [[ -n "$NODE" ]] || { echo "Node.js 20+ is required" >&2; exit 2; }
 [[ -n "$NPM" ]] || { echo "npm is required" >&2; exit 2; }
 
+if [[ ! -d "$REPO_ROOT/node_modules" ]]; then
+  echo "[memhub] dependencies missing; installing from lockfile"
+  (cd "$REPO_ROOT" && npm ci --workspaces=false)
+fi
 if [[ ! -f "$REPO_ROOT/vendor/memory-core/src/server/index.js" || ! -f "$REPO_ROOT/dist/mcp.js" ]]; then
-  echo "[memhub] build output missing; installing/building required workspaces"
-  (cd "$REPO_ROOT" && npm install && npm run build)
+  echo "[memhub] build output missing; building Memhub"
+  (cd "$REPO_ROOT" && npm run build)
 fi
 
 mkdir -p "$STATE_ROOT" "$SERVER_STATE" "$MEMORY_DIR" "$HOME/.config/systemd/user"
