@@ -71,7 +71,15 @@ async function scanInventory(root) {
     const walk = async (directory, prefix, depth) => {
         if (depth > PROJECT_ENVIRONMENT_SCAN_POLICY.maxDepth)
             return;
-        const children = await readdir(directory, { withFileTypes: true });
+        let children;
+        try {
+            children = await readdir(directory, { withFileTypes: true });
+        }
+        catch (error) {
+            if (prefix && isIgnorableScanFsError(error))
+                return;
+            throw error;
+        }
         children.sort((left, right) => compare(left.name, right.name));
         for (const child of children) {
             const relativePath = prefix ? `${prefix}/${child.name}` : child.name;
@@ -84,7 +92,13 @@ async function scanInventory(root) {
             if (child.isSymbolicLink())
                 continue;
             const absolute = resolve(directory, child.name);
-            const details = await lstat(absolute);
+            const details = await lstat(absolute).catch((error) => {
+                if (isIgnorableScanFsError(error))
+                    return null;
+                throw error;
+            });
+            if (!details)
+                continue;
             if (details.isDirectory()) {
                 collected.push({ relativePath, type: "directory", mtimeMs: floorTime(details.mtimeMs) });
                 await walk(absolute, relativePath, depth + 1);
@@ -242,4 +256,8 @@ function inventorySnapshot(value) {
 }
 function record(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
+}
+function isIgnorableScanFsError(error) {
+    const code = record(error).code;
+    return code === "ENOENT" || code === "EACCES" || code === "EPERM";
 }

@@ -99,8 +99,24 @@ export class ProjectEnvironmentService {
             await this.profilePipeline.process(job, derived);
         }
         catch (error) {
+            if (isStaleWorkspaceError(error)) {
+                this.deps.repos.projectEnvironments.markUnavailable(
+                    payload.userId,
+                    payload.projectId,
+                    payload.scanId,
+                    error instanceof Error ? error.message : String(error)
+                );
+                return;
+            }
             this.deps.repos.projectEnvironments.failCurrentScan(payload.userId, payload.projectId, payload.scanId, error instanceof Error ? error.message : String(error));
             throw error;
         }
     }
+}
+function isStaleWorkspaceError(error) {
+    const record = typeof error === "object" && error !== null ? error : {};
+    if (record.code === "ENOENT")
+        return true;
+    const message = error instanceof Error ? error.message : String(error);
+    return /project_environment_workspace_(?:uri_missing|not_local|not_directory)/.test(message);
 }

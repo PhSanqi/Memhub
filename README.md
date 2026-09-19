@@ -108,6 +108,23 @@ Once the MCP endpoint is connected to your AI client, Memhub exposes tools for:
 
 For the best continuity, configure your agent to recall Memhub context at the start of each meaningful turn and only write back durable information rather than every raw message.
 
+### Project routing and maintenance
+
+Project routing is turn-scoped rather than permanently conversation-locked. Current-turn project/workspace evidence can override an older conversation binding; the binding is only a fallback when the current turn has no project evidence. Business memory and authoritative architecture remain isolated to the primary project, while explicit Skill artifacts can be reused through a separate cross-project capability channel.
+
+AgentSource history scanning is opt-in in all four editions. Imported AgentSource traces are not promoted into durable user preferences.
+
+Maintenance commands are read-first:
+
+```bash
+npm run memory:audit
+npm run memory:repair
+npm run normify:audit
+npm run normify:migrate
+```
+
+`memory:repair` creates a SQLite backup and JSON report before changing durable state. Model-dependent L3 and Project Environment jobs remain queued when no evolution model is available instead of exhausting retries into dead-letter.
+
 ### Web pages
 
 When using Server Edition:

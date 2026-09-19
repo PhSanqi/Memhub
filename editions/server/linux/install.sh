@@ -32,7 +32,7 @@ MEMORY_TOKEN="$("$NODE" -e 'process.stdout.write(require("node:crypto").randomBy
 "$NODE" - "$CONFIG_PATH" "$MEMORY_DIR/memory.sqlite" "$MEMORY_TOKEN" <<'NODE'
 const fs=require('node:fs'); const [path,db,token]=process.argv.slice(2);
 fs.writeFileSync(path, JSON.stringify({
-  memmyMemory:{version:1,userId:'local-user',roleRouting:{summary:'follow',evolution:'follow'},storage:{mode:'local',backend:'sqlite',sqlitePath:db,endpoint:'http://127.0.0.1:18960',token},algorithm:{enableMemoryAdd:true,enableMemorySearch:true,enableQueryRewrite:false},agentAccess:{autoScanKnownAgents:true,watchFileChanges:true,autoInjectSkill:false}},
+  memmyMemory:{version:1,userId:'local-user',roleRouting:{summary:'follow',evolution:'follow'},storage:{mode:'local',backend:'sqlite',sqlitePath:db,endpoint:'http://127.0.0.1:18960',token},algorithm:{enableMemoryAdd:true,enableMemorySearch:true,enableQueryRewrite:false},agentAccess:{autoScanKnownAgents:false,watchFileChanges:false,autoInjectSkill:false}},
   providers:{},modelAssignments:{default:null,memorySummary:null,memoryEvolution:null,embedding:null,asr:null,imageGeneration:null},modelPresets:{},app:{}
 },null,2)+'\n',{mode:0o600});
 NODE

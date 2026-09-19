@@ -66,8 +66,8 @@ const memory = createServer(async (request, response) => {
   if (request.url === "/api/v1/memory/search") {
     const project = body.namespace?.projectId;
     response.end(JSON.stringify({ hits: project
-      ? [hit("global", "global"), hit("project", `project ${project}`)]
-      : [hit("global", "global")] }));
+      ? [hit("global", "global", ["global"]), hit("project", `project ${project}`, [`project:${project}`])]
+      : [hit("global", "global", ["global"])] }));
     return;
   }
   if (request.url === "/api/v1/memory/add") {
@@ -882,8 +882,8 @@ async function exerciseClient(client, conversationId) {
   assert.equal(submitRequest.body.candidate.project_contract, "- Run project tests before commit.");
 }
 
-function hit(id, snippet) {
-  return { id, kind: "trace", memoryLayer: "L1", status: "activated", snippet, score: 0.9, tags: [], source: "search" };
+function hit(id, snippet, tags = []) {
+  return { id, kind: "trace", memoryLayer: "L1", status: "activated", snippet, score: 0.9, tags, source: "search" };
 }
 
 async function freePort() {

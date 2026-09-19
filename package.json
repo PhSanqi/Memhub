@@ -13,10 +13,14 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node tests/core-e2e.mjs && node tests/mcp-e2e.mjs && node tests/openai-adapter-e2e.mjs",
+    "test": "npm run build && node tests/core-e2e.mjs && node tests/mcp-e2e.mjs && node tests/openai-adapter-e2e.mjs && node tests/vendor-regressions.mjs && node tests/edition-regressions.mjs",
     "core:preflight": "node scripts/core-migration.mjs preflight",
     "core:verify": "node scripts/core-migration.mjs verify",
-    "core:preserved": "node scripts/core-migration.mjs preserved"
+    "core:preserved": "node scripts/core-migration.mjs preserved",
+    "memory:audit": "node scripts/long-term-repair.mjs",
+    "memory:repair": "node scripts/long-term-repair.mjs --apply",
+    "normify:audit": "node scripts/normify-migration.mjs",
+    "normify:migrate": "node scripts/normify-migration.mjs --apply"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.0",

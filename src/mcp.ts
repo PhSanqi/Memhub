@@ -87,7 +87,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   });
 
   server.registerTool("memmy_context", {
-    description: "每轮任务开始时读取与当前请求相关的长期上下文。自动组合账号/全局记忆与唯一已解析项目的项目记忆；项目不明确时只返回全局，避免串项目。返回内容是候选 evidence，当前 Harness 应先过滤噪声和失效内容再使用。",
+    description: "每轮任务开始时读取与当前请求相关的长期上下文。当前轮的显式项目、workspace、项目名和 semantic_projects 优先于旧会话绑定；会话绑定只作为无本轮证据时的 fallback。同一会话可连续切换项目。业务记忆/架构只来自唯一 primary project；可复用 Skill 可从其他项目单独召回，不带入其业务 Current Truth。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
@@ -98,7 +98,16 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         semantic_projects: {
           type: "array",
           items: { type: "string" },
-          description: "宿主已有分类器得出的项目候选；多个候选会触发 global-only"
+          description: "当前 Harness/分类器对本轮 primary project 的候选。唯一候选可覆盖旧 conversation binding；多个冲突候选触发 global-only。"
+        },
+        capability_projects: {
+          type: "array",
+          items: { type: "string" },
+          description: "可从这些其他项目召回 artifact:skill / Skill-layer 能力；不召回其业务记忆。省略时默认从当前账号已知项目中检索可复用 Skills。"
+        },
+        cross_project_skills: {
+          type: "boolean",
+          description: "是否启用跨项目可复用 Skill 召回；默认 true。"
         },
         limit: { type: "integer", minimum: 1, maximum: 50, description: "每类记忆最大召回数量" }
       },
@@ -106,6 +115,9 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       additionalProperties: false
     } as JsonSchemaType)
   }, async (args) => {
+    const knownProjects = await knownProjectIds(runtime);
+    const requestedCapabilityProjects = stringArray(args.capability_projects) ?? [];
+    const crossProjectSkills = optionalBoolean(args.cross_project_skills) ?? true;
     const capsule = await runtime.router.context({
       accountId: runtime.accountId,
       userId: runtime.userId,
@@ -114,6 +126,10 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       projectId: optionalString(args.project),
       workspaceProjectId: optionalString(args.workspace_project),
       semanticProjectIds: stringArray(args.semantic_projects),
+      knownProjectIds: knownProjects,
+      reusableSkillProjectIds: crossProjectSkills
+        ? (requestedCapabilityProjects.length > 0 ? requestedCapabilityProjects : knownProjects)
+        : [],
       limit: optionalInteger(args.limit)
     });
     return jsonResult(capsule);
@@ -844,6 +860,9 @@ async function serveHttp(
           principalId: `device:${device.device_id}`,
           connectionId: device.device_id
         });
+        const knownProjects = await knownProjectIds(runtime);
+        const requestedCapabilityProjects = stringArray(body.capability_projects) ?? [];
+        const crossProjectSkills = optionalBoolean(body.cross_project_skills) ?? true;
         const capsule = await runtime.router.context({
           accountId: runtime.accountId,
           userId: runtime.userId,
@@ -852,6 +871,10 @@ async function serveHttp(
           projectId: optionalString(body.project),
           workspaceProjectId: optionalString(body.workspace_project),
           semanticProjectIds: stringArray(body.semantic_projects),
+          knownProjectIds: knownProjects,
+          reusableSkillProjectIds: crossProjectSkills
+            ? (requestedCapabilityProjects.length > 0 ? requestedCapabilityProjects : knownProjects)
+            : [],
           limit: optionalInteger(body.limit)
         });
         response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
@@ -1739,6 +1762,12 @@ function optionalInteger(value: unknown): number | undefined {
 function optionalNumber(value: unknown): number | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "number" || !Number.isFinite(value)) throw new TypeError("value must be a finite number");
+  return value;
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "boolean") throw new TypeError("value must be a boolean");
   return value;
 }
 

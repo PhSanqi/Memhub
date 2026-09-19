@@ -12,6 +12,8 @@ export interface ContextRouterInput {
   projectId?: string;
   workspaceProjectId?: string;
   semanticProjectIds?: string[];
+  knownProjectIds?: string[];
+  reusableSkillProjectIds?: string[];
   limit?: number;
 }
 
@@ -29,8 +31,14 @@ export class ContextRouter {
     const conversationId = normalizeOptional(input.conversationId);
     const explicitProjectId = normalizeOptional(input.projectId);
     const workspaceProjectId = normalizeOptional(input.workspaceProjectId);
-    const availableProjects = await this.architecture.listProjects(accountId);
+    const availableProjects = uniqueProjectIds([
+      ...await this.architecture.listProjects(accountId),
+      ...(input.knownProjectIds ?? [])
+    ]);
     const aliases = exactProjectMentions(query, availableProjects);
+    const semanticProjectIds = availableProjects.length > 0
+      ? uniqueProjectIds(input.semanticProjectIds ?? []).filter((projectId) => availableProjects.includes(projectId))
+      : uniqueProjectIds(input.semanticProjectIds ?? []);
     const priorBinding = conversationId && !explicitProjectId
       ? await this.bindings.get(accountId, conversationId)
       : null;
@@ -40,13 +48,16 @@ export class ContextRouter {
       workspaceProjectId,
       conversationProjectId: priorBinding?.projectId,
       exactAliasProjectIds: aliases,
-      semanticProjectIds: input.semanticProjectIds
+      semanticProjectIds
     });
 
+    const hasCurrentTurnProjectEvidence = Boolean(
+      explicitProjectId || workspaceProjectId || aliases.length === 1 || semanticProjectIds.length === 1
+    );
     if (
       conversationId &&
       resolution.projectId &&
-      (explicitProjectId || priorBinding === null || priorBinding.projectId === resolution.projectId)
+      (hasCurrentTurnProjectEvidence || priorBinding === null || priorBinding.projectId === resolution.projectId)
     ) {
       await this.bindings.bind(accountId, conversationId, resolution.projectId);
     }
@@ -58,7 +69,8 @@ export class ContextRouter {
       query,
       projectId: resolution.projectId,
       conversationId,
-      limit
+      limit,
+      reusableSkillProjectIds: uniqueProjectIds(input.reusableSkillProjectIds ?? [])
     });
     const projectArchitecture = resolution.projectId
       ? await this.architecture.getProjectArchitecture({
@@ -74,6 +86,7 @@ export class ContextRouter {
       resolution,
       globalMemory: recalled.globalMemory,
       projectMemory: recalled.projectMemory,
+      reusableSkills: recalled.reusableSkills,
       projectArchitecture,
       recentSession: []
     });
@@ -125,21 +138,34 @@ function resolveRouterProjectScope(input: {
       workspaceProjectId: input.workspaceProjectId
     });
   }
-  if (
-    input.conversationProjectId &&
-    input.exactAliasProjectIds.length === 1 &&
-    input.exactAliasProjectIds[0] !== input.conversationProjectId
-  ) {
-    return resolveProjectScope({
-      conversationProjectId: input.conversationProjectId,
-      workspaceProjectId: input.exactAliasProjectIds[0]
-    });
+  const aliases = uniqueProjectIds(input.exactAliasProjectIds);
+  const semantic = uniqueProjectIds(input.semanticProjectIds ?? []);
+  const turnCandidates = uniqueProjectIds([
+    input.workspaceProjectId,
+    ...aliases,
+    ...semantic
+  ]);
+  if (turnCandidates.length > 1) {
+    return {
+      projectId: null,
+      source: "ambiguous",
+      recallScope: "global_only",
+      candidates: turnCandidates,
+      evidence: ["conflicting current-turn project evidence"]
+    };
+  }
+  if (turnCandidates.length === 1) {
+    const projectId = turnCandidates[0]!;
+    if (input.workspaceProjectId === projectId) {
+      return resolveProjectScope({ workspaceProjectId: projectId });
+    }
+    if (aliases.includes(projectId)) {
+      return resolveProjectScope({ exactAliasProjectIds: [projectId] });
+    }
+    return resolveProjectScope({ semanticProjectIds: [projectId] });
   }
   return resolveProjectScope({
-    conversationProjectId: input.conversationProjectId,
-    workspaceProjectId: input.workspaceProjectId,
-    exactAliasProjectIds: input.exactAliasProjectIds,
-    semanticProjectIds: input.semanticProjectIds
+    conversationProjectId: input.conversationProjectId
   });
 }
 
@@ -169,4 +195,11 @@ function requireNonEmpty(value: string, field: string): string {
   const normalized = value.trim();
   if (!normalized) throw new TypeError(`${field} must be non-empty`);
   return normalized;
+}
+
+function uniqueProjectIds(values: readonly (string | undefined)[]): string[] {
+  return [...new Set(values
+    .map((value) => value?.trim())
+    .filter((value): value is string => Boolean(value)))]
+    .sort((left, right) => left.localeCompare(right));
 }

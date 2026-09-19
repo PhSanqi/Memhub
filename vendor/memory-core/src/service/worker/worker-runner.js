@@ -179,7 +179,16 @@ export class WorkerRunner {
         for (const { before, after } of requeuedJobs) {
             this.deps.appendJobChange(after, "queued", before);
         }
-        const jobs = this.deps.repos.runtime.leaseQueuedJobs(normalizedLimit, 60, targetMemoryIds, request.priorityCohortOnly);
+        const excludedJobTypes = this.deps.evolutionModelConfigured()
+            ? []
+            : ["l3_world_model_update", "project_environment_profile"];
+        const jobs = this.deps.repos.runtime.leaseQueuedJobs(
+            normalizedLimit,
+            60,
+            targetMemoryIds,
+            request.priorityCohortOnly,
+            excludedJobTypes
+        );
         const retryCapacity = Math.max(0, normalizedLimit - jobs.length);
         const results = [];
         for (let index = 0; index < jobs.length;) {

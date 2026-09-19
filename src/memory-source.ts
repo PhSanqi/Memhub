@@ -17,7 +17,8 @@ export interface ContextMemorySource {
     projectId: string | null;
     conversationId?: string;
     limit: number;
-  }): Promise<{ globalMemory: ContextItem[]; projectMemory: ContextItem[] }>;
+    reusableSkillProjectIds?: readonly string[];
+  }): Promise<{ globalMemory: ContextItem[]; projectMemory: ContextItem[]; reusableSkills: ContextItem[] }>;
   remember(input: {
     accountId: string;
     userId: string;
@@ -46,18 +47,47 @@ export class MemoryRestContextSource implements ContextMemorySource {
     projectId: string | null;
     conversationId?: string;
     limit: number;
-  }): Promise<{ globalMemory: ContextItem[]; projectMemory: ContextItem[] }> {
+    reusableSkillProjectIds?: readonly string[];
+  }): Promise<{ globalMemory: ContextItem[]; projectMemory: ContextItem[]; reusableSkills: ContextItem[] }> {
     const globalResponse = await this.search(input, null);
-    const globalHits = hitsFromResponse(globalResponse);
+    const globalHits = hitsFromResponse(globalResponse)
+      .filter((hit) => hit.tags.includes("global"));
     const globalIds = new Set(globalHits.map((hit) => hit.id));
     const globalMemory = globalHits.map((hit) => contextItemFromHit(hit, "global"));
-    if (input.projectId === null) return { globalMemory, projectMemory: [] };
+    const projectMemory = input.projectId === null
+      ? []
+      : hitsFromResponse(await this.search(input, input.projectId))
+          .filter((hit) => hit.tags.includes(`project:${input.projectId}`))
+          .filter((hit) => !globalIds.has(hit.id))
+          .map((hit) => contextItemFromHit(hit, "project", input.projectId ?? undefined));
 
-    const scopedResponse = await this.search(input, input.projectId);
-    const projectMemory = hitsFromResponse(scopedResponse)
-      .filter((hit) => !globalIds.has(hit.id))
-      .map((hit) => contextItemFromHit(hit, "project", input.projectId ?? undefined));
-    return { globalMemory, projectMemory };
+    const reusableSkillProjectIds = unique(input.reusableSkillProjectIds ?? [])
+      .filter((projectId) => projectId !== input.projectId)
+      .slice(0, 32);
+    const perProjectSkillLimit = Math.min(20, Math.max(6, input.limit));
+    const reusableHits = (await Promise.all(reusableSkillProjectIds.map(async (projectId) => {
+      const response = await this.search(input, projectId, {
+        layers: ["Skill"],
+        tags: ["artifact:skill"],
+        limit: perProjectSkillLimit
+      });
+      return hitsFromResponse(response)
+        .filter((hit) => isReusableSkillHit(hit, projectId))
+        .map((hit) => ({ hit, projectId }));
+    }))).flat()
+      .filter(({ hit }) => !globalIds.has(hit.id))
+      .sort((left, right) => right.hit.score - left.hit.score);
+    const seenSkillIds = new Set<string>();
+    const reusableSkills = reusableHits
+      .filter(({ hit }) => {
+        if (seenSkillIds.has(hit.id)) return false;
+        seenSkillIds.add(hit.id);
+        return true;
+      })
+      .slice(0, input.limit)
+      .map(({ hit, projectId }) => contextItemFromHit(hit, "capability", projectId));
+
+    return { globalMemory, projectMemory, reusableSkills };
   }
 
   remember(input: {
@@ -152,13 +182,19 @@ export class MemoryRestContextSource implements ContextMemorySource {
     projectId: string | null;
     conversationId?: string;
     limit: number;
-  }, projectId: string | null): Promise<unknown> {
+  }, projectId: string | null, filters: {
+    layers?: string[];
+    tags?: string[];
+    limit?: number;
+  } = {}): Promise<unknown> {
     const namespace = namespaceFor(input, projectId);
     const request = {
       adapterId: "memhub",
       namespace,
       query: input.query,
-      limit: input.limit,
+      limit: filters.limit ?? input.limit,
+      ...(filters.layers?.length ? { layers: filters.layers } : {}),
+      ...(filters.tags?.length ? { tags: filters.tags } : {}),
       includeInjectedContext: false,
       // Memory Core's public HTTP contract only exposes structured recall
       // hits under debug.hits when verbose=true. The injected markdown alone
@@ -168,6 +204,12 @@ export class MemoryRestContextSource implements ContextMemorySource {
     };
     return this.client.search(request);
   }
+}
+
+function isReusableSkillHit(hit: RecallHit, projectId: string): boolean {
+  return hit.memoryLayer === "Skill" &&
+    hit.tags.includes("artifact:skill") &&
+    hit.tags.includes(`project:${projectId}`);
 }
 
 function provenanceTags(provenance?: Record<string, string | undefined>): string[] {
@@ -218,7 +260,7 @@ function isRecallHit(value: unknown): value is RecallHit {
   return typeof hit.id === "string" && typeof hit.snippet === "string" && typeof hit.score === "number";
 }
 
-function contextItemFromHit(hit: RecallHit, scope: "global" | "project", projectId?: string): ContextItem {
+function contextItemFromHit(hit: RecallHit, scope: "global" | "project" | "capability", projectId?: string): ContextItem {
   const content = hit.title?.trim() ? `${hit.title.trim()}\n${hit.snippet}` : hit.snippet;
   return {
     id: hit.id,

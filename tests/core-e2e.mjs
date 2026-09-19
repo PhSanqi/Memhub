@@ -19,6 +19,7 @@ import { resolveProjectScope } from "../dist/project-scope.js";
 import { createDevice, normalizeCaptureEvent } from "../dist/capture.js";
 import { EmbeddedArchitectureSource } from "../dist/architecture-source.js";
 import { EmbeddedMemoryCore } from "../dist/embedded-memory-core.js";
+import { createNormifyRuntime } from "../vendor/normify/lib/generic.js";
 
 const root = await mkdtemp(join(tmpdir(), "memhub-core-"));
 const state = join(root, "state");
@@ -35,10 +36,12 @@ try {
     accountId: "acct",
     resolution: conflict,
     globalMemory: [{ id: "g", content: "global", authority: "remembered", scope: "global", source: "test" }],
-    projectMemory: [{ id: "a", content: "ExampleProject", authority: "remembered", scope: "project", source: "test", projectId: "ExampleProject" }]
+    projectMemory: [{ id: "a", content: "ExampleProject", authority: "remembered", scope: "project", source: "test", projectId: "ExampleProject" }],
+    reusableSkills: [{ id: "s", content: "reusable", authority: "remembered", scope: "capability", source: "test", projectId: "memmy" }]
   });
   assert.equal(capsule.globalMemory.length, 1);
   assert.equal(capsule.projectMemory.length, 0);
+  assert.equal(capsule.reusableSkills.length, 1);
 
   assert.doesNotThrow(() => assertLoopbackMemoryEndpoint("http://127.0.0.1:18960"));
   assert.doesNotThrow(() => assertLoopbackMemoryEndpoint("http://[::1]:18960"));
@@ -56,6 +59,35 @@ try {
     embeddedArchitecture.runtimeModule.replaceAll("\\", "/"),
     /\/vendor\/normify\/lib\/generic\.js$/
   );
+
+  const legacyArchitectureRoot = join(normify, "ExampleProject");
+  const legacyRuntime = createNormifyRuntime({ rootDir: legacyArchitectureRoot });
+  const initializedLegacy = await legacyRuntime.callTool("normify_project_init", {
+    project: "ExampleProject",
+    root: {
+      id: "ExampleProject",
+      name: { zh: "ExampleProject", en: "ExampleProject" },
+      description: {
+        zh: "用于验证 repo-local Normify 架构兼容回退。",
+        en: "Repo-local Normify compatibility fallback fixture."
+      }
+    }
+  });
+  assert.equal(initializedLegacy.ok, true);
+  const legacyProjects = await embeddedArchitecture.listProjects("acct-without-account-tree");
+  assert.ok(legacyProjects.includes("ExampleProject"));
+  const legacyBrief = await embeddedArchitecture.getProjectArchitecture({
+    accountId: "acct-without-account-tree",
+    projectId: "ExampleProject",
+    query: "current architecture"
+  });
+  assert.equal(legacyBrief.length, 1);
+  assert.equal(legacyBrief[0].provenance.architectureSource, "legacy-repo-local");
+  assert.deepEqual(await embeddedArchitecture.getProjectArchitecture({
+    accountId: "acct-without-account-tree",
+    projectId: "missing",
+    query: "current architecture"
+  }), []);
 
   const calls = [];
   const memory = {
@@ -79,9 +111,11 @@ try {
   const router = new ContextRouter(memory, architecture, new JsonConversationProjectBindingStore(join(root, "bindings.json")));
   assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续 ExampleProject", conversationId: "chat" })).resolvedProjectId, "ExampleProject");
   assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续", conversationId: "chat" })).resolvedProjectId, "ExampleProject");
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "转到 memmy", conversationId: "chat" })).recallScope, "global_only");
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "转到 memmy", conversationId: "chat" })).resolvedProjectId, "memmy");
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续", conversationId: "chat" })).resolvedProjectId, "memmy");
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "回 ExampleProject", conversationId: "chat", semanticProjectIds: ["ExampleProject"] })).resolvedProjectId, "ExampleProject");
   assert.equal((await router.context({ accountId: "acct", userId: "user", query: "转到 memmy", conversationId: "chat", projectId: "memmy" })).resolvedProjectId, "memmy");
-  assert.deepEqual(calls, ["ExampleProject", "ExampleProject", null, "memmy"]);
+  assert.deepEqual(calls, ["ExampleProject", "ExampleProject", "memmy", "memmy", "ExampleProject", "memmy"]);
 
   const owner = await addAccount(state, "owner", "owner@example.com");
   await assert.rejects(() => resolveCloudflareAccount(state, { sub: "unknown", email: "unknown@example.com" }), /允许列表/);
