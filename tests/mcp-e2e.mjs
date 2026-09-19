@@ -171,6 +171,7 @@ try {
   await testStdio(memoryPort);
   await testHttp(memoryPort);
   await testLocalAdmin(memoryPort);
+  await testRootBasePath(memoryPort);
   await testBridgeMcpProxy();
   console.log("memhub-mcp-e2e: ok");
 } finally {
@@ -330,6 +331,62 @@ async function testLocalAdmin(memoryPort) {
     });
     assert.equal(publicHostWithLocalToken.status, 401);
     assert.match(publicHostWithLocalToken.body, /Cloudflare Access authentication required/);
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise((resolveExit) => {
+      child.once("exit", resolveExit);
+      setTimeout(resolveExit, 500);
+    });
+  }
+}
+
+async function testRootBasePath(memoryPort) {
+  const port = await freePort();
+  const stateRoot = join(root, "root-base-path");
+  const account = await addAccount(stateRoot, "root-admin", "root@example.com");
+  await setAccountRole(stateRoot, account.account_id, "admin");
+  const token = await ensureLocalAdminToken(stateRoot);
+  const child = spawn(process.execPath, [
+    mcpEntry,
+    "--http", String(port),
+    "--http-path", "/mcp",
+    "--capture-path", "/capture",
+    "--account", account.account_id,
+    "--memory-url", `http://127.0.0.1:${memoryPort}`,
+    "--state-root", stateRoot,
+    "--bindings", join(root, "root-base-path-bindings.json"),
+    "--no-normify"
+  ], {
+    env: { ...process.env, MEMHUB_BASE_PATH: "/", MEMHUB_MEMORY_DB: historyDbPath },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (data) => { stderr += data; });
+  try {
+    const deadline = Date.now() + 5_000;
+    while (!stderr.includes("listening on http://127.0.0.1:") && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    const landing = await fetch(`http://127.0.0.1:${port}/`);
+    assert.equal(landing.status, 200);
+    const landingHtml = await landing.text();
+    assert.match(landingHtml, /href="\/user"/);
+    assert.doesNotMatch(landingHtml, /\/memhub\//);
+    const legacyLanding = await fetch(`http://127.0.0.1:${port}/memhub`);
+    assert.equal(legacyLanding.status, 404);
+    const authorization = `Basic ${Buffer.from(`memhub:${token}`).toString("base64")}`;
+    const workspace = await fetch(`http://127.0.0.1:${port}/user`, { headers: { authorization } });
+    assert.equal(workspace.status, 200);
+    const workspaceHtml = await workspace.text();
+    assert.match(workspaceHtml, /href="\/admin"/);
+    assert.doesNotMatch(workspaceHtml, /\/memhub\//);
+    const admin = await fetch(`http://127.0.0.1:${port}/admin`, { headers: { authorization } });
+    assert.equal(admin.status, 200);
+    const adminHtml = await admin.text();
+    assert.match(adminHtml, /\/admin\/api\?kind=/);
+    assert.match(adminHtml, /\/admin\/action/);
+    assert.doesNotMatch(adminHtml, /\/memhub\//);
   } finally {
     child.kill("SIGTERM");
     await new Promise((resolveExit) => {

@@ -881,6 +881,7 @@ interface CliOptions extends MemhubRuntimeOptions {
   httpPort?: number;
   httpPath?: string;
   capturePath?: string;
+  basePath?: string;
   publicHost?: string;
   allowJit?: boolean;
 }
@@ -923,6 +924,7 @@ function parseArgs(argv: string[]): CliOptions {
       }
       options.capturePath = path.length > 1 ? path.replace(/\/+$/, "") : path;
     }
+    else if (arg === "--base-path") options.basePath = normalizeBasePath(value());
     else if (arg === "--public-host") {
       const host = value().trim().toLowerCase();
       if (!host || host.includes("/") || host.includes(":")) throw new Error("--public-host must be a hostname");
@@ -968,21 +970,38 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     httpPort,
     httpPath = "/mcp",
     capturePath = process.env.MEMHUB_CAPTURE_PATH?.trim() || "/memhub/capture",
+    basePath = normalizeBasePath(process.env.MEMHUB_BASE_PATH?.trim() || "/memhub"),
     publicHost = process.env.MEMHUB_PUBLIC_HOST?.trim() || undefined,
     allowJit = process.env.MEMHUB_ALLOW_JIT === "1",
     ...runtimeOptions
   } = options;
   if (httpPort !== undefined) {
-    await serveHttp(runtimeOptions, { stateRoot, port: httpPort, path: httpPath, capturePath, publicHost, allowJit });
+    await serveHttp(runtimeOptions, { stateRoot, port: httpPort, path: httpPath, capturePath, basePath, publicHost, allowJit });
     return;
   }
   console.error(`[memhub] serving stdio account=${runtimeOptions.accountId ?? process.env.MEMHUB_ACCOUNT_ID ?? "local"}`);
   await serveStdio(() => createMemhubMcpServer(runtimeOptions));
 }
 
+function normalizeBasePath(value: string): string {
+  const path = value.trim() || "/";
+  if (!path.startsWith("/") || path.includes("?") || path.includes("#")) {
+    throw new Error("base path must start with / and contain no query/fragment");
+  }
+  return path === "/" ? "/" : path.replace(/\/+$/, "");
+}
+
+function rewriteHtmlForBasePath(html: string, basePath: string): string {
+  if (basePath !== "/") return html;
+  return html
+    .replaceAll('"/memhub"', '"/"')
+    .replaceAll("'/memhub'", "'/'")
+    .replaceAll("/memhub/", "/");
+}
+
 async function serveHttp(
   runtimeOptions: MemhubRuntimeOptions,
-  options: { stateRoot: string; port: number; path: string; capturePath: string; publicHost?: string; allowJit: boolean }
+  options: { stateRoot: string; port: number; path: string; capturePath: string; basePath: string; publicHost?: string; allowJit: boolean }
 ): Promise<void> {
   await ensureLocalAdminToken(options.stateRoot);
   const handlers = new Map<string, ReturnType<typeof toNodeHandler>>();
@@ -1026,6 +1045,9 @@ async function serveHttp(
     void (async () => {
       const url = new URL(request.url ?? "/", "http://localhost");
       if (!validateHost(request, response) || !validateOrigin(request, response)) return;
+      if (options.basePath === "/" && url.pathname !== options.path && url.pathname !== options.capturePath) {
+        url.pathname = url.pathname === "/" ? "/memhub" : `/memhub${url.pathname}`;
+      }
       if (url.pathname === "/") {
         response.writeHead(302, { location: "/memhub", "cache-control": "no-store" }).end();
         return;
@@ -1040,7 +1062,7 @@ async function serveHttp(
           "cache-control": "public, max-age=300",
           "x-content-type-options": "nosniff"
         });
-        response.end(request.method === "HEAD" ? undefined : renderLanding());
+        response.end(request.method === "HEAD" ? undefined : rewriteHtmlForBasePath(renderLanding(), options.basePath));
         return;
       }
       if (url.pathname === "/memhub/context") {
@@ -1332,7 +1354,7 @@ async function serveHttp(
             const message = error instanceof Error ? error.message : String(error);
             if (!options.allowJit && message.includes("未加入 Memhub 本地允许列表")) {
               response.writeHead(403, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-              response.end(renderUnprovisionedAccount(identity.email));
+              response.end(rewriteHtmlForBasePath(renderUnprovisionedAccount(identity.email), options.basePath));
               return;
             }
             throw error;
@@ -1470,7 +1492,7 @@ async function serveHttp(
         const devices = await listDevices(options.stateRoot, summary.account_id);
         const visibleAccounts = isAdmin && url.pathname.startsWith("/memhub/admin") ? accounts : [];
         response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
-        response.end(renderConsole({ account: summary, projects, devices, accounts: visibleAccounts, adminView: url.pathname.startsWith("/memhub/admin"), localControl }));
+        response.end(rewriteHtmlForBasePath(renderConsole({ account: summary, projects, devices, accounts: visibleAccounts, adminView: url.pathname.startsWith("/memhub/admin"), localControl }), options.basePath));
         return;
       }
       // OAuth-capable MCP clients may canonicalize the resource URI with a
