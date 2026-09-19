@@ -15,6 +15,7 @@ export interface ContextMemorySource {
     userId: string;
     query: string;
     projectId: string | null;
+    projectStorageIds?: readonly string[];
     conversationId?: string;
     limit: number;
     reusableSkillProjectIds?: readonly string[];
@@ -45,6 +46,7 @@ export class MemoryRestContextSource implements ContextMemorySource {
     userId: string;
     query: string;
     projectId: string | null;
+    projectStorageIds?: readonly string[];
     conversationId?: string;
     limit: number;
     reusableSkillProjectIds?: readonly string[];
@@ -54,10 +56,15 @@ export class MemoryRestContextSource implements ContextMemorySource {
       .filter((hit) => hit.tags.includes("global"));
     const globalIds = new Set(globalHits.map((hit) => hit.id));
     const globalMemory = globalHits.map((hit) => contextItemFromHit(hit, "global"));
+    const projectStorageIds = input.projectId === null
+      ? []
+      : unique(input.projectStorageIds?.length ? input.projectStorageIds : [input.projectId]);
     const projectMemory = input.projectId === null
       ? []
-      : hitsFromResponse(await this.search(input, input.projectId))
-          .filter((hit) => hit.tags.includes(`project:${input.projectId}`))
+      : dedupeHits((await Promise.all(projectStorageIds.map(async (storageProjectId) =>
+          hitsFromResponse(await this.search(input, storageProjectId))
+            .filter((hit) => hit.tags.includes(`project:${storageProjectId}`))
+        ))).flat())
           .filter((hit) => !globalIds.has(hit.id))
           .map((hit) => contextItemFromHit(hit, "project", input.projectId ?? undefined));
 
@@ -258,6 +265,15 @@ function isRecallHit(value: unknown): value is RecallHit {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const hit = value as Partial<RecallHit>;
   return typeof hit.id === "string" && typeof hit.snippet === "string" && typeof hit.score === "number";
+}
+
+function dedupeHits(hits: readonly RecallHit[]): RecallHit[] {
+  const seen = new Set<string>();
+  return hits.filter((hit) => {
+    if (seen.has(hit.id)) return false;
+    seen.add(hit.id);
+    return true;
+  });
 }
 
 function contextItemFromHit(hit: RecallHit, scope: "global" | "project" | "capability", projectId?: string): ContextItem {

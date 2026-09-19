@@ -3,6 +3,7 @@ import { resolveProjectScope, type ProjectScopeResolution } from "./project-scop
 import type { ProjectArchitectureSource } from "./architecture-source.js";
 import type { ConversationProjectBindingStore } from "./binding-store.js";
 import type { ContextMemorySource } from "./memory-source.js";
+import type { JsonProjectRegistry, ProjectDescriptor } from "./project-registry.js";
 
 export interface ContextRouterInput {
   accountId: string;
@@ -21,7 +22,8 @@ export class ContextRouter {
   constructor(
     private readonly memory: ContextMemorySource,
     private readonly architecture: ProjectArchitectureSource,
-    private readonly bindings: ConversationProjectBindingStore
+    private readonly bindings: ConversationProjectBindingStore,
+    private readonly projects?: JsonProjectRegistry
   ) {}
 
   async context(input: ContextRouterInput): Promise<ContextCapsule> {
@@ -29,27 +31,56 @@ export class ContextRouter {
     const userId = requireNonEmpty(input.userId, "userId");
     const query = requireNonEmpty(input.query, "query");
     const conversationId = normalizeOptional(input.conversationId);
-    const explicitProjectId = normalizeOptional(input.projectId);
-    const workspaceProjectId = normalizeOptional(input.workspaceProjectId);
-    const availableProjects = uniqueProjectIds([
+    const rawAvailableProjects = uniqueProjectIds([
       ...await this.architecture.listProjects(accountId),
       ...(input.knownProjectIds ?? [])
     ]);
-    const aliases = exactProjectMentions(query, availableProjects);
+    const projectRecords = this.projects
+      ? await this.projects.reconcile(accountId, rawAvailableProjects)
+      : rawAvailableProjects.map((projectId) => ({
+          projectId,
+          name: projectId,
+          description: "",
+          aliases: [],
+          state: "active" as const,
+          createdAt: "",
+          updatedAt: ""
+        }));
+    const availableProjects = projectRecords.map((project) => project.projectId);
+    const requestedProjectId = normalizeOptional(input.projectId);
+    const requestedWorkspaceProjectId = normalizeOptional(input.workspaceProjectId);
+    const explicitProjectId = await this.canonicalize(accountId, requestedProjectId, true);
+    const workspaceProjectId = await this.canonicalize(accountId, requestedWorkspaceProjectId, true);
+    const aliases = exactProjectMentions(query, projectRecords);
     const semanticProjectIds = availableProjects.length > 0
-      ? uniqueProjectIds(input.semanticProjectIds ?? []).filter((projectId) => availableProjects.includes(projectId))
-      : uniqueProjectIds(input.semanticProjectIds ?? []);
-    const priorBinding = conversationId && !explicitProjectId
+      ? uniqueProjectIds(await Promise.all((input.semanticProjectIds ?? []).map((projectId) => this.canonicalize(accountId, projectId, true))))
+          .filter((projectId) => availableProjects.includes(projectId))
+      : uniqueProjectIds(await Promise.all((input.semanticProjectIds ?? []).map((projectId) => this.canonicalize(accountId, projectId, true))));
+    const unresolvedCurrentTurnProject = Boolean(
+      (requestedProjectId && !explicitProjectId) ||
+      (requestedWorkspaceProjectId && !workspaceProjectId) ||
+      ((input.semanticProjectIds?.length ?? 0) > 0 && semanticProjectIds.length === 0)
+    );
+    const priorBinding = conversationId && !explicitProjectId && !unresolvedCurrentTurnProject
       ? await this.bindings.get(accountId, conversationId)
       : null;
+    const conversationProjectId = await this.canonicalize(accountId, priorBinding?.projectId, true);
 
-    const resolution = resolveRouterProjectScope({
-      explicitProjectId,
-      workspaceProjectId,
-      conversationProjectId: priorBinding?.projectId,
-      exactAliasProjectIds: aliases,
-      semanticProjectIds
-    });
+    const resolution = unresolvedCurrentTurnProject
+      ? {
+          projectId: null,
+          source: "ambiguous" as const,
+          recallScope: "global_only" as const,
+          candidates: [],
+          evidence: ["unregistered current-turn project evidence; inspect project candidates before binding or creating"]
+        }
+      : resolveRouterProjectScope({
+          explicitProjectId,
+          workspaceProjectId,
+          conversationProjectId,
+          exactAliasProjectIds: aliases,
+          semanticProjectIds
+        });
 
     const hasCurrentTurnProjectEvidence = Boolean(
       explicitProjectId || workspaceProjectId || aliases.length === 1 || semanticProjectIds.length === 1
@@ -63,21 +94,35 @@ export class ContextRouter {
     }
 
     const limit = Math.min(50, Math.max(1, Math.trunc(input.limit ?? 12)));
+    const projectStorageIds = resolution.projectId && this.projects
+      ? await this.projects.storageIds(accountId, resolution.projectId)
+      : resolution.projectId ? [resolution.projectId] : [];
+    const canonicalReusableSkillProjectIds = uniqueProjectIds(input.reusableSkillProjectIds ?? []);
+    const reusableSkillProjectIds = this.projects
+      ? uniqueProjectIds((await Promise.all(canonicalReusableSkillProjectIds.map((projectId) =>
+          this.projects!.storageIds(accountId, projectId)
+        ))).flat())
+      : canonicalReusableSkillProjectIds;
     const recalled = await this.memory.recall({
       accountId,
       userId,
       query,
       projectId: resolution.projectId,
+      projectStorageIds,
       conversationId,
       limit,
-      reusableSkillProjectIds: uniqueProjectIds(input.reusableSkillProjectIds ?? [])
+      reusableSkillProjectIds
     });
+    if (this.projects && recalled.reusableSkills.length > 0) {
+      recalled.reusableSkills = await Promise.all(recalled.reusableSkills.map(async (item) => ({
+        ...item,
+        ...(item.projectId
+          ? { projectId: await this.projects!.resolve(accountId, item.projectId) ?? item.projectId }
+          : {})
+      })));
+    }
     const projectArchitecture = resolution.projectId
-      ? await this.architecture.getProjectArchitecture({
-          accountId,
-          projectId: resolution.projectId,
-          query
-        })
+      ? await this.projectArchitectureFromStorageIds(accountId, resolution.projectId, projectStorageIds, query)
       : [];
 
     return buildContextCapsule({
@@ -93,22 +138,32 @@ export class ContextRouter {
   }
 
   async currentProject(accountId: string, conversationId: string): Promise<string | null> {
-    return (await this.bindings.get(accountId, conversationId))?.projectId ?? null;
+    const bound = (await this.bindings.get(accountId, conversationId))?.projectId;
+    if (!bound) return null;
+    if (this.projects) {
+      const discovered = await this.architecture.listProjects(accountId).catch(() => []);
+      await this.projects.reconcile(accountId, [...discovered, bound]);
+    }
+    return await this.canonicalize(accountId, bound, true) ?? null;
   }
 
   async bindProject(accountId: string, conversationId: string, projectId: string): Promise<void> {
-    const projects = await this.architecture.listProjects(accountId);
-    if (projects.length > 0 && !projects.includes(projectId)) {
+    const projects = await this.listProjects(accountId);
+    const canonical = await this.canonicalize(accountId, projectId, true);
+    if (!canonical || (projects.length > 0 && !projects.includes(canonical))) {
       throw new Error(`unknown project for account: ${projectId}`);
     }
-    await this.bindings.bind(accountId, conversationId, projectId);
+    await this.bindings.bind(accountId, conversationId, canonical);
   }
 
   async bindObservedProject(accountId: string, conversationId: string, projectId: string): Promise<void> {
+    const observed = requireNonEmpty(projectId, "projectId");
+    if (this.projects) await this.projects.reconcile(accountId, [observed]);
+    const canonical = await this.canonicalize(accountId, observed, true) ?? observed;
     await this.bindings.bind(
       requireNonEmpty(accountId, "accountId"),
       requireNonEmpty(conversationId, "conversationId"),
-      requireNonEmpty(projectId, "projectId")
+      canonical
     );
   }
 
@@ -116,12 +171,45 @@ export class ContextRouter {
     return this.bindings.unbind(accountId, conversationId);
   }
 
-  listProjects(accountId: string): Promise<string[]> {
-    return this.architecture.listProjects(accountId);
+  async listProjects(accountId: string): Promise<string[]> {
+    const discovered = await this.architecture.listProjects(accountId);
+    if (!this.projects) return discovered;
+    return (await this.projects.reconcile(accountId, discovered)).map((project) => project.projectId);
   }
 
   projectArchitecture(accountId: string, projectId: string, query: string) {
-    return this.architecture.getProjectArchitecture({ accountId, projectId, query });
+    return this.projectArchitectureCanonical(accountId, projectId, query);
+  }
+
+  private async projectArchitectureCanonical(accountId: string, projectId: string, query: string) {
+    const canonical = await this.canonicalize(accountId, projectId) ?? projectId;
+    const storageIds = this.projects ? await this.projects.storageIds(accountId, canonical) : [canonical];
+    return this.projectArchitectureFromStorageIds(accountId, canonical, storageIds, query);
+  }
+
+  private async projectArchitectureFromStorageIds(
+    accountId: string,
+    canonicalProjectId: string,
+    storageIds: string[],
+    query: string
+  ) {
+    for (const storageProjectId of uniqueProjectIds([canonicalProjectId, ...storageIds])) {
+      const items = await this.architecture.getProjectArchitecture({
+        accountId,
+        projectId: storageProjectId,
+        query
+      });
+      if (items.length > 0) {
+        return items.map((item) => ({ ...item, projectId: canonicalProjectId }));
+      }
+    }
+    return [];
+  }
+
+  private async canonicalize(accountId: string, projectId: string | undefined, strict = false): Promise<string | undefined> {
+    const normalized = normalizeOptional(projectId);
+    if (!normalized || !this.projects) return normalized;
+    return await this.projects.resolve(accountId, normalized) ?? (strict ? undefined : normalized);
   }
 }
 
@@ -169,17 +257,22 @@ function resolveRouterProjectScope(input: {
   });
 }
 
-function exactProjectMentions(query: string, projects: readonly string[]): string[] {
+function exactProjectMentions(query: string, projects: readonly ProjectDescriptor[]): string[] {
   const lower = query.toLocaleLowerCase();
-  return projects.filter((project) => {
-    const candidate = project.trim().toLocaleLowerCase();
-    if (!candidate) return false;
-    const index = lower.indexOf(candidate);
-    if (index < 0) return false;
-    const before = index === 0 ? "" : lower[index - 1]!;
-    const after = index + candidate.length >= lower.length ? "" : lower[index + candidate.length]!;
-    return !isWordChar(before) && !isWordChar(after);
-  });
+  const matches: string[] = [];
+  for (const project of projects) {
+    const names = [project.projectId, project.name, ...project.aliases];
+    if (names.some((value) => {
+      const candidate = value.trim().toLocaleLowerCase();
+      if (!candidate) return false;
+      const index = lower.indexOf(candidate);
+      if (index < 0) return false;
+      const before = index === 0 ? "" : lower[index - 1]!;
+      const after = index + candidate.length >= lower.length ? "" : lower[index + candidate.length]!;
+      return !isWordChar(before) && !isWordChar(after);
+    })) matches.push(project.projectId);
+  }
+  return uniqueProjectIds(matches);
 }
 
 function isWordChar(value: string): boolean {
