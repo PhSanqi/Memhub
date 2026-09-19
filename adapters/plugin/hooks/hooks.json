@@ -1,0 +1,68 @@
+{
+  "description": "Automatically capture Codex turns into the local Memhub Bridge.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/hooks/memhub-capture.mjs",
+            "timeout": 5,
+            "statusMessage": "Recalling Memhub context",
+            "additionalContextLimit": 5000
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/hooks/memhub-capture.mjs",
+            "timeout": 5,
+            "statusMessage": "Saving turn to Memhub"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/hooks/memhub-capture.mjs",
+            "timeout": 5,
+            "statusMessage": "Loading Memhub session context",
+            "additionalContextLimit": 5000
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/hooks/memhub-capture.mjs",
+            "timeout": 5,
+            "statusMessage": "Restoring Memhub context",
+            "additionalContextLimit": 5000
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/hooks/memhub-capture.mjs",
+            "timeout": 5,
+            "statusMessage": "Closing Memhub session"
+          }
+        ]
+      }
+    ]
+  }
+}
