@@ -22,9 +22,15 @@ $NodeModules = Join-Path $RepoRoot "node_modules"
 if (-not (Test-Path $NodeModules)) {
   Push-Location $RepoRoot
   try {
+    $PreviousCudaInstall = $env:ONNXRUNTIME_NODE_INSTALL_CUDA
+    $env:ONNXRUNTIME_NODE_INSTALL_CUDA = "skip"
     & $Npm ci --workspaces=false
     if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
-  } finally { Pop-Location }
+  } finally {
+    if ($null -eq $PreviousCudaInstall) { Remove-Item Env:ONNXRUNTIME_NODE_INSTALL_CUDA -ErrorAction SilentlyContinue }
+    else { $env:ONNXRUNTIME_NODE_INSTALL_CUDA = $PreviousCudaInstall }
+    Pop-Location
+  }
 }
 if (-not $SkipBuild -and (!(Test-Path $MemoryEntry) -or !(Test-Path $McpEntry))) {
   Push-Location $RepoRoot
