@@ -1,0 +1,598 @@
+import { retrievalDocumentIsCurrent, retrievalDocumentSourceHash } from "../../algorithm/plugin-algorithms.js";
+import { createMemoryLogger, memoryErrorFields } from "../../logging/logger.js";
+import { jobToRef } from "../../storage/repositories.js";
+import { embeddingTextForMemory, embeddingRetryBackoffMs, embeddingRetryToRunItem } from "../embedding/embedding-pipeline.js";
+import { memoryHasImportPipeline } from "../import/import-job-processor.js";
+import { classifyProcessingError, processingJobMatchesMemory, processingStageForJob, sanitizeProcessingError, workerJobCanRunInParallel } from "./job-handlers.js";
+export const SUMMARY_WORKER_CONCURRENCY = 4;
+export const EMBEDDING_RETRY_LEASE_MS = 5 * 60_000;
+const workerLogger = createMemoryLogger("worker");
+export class WorkerRunner {
+    deps;
+    constructor(deps) {
+        this.deps = deps;
+    }
+    nextWorkerRunAt() {
+        return this.deps.memoryAddEnabled()
+            ? this.deps.repos.runtime.nextWorkerRunAt()
+            : undefined;
+    }
+    reconcileWorkerStartup(limit = 10000) {
+        if (!this.deps.memoryAddEnabled()) {
+            return {
+                requeuedJobs: 0,
+                requeuedEmbeddingRetries: 0,
+                restartedFailedProcessing: 0,
+                reconciledOrphanPolicies: 0,
+                policyEvidencePreflight: emptyPolicyEvidencePreflight(),
+                enqueuedImportSummaries: 0,
+                enqueuedEmbeddingRepairs: 0,
+                enqueuedRetrievalReindexes: 0
+            };
+        }
+        const at = this.deps.nowIso();
+        const interruptedJobs = this.deps.repos.runtime.requeueLeasedJobsAfterRestart(at);
+        const failedJobs = this.deps.repos.runtime.requeueFailedJobs(limit, at);
+        for (const { before, after } of [...interruptedJobs, ...failedJobs]) {
+            this.deps.appendJobChange(after, "queued", before);
+        }
+        const embeddingRetries = this.deps.repos.runtime.requeueEmbeddingRetriesAfterRestart(Date.parse(at));
+        for (const { before, after } of embeddingRetries) {
+            this.deps.appendEmbeddingRetryChange(after, "queued", before);
+        }
+        const restartedFailedProcessing = this.deps.restartFailedProcessing(at, limit);
+        const policyEvidencePreflight = this.deps.previewPolicyEvidenceReconciliation(limit);
+        const reconciledOrphanPolicies = this.deps.reconcileOrphanedPolicies(at, limit);
+        let enqueuedImportSummaries = 0;
+        let enqueuedEmbeddingRepairs = 0;
+        let enqueuedRetrievalReindexes = 0;
+        const activeProcessing = this.deps.repos.processing.listByStates([
+            "summary_pending",
+            "summarizing",
+            "embedding_pending",
+            "embedding"
+        ], limit);
+        for (const processing of activeProcessing) {
+            const memory = this.deps.repos.memories.get(processing.memoryId);
+            if (!memory)
+                continue;
+            if (this.deps.repos.memories.hasVector(memory.id, "vec_summary")) {
+                this.deps.repos.processing.update(memory.id, {
+                    state: "ready",
+                    stage: null,
+                    activeJobId: null,
+                    errorCode: null,
+                    errorMessage: null,
+                    failedAt: null,
+                    updatedAt: at
+                });
+                continue;
+            }
+            if (processing.state === "summary_pending" || processing.state === "summarizing") {
+                const jobType = memoryHasImportPipeline(memory) ? "import_summary" : "trace_summary";
+                let job = this.deps.repos.runtime.getPendingJob(memory.id, jobType, memory.contentHash ?? undefined);
+                if (!job) {
+                    job = this.deps.enqueueJob({
+                        jobType,
+                        userId: memory.userId,
+                        sessionId: memory.sessionId,
+                        targetMemoryId: memory.id,
+                        payload: {
+                            source: "startup.processing_repair",
+                            contentHash: memory.contentHash
+                        },
+                        maxAttempts: 3,
+                        createdAt: at
+                    });
+                    if (jobType === "import_summary")
+                        enqueuedImportSummaries += 1;
+                }
+                this.deps.repos.processing.update(memory.id, {
+                    state: "summary_pending",
+                    stage: "summary",
+                    activeJobId: job.id,
+                    updatedAt: at
+                }, ["summary_pending", "summarizing"]);
+                continue;
+            }
+            if (!this.deps.capture.embedAfterCapture) {
+                this.deps.repos.processing.update(memory.id, {
+                    state: "ready_text_only",
+                    stage: null,
+                    activeJobId: null,
+                    attemptCount: 0,
+                    retryAction: "retry",
+                    errorCode: null,
+                    errorMessage: null,
+                    failedAt: null,
+                    updatedAt: at
+                }, ["embedding_pending", "embedding"]);
+                continue;
+            }
+            let job = this.deps.repos.runtime.getPendingJob(memory.id, "embedding", memory.contentHash ?? undefined);
+            if (!job) {
+                job = this.deps.enqueueJob({
+                    jobType: "embedding",
+                    userId: memory.userId,
+                    sessionId: memory.sessionId,
+                    targetMemoryId: memory.id,
+                    payload: {
+                        reason: "startup.processing_repair",
+                        contentHash: memory.contentHash
+                    },
+                    maxAttempts: 6,
+                    createdAt: at
+                });
+                enqueuedEmbeddingRepairs += 1;
+            }
+            this.deps.repos.processing.update(memory.id, {
+                state: "embedding_pending",
+                stage: "embedding",
+                activeJobId: job.id,
+                updatedAt: at
+            }, ["embedding_pending", "embedding"]);
+        }
+        const retrievalMemories = this.deps.repos.memories.list({
+            memoryLayer: ["Skill", "L3"],
+            status: ["activated", "resolving"]
+        }, limit);
+        for (const memory of retrievalMemories) {
+            this.deps.repos.memories.reindexFts(memory);
+            if (!this.deps.capture.embedAfterCapture || retrievalDocumentIsCurrent(memory))
+                continue;
+            if (this.deps.repos.runtime.hasPendingJob(memory.id, "embedding"))
+                continue;
+            const sourceHash = retrievalDocumentSourceHash(memory);
+            this.deps.enqueueJob({
+                jobType: "embedding",
+                userId: memory.userId,
+                sessionId: memory.sessionId,
+                targetMemoryId: memory.id,
+                dedupeKey: `embedding:retrieval-v2:${memory.id}:${sourceHash}`,
+                payload: {
+                    reason: "startup.retrieval_document_v2",
+                    retrievalSourceHash: sourceHash
+                },
+                maxAttempts: 6,
+                createdAt: at
+            });
+            enqueuedRetrievalReindexes += 1;
+        }
+        return {
+            requeuedJobs: interruptedJobs.length + failedJobs.length,
+            requeuedEmbeddingRetries: embeddingRetries.length,
+            restartedFailedProcessing,
+            reconciledOrphanPolicies,
+            policyEvidencePreflight,
+            enqueuedImportSummaries,
+            enqueuedEmbeddingRepairs,
+            enqueuedRetrievalReindexes
+        };
+    }
+    async runWorkerOnce(limit = 100, request = {}) {
+        if (!this.deps.memoryAddEnabled()) {
+            return this.deps.runWorkerNoWrite(request);
+        }
+        const normalizedLimit = Math.max(1, Math.floor(limit));
+        const targetMemoryIds = request.targetMemoryIds;
+        const requeuedJobs = this.deps.repos.runtime.requeueFailedJobs(normalizedLimit, this.deps.nowIso(), targetMemoryIds);
+        for (const { before, after } of requeuedJobs) {
+            this.deps.appendJobChange(after, "queued", before);
+        }
+        const jobs = this.deps.repos.runtime.leaseQueuedJobs(normalizedLimit, 60, targetMemoryIds, request.priorityCohortOnly);
+        const retryCapacity = Math.max(0, normalizedLimit - jobs.length);
+        const results = [];
+        for (let index = 0; index < jobs.length;) {
+            const job = jobs[index];
+            if (workerJobCanRunInParallel(job)) {
+                const batchType = job.jobType;
+                const batch = [];
+                while (index < jobs.length && jobs[index]?.jobType === batchType) {
+                    batch.push(jobs[index]);
+                    index += 1;
+                }
+                if (batchType === "embedding") {
+                    results.push(...await this.runLeasedEmbeddingJobs(batch));
+                }
+                else {
+                    for (let offset = 0; offset < batch.length; offset += SUMMARY_WORKER_CONCURRENCY) {
+                        results.push(...await Promise.all(batch.slice(offset, offset + SUMMARY_WORKER_CONCURRENCY)
+                            .map((item) => this.runLeasedWorkerJob(item))));
+                    }
+                }
+                continue;
+            }
+            results.push(await this.runLeasedWorkerJob(job));
+            index += 1;
+        }
+        const embeddingRetries = retryCapacity > 0
+            ? await this.runEmbeddingRetryOnce(retryCapacity, targetMemoryIds)
+            : { leased: 0, succeeded: 0, failed: 0, items: [] };
+        const succeeded = results.reduce((sum, result) => sum + result.succeeded, 0);
+        const failed = results.reduce((sum, result) => sum + result.failed, 0);
+        if (jobs.length > 0 || embeddingRetries.leased > 0) {
+            workerLogger.info("drain.completed", {
+                leased: jobs.length,
+                succeeded,
+                failed,
+                embeddingRetriesLeased: embeddingRetries.leased,
+                embeddingRetriesSucceeded: embeddingRetries.succeeded,
+                embeddingRetriesFailed: embeddingRetries.failed
+            });
+        }
+        const changeSeq = this.deps.repos.runtime.latestChangeSeq();
+        return {
+            leased: jobs.length,
+            succeeded,
+            failed,
+            jobs: results.map((result) => result.ref),
+            embeddingRetries,
+            changeSeq,
+            syncCursor: this.deps.encodeChangeCursor(changeSeq),
+            serverTime: this.deps.nowIso()
+        };
+    }
+    async runLeasedWorkerJob(job) {
+        this.deps.appendJobChange(job, "leased");
+        this.markProcessingJobLeased(job);
+        workerLogger.info("job.started", workerJobLogFields(job));
+        try {
+            await this.deps.jobHandlers.processJob(job);
+            return this.completeLeasedWorkerJob(job);
+        }
+        catch (error) {
+            return this.failLeasedWorkerJob(job, error);
+        }
+    }
+    async runLeasedEmbeddingJobs(jobs) {
+        const results = [];
+        const prepared = [];
+        for (const job of jobs) {
+            this.deps.appendJobChange(job, "leased");
+            this.markProcessingJobLeased(job);
+            workerLogger.info("job.started", workerJobLogFields(job));
+            try {
+                const item = this.deps.embeddingJobs.prepareEmbeddingJob(job);
+                if (item) {
+                    prepared.push(item);
+                }
+                else {
+                    results.push(this.completeLeasedWorkerJob(job));
+                }
+            }
+            catch (error) {
+                results.push(this.failLeasedWorkerJob(job, error));
+            }
+        }
+        for (const role of ["document", "query"]) {
+            const batch = prepared.filter((item) => item.role === role);
+            if (batch.length === 0)
+                continue;
+            try {
+                const vectors = await this.deps.embedder.embed(batch.map((item) => item.text || "(empty)"), role);
+                for (const [index, item] of batch.entries()) {
+                    try {
+                        this.deps.embeddingJobs.applyEmbeddingVector(item, vectors[index] ?? []);
+                        results.push(this.completeLeasedWorkerJob(item.job));
+                    }
+                    catch (error) {
+                        results.push(this.failLeasedWorkerJob(item.job, error));
+                    }
+                }
+            }
+            catch (error) {
+                const classification = classifyProcessingError(error);
+                if (classification.code === "model_input_too_long" && batch.length > 1) {
+                    for (const item of batch)
+                        results.push(await this.runLeasedEmbeddingItem(item));
+                    continue;
+                }
+                for (const item of batch) {
+                    results.push(this.finishFailedEmbeddingItem(item, error));
+                }
+            }
+        }
+        return results;
+    }
+    async runLeasedEmbeddingItem(item) {
+        try {
+            const vector = await this.deps.embedder.embedOne(item.text || "(empty)", item.role);
+            this.deps.embeddingJobs.applyEmbeddingVector(item, vector);
+            return this.completeLeasedWorkerJob(item.job);
+        }
+        catch (error) {
+            return this.finishFailedEmbeddingItem(item, error);
+        }
+    }
+    finishFailedEmbeddingItem(item, error) {
+        if (classifyProcessingError(error).retryAction !== "retry") {
+            return this.failLeasedWorkerJob(item.job, error);
+        }
+        if (!this.deps.embeddingJobs.enqueueEmbeddingRetryAfterFailure(item, error)) {
+            return this.failLeasedWorkerJob(item.job, error);
+        }
+        return this.completeLeasedWorkerJob(item.job);
+    }
+    completeLeasedWorkerJob(job) {
+        const completed = this.deps.repos.runtime.completeJob(job.id) ?? {
+            ...job,
+            status: "succeeded",
+            leasedUntil: null,
+            updatedAt: this.deps.nowIso()
+        };
+        this.deps.appendJobChange(completed, "succeeded", job);
+        workerLogger.info("job.succeeded", workerJobLogFields(completed));
+        return {
+            succeeded: 1,
+            failed: 0,
+            ref: { ...jobToRef(job), status: "succeeded" }
+        };
+    }
+    failLeasedWorkerJob(job, error) {
+        const errorMessage = processingStageForJob(job.jobType)
+            ? sanitizeProcessingError(error)
+            : error instanceof Error ? error.message : String(error);
+        const stage = processingStageForJob(job.jobType);
+        const forceDeadLetter = Boolean(stage && classifyProcessingError(error).retryAction !== "retry");
+        const failedJob = this.deps.repos.runtime.failJob(job.id, errorMessage, this.deps.nowIso(), forceDeadLetter) ?? {
+            ...job,
+            status: "failed",
+            leasedUntil: null,
+            lastError: errorMessage,
+            updatedAt: this.deps.nowIso()
+        };
+        const failOp = failedJob.status === "dead_letter" ? "dead_letter" : "failed";
+        this.deps.appendJobChange(failedJob, failOp, job);
+        this.updateProcessingAfterJobFailure(failedJob, error);
+        workerLogger.error("job.failed", {
+            ...workerJobLogFields(failedJob),
+            terminal: failedJob.status === "dead_letter",
+            ...memoryErrorFields(error)
+        });
+        return {
+            succeeded: 0,
+            failed: 1,
+            ref: {
+                ...jobToRef(job),
+                status: failedJob.status === "dead_letter" ? "dead_letter" : "failed"
+            }
+        };
+    }
+    markProcessingJobLeased(job) {
+        if (!job.targetMemoryId)
+            return;
+        const stage = processingStageForJob(job.jobType);
+        if (!stage)
+            return;
+        const memory = this.deps.repos.memories.get(job.targetMemoryId);
+        if (!memory || !processingJobMatchesMemory(job, memory))
+            return;
+        const state = stage === "summary" ? "summarizing" : "embedding";
+        this.deps.repos.processing.update(job.targetMemoryId, {
+            state,
+            stage,
+            activeJobId: job.id,
+            attemptCount: job.attempts,
+            updatedAt: this.deps.nowIso()
+        }, stage === "summary"
+            ? ["summary_pending", "summarizing"]
+            : ["embedding_pending", "embedding"]);
+    }
+    updateProcessingAfterJobFailure(job, error) {
+        if (!job.targetMemoryId)
+            return;
+        const stage = processingStageForJob(job.jobType);
+        if (!stage || !this.deps.repos.processing.get(job.targetMemoryId))
+            return;
+        const memory = this.deps.repos.memories.get(job.targetMemoryId);
+        if (!memory || !processingJobMatchesMemory(job, memory))
+            return;
+        const message = sanitizeProcessingError(error);
+        const terminal = job.status === "dead_letter";
+        const classification = classifyProcessingError(error);
+        if (terminal && stage === "embedding" && classification.code === "model_input_too_long") {
+            this.deps.repos.processing.update(job.targetMemoryId, {
+                state: "ready_text_only",
+                stage: null,
+                activeJobId: null,
+                attemptCount: job.attempts,
+                retryAction: "none",
+                errorCode: classification.code,
+                errorMessage: message,
+                failedAt: this.deps.nowIso(),
+                updatedAt: this.deps.nowIso()
+            }, ["embedding_pending", "embedding", "failed"]);
+            return;
+        }
+        this.deps.repos.processing.update(job.targetMemoryId, {
+            state: terminal ? "failed" : stage === "summary" ? "summary_pending" : "embedding_pending",
+            stage,
+            activeJobId: terminal ? null : job.id,
+            attemptCount: job.attempts,
+            retryAction: terminal ? classification.retryAction : "retry",
+            errorCode: classification.code,
+            errorMessage: message,
+            failedAt: this.deps.nowIso(),
+            updatedAt: this.deps.nowIso()
+        }, stage === "summary"
+            ? ["summary_pending", "summarizing", "failed"]
+            : ["embedding_pending", "embedding", "failed"]);
+    }
+    async runEmbeddingRetryOnce(limit, targetMemoryIds) {
+        const now = this.nowMs();
+        const retries = this.deps.repos.runtime.claimDueEmbeddingRetries({
+            now,
+            workerId: this.deps.embeddingRetryWorkerId,
+            leaseUntil: now + EMBEDDING_RETRY_LEASE_MS,
+            limit,
+            targetMemoryIds
+        });
+        const results = [];
+        const claimed = [];
+        for (const retry of retries) {
+            const claim = {
+                workerId: this.deps.embeddingRetryWorkerId,
+                leaseUntil: retry.leaseUntil ?? now + EMBEDDING_RETRY_LEASE_MS
+            };
+            if (!this.deps.repos.runtime.isEmbeddingRetryClaimHeld(retry.id, claim)) {
+                results.push({ succeeded: 0, failed: 0, item: null });
+                continue;
+            }
+            claimed.push({ retry, claim, attemptNo: retry.attempts + 1 });
+        }
+        for (const role of ["document", "query"]) {
+            const batch = claimed.filter((item) => item.retry.embedRole === role);
+            if (batch.length === 0)
+                continue;
+            try {
+                const vectors = await this.deps.embedder.embed(batch.map((item) => item.retry.sourceText || "(empty)"), role);
+                for (const [index, item] of batch.entries()) {
+                    try {
+                        results.push(this.applyEmbeddingRetryVector(item.retry, item.claim, vectors[index] ?? []));
+                    }
+                    catch (error) {
+                        results.push(this.failClaimedEmbeddingRetry(item.retry, item.claim, item.attemptNo, error));
+                    }
+                }
+            }
+            catch (error) {
+                const classification = classifyProcessingError(error);
+                if (classification.code === "model_input_too_long" && batch.length > 1) {
+                    for (const item of batch) {
+                        results.push(await this.runClaimedEmbeddingRetryItem(item.retry, item.claim, item.attemptNo));
+                    }
+                    continue;
+                }
+                for (const item of batch) {
+                    results.push(this.failClaimedEmbeddingRetry(item.retry, item.claim, item.attemptNo, error));
+                }
+            }
+        }
+        return {
+            leased: retries.length,
+            succeeded: results.reduce((sum, result) => sum + result.succeeded, 0),
+            failed: results.reduce((sum, result) => sum + result.failed, 0),
+            items: results.map((result) => result.item).filter((item) => Boolean(item))
+        };
+    }
+    async runClaimedEmbeddingRetryItem(retry, claim, attemptNo) {
+        try {
+            const vector = await this.deps.embedder.embedOne(retry.sourceText || "(empty)", retry.embedRole);
+            return this.applyEmbeddingRetryVector(retry, claim, vector);
+        }
+        catch (error) {
+            return this.failClaimedEmbeddingRetry(retry, claim, attemptNo, error);
+        }
+    }
+    applyEmbeddingRetryVector(retry, claim, vector) {
+        const memory = this.deps.repos.memories.get(retry.targetId);
+        if (!memory) {
+            throw new Error(`embedding retry target not found: ${retry.targetKind}:${retry.targetId}`);
+        }
+        if ((memory.memoryLayer === "Skill" || memory.memoryLayer === "L3") && embeddingTextForMemory(memory) !== retry.sourceText) {
+            const completed = this.deps.repos.runtime.markEmbeddingRetrySucceededClaimed(retry.id, {
+                ...claim,
+                now: this.nowMs()
+            });
+            if (completed)
+                this.deps.appendEmbeddingRetryChange(completed, "succeeded", retry);
+            const replacement = this.deps.enqueueEmbeddingRetry(memory, embeddingTextForMemory(memory), this.deps.nowIso(), retry.vectorField);
+            this.deps.appendEmbeddingRetryChange(replacement, "queued");
+            return { succeeded: 0, failed: 0, item: completed ? embeddingRetryToRunItem(completed) : null };
+        }
+        let completed;
+        this.deps.embeddingJobs.persistEmbeddingVector({
+            memoryId: memory.id,
+            vectorField: retry.vectorField,
+            vector,
+            attemptCount: retry.attempts + 1,
+            source: "worker.embedding_retry",
+            sourceHash: memory.memoryLayer === "Skill" || memory.memoryLayer === "L3"
+                ? retrievalDocumentSourceHash(memory)
+                : undefined,
+            allowedProcessingStates: ["embedding_pending", "embedding"],
+            finalize: () => {
+                completed = this.deps.repos.runtime.markEmbeddingRetrySucceededClaimed(retry.id, {
+                    ...claim,
+                    now: this.nowMs()
+                });
+            }
+        });
+        if (completed) {
+            this.deps.appendEmbeddingRetryChange(completed, "succeeded", retry);
+            workerLogger.info("embedding_retry.succeeded", embeddingRetryLogFields(completed));
+            return { succeeded: 1, failed: 0, item: embeddingRetryToRunItem(completed) };
+        }
+        return { succeeded: 0, failed: 0, item: null };
+    }
+    failClaimedEmbeddingRetry(retry, claim, attemptNo, error) {
+        const message = sanitizeProcessingError(error);
+        const terminal = classifyProcessingError(error).retryAction !== "retry" || attemptNo >= retry.maxAttempts;
+        const updated = terminal
+            ? this.deps.repos.runtime.markEmbeddingRetryFailedClaimed(retry.id, {
+                ...claim,
+                attempts: attemptNo,
+                error: message,
+                now: this.nowMs()
+            })
+            : this.deps.repos.runtime.markEmbeddingRetryRetryClaimed(retry.id, {
+                ...claim,
+                attempts: attemptNo,
+                nextAttemptAt: this.nowMs() + embeddingRetryBackoffMs(attemptNo),
+                error: message,
+                now: this.nowMs()
+            });
+        if (updated) {
+            this.deps.appendEmbeddingRetryChange(updated, terminal ? "failed" : "retry", retry);
+            const fields = {
+                ...embeddingRetryLogFields(updated),
+                terminal,
+                ...memoryErrorFields(error)
+            };
+            if (terminal) {
+                workerLogger.error("embedding_retry.failed", fields);
+            }
+            else {
+                workerLogger.warn("embedding_retry.retry_scheduled", fields);
+            }
+            return { succeeded: 0, failed: 1, item: embeddingRetryToRunItem(updated) };
+        }
+        return { succeeded: 0, failed: 1, item: null };
+    }
+    nowMs() {
+        return this.deps.nowMs?.() ?? Date.now();
+    }
+}
+function emptyPolicyEvidencePreflight() {
+    return {
+        orphanPolicyIds: [],
+        affectedWorldModelIds: [],
+        affectedSkillIds: [],
+        restorablePolicyIds: []
+    };
+}
+function workerJobLogFields(job) {
+    return {
+        jobId: job.id,
+        jobType: job.jobType,
+        status: job.status,
+        attempt: job.attempts,
+        maxAttempts: job.maxAttempts,
+        sessionId: job.sessionId,
+        episodeId: job.episodeId,
+        targetMemoryId: job.targetMemoryId
+    };
+}
+function embeddingRetryLogFields(retry) {
+    return {
+        retryId: retry.id,
+        targetKind: retry.targetKind,
+        targetMemoryId: retry.targetId,
+        vectorField: retry.vectorField,
+        role: retry.embedRole,
+        status: retry.status,
+        attempt: retry.attempts,
+        maxAttempts: retry.maxAttempts,
+        nextAttemptAt: retry.nextAttemptAt
+    };
+}

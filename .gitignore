@@ -1,0 +1,14 @@
+node_modules/
+dist/
+release/
+.vite/
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite.bak
+.DS_Store
+sessions/
+.env
+.env.*
+!.env.example
