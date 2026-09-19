@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -64,6 +65,7 @@ import {
   type HistoryEvidence
 } from "./history-distillation.js";
 import { createMemhubRuntime, type MemhubRuntime, type MemhubRuntimeOptions } from "./runtime.js";
+import type { ProjectDescriptor } from "./project-registry.js";
 import {
   DISTILLATION_CONTRACT_VERSION,
   distillationContract,
@@ -71,6 +73,12 @@ import {
 } from "./distillation-contract.js";
 
 const VERSION = "0.1.0";
+const projectMutationAuthorizations = new Map<string, {
+  accountId: string;
+  operation: "create" | "update" | "delete" | "merge";
+  payload: Record<string, unknown>;
+  expiresAt: number;
+}>();
 
 export interface MemhubMcpOptions extends MemhubRuntimeOptions {}
 
@@ -83,11 +91,11 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   const server = new McpServer({
     name: "memhub",
     version: VERSION,
-    description: "Private account/project-scoped long-term context and project architecture. Whenever Memhub is explicitly mentioned or invoked, first call memmy_context with the current request and stable conversation_id to load relevant conversation memory, then call memmy_project with action=current to verify the primary project before any project-scoped operation. Current-turn explicit project/workspace evidence overrides stale conversation binding; never guess a project. Before the final answer, persist only genuinely durable new facts/decisions/preferences/corrections rather than raw chat noise."
+    description: "Private account/project-scoped long-term context and project architecture. Whenever Memhub is explicitly mentioned or invoked, first call memmy_context with the current request and stable conversation_id to load relevant conversation memory, then call memmy_project with action=current to verify the primary project before any project-scoped operation. If a project name is unknown, case-variant, or merely similar, call memmy_project_list and compare canonical slug, aliases, and description before creating/binding; never guess a project. Project mutations use memmy_project_manage plan -> explicit user authorization -> execute. Current-turn explicit project/workspace evidence overrides stale conversation binding. Before the final answer, persist only genuinely durable new facts/decisions/preferences/corrections rather than raw chat noise."
   });
 
   server.registerTool("memmy_context", {
-    description: "当 Memhub 被提及或调用时，先用本工具结合当前请求与稳定 conversation_id 读取当前对话相关的长期记忆，再用 memmy_project action=current 核对 primary project，然后再进行 project-scoped 操作。当前轮的显式项目、workspace、项目名和 semantic_projects 优先于旧会话绑定；会话绑定只作为无本轮证据时的 fallback。同一会话可连续切换项目。业务记忆/架构只来自唯一 primary project；可复用 Skill 可从其他项目单独召回，不带入其业务 Current Truth。",
+    description: "当 Memhub 被提及或调用时，先用本工具结合当前请求与稳定 conversation_id 读取当前对话相关的长期记忆，再用 memmy_project action=current 核对 primary project，然后再进行 project-scoped 操作。若项目未唯一解析或名称相近，先调用 memmy_project_list 比较 canonical slug、aliases 与 description；不要尝试另一个大小写或盲目新建。当前轮的显式项目、workspace、项目名和 semantic_projects 优先于旧会话绑定；会话绑定只作为无本轮证据时的 fallback。同一会话可连续切换项目。业务记忆/架构只来自唯一 primary project；可复用 Skill 可从其他项目单独召回，不带入其业务 Current Truth。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
@@ -115,13 +123,15 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       additionalProperties: false
     } as JsonSchemaType)
   }, async (args) => {
-    const knownProjects = await knownProjectIds(runtime);
+    const query = requiredString(args.query, "query");
+    const projectRecords = await knownProjectRecords(runtime);
+    const knownProjects = projectRecords.map((project) => project.projectId);
     const requestedCapabilityProjects = stringArray(args.capability_projects) ?? [];
     const crossProjectSkills = optionalBoolean(args.cross_project_skills) ?? true;
     const capsule = await runtime.router.context({
       accountId: runtime.accountId,
       userId: runtime.userId,
-      query: requiredString(args.query, "query"),
+      query,
       conversationId: optionalString(args.conversation_id),
       projectId: optionalString(args.project),
       workspaceProjectId: optionalString(args.workspace_project),
@@ -132,11 +142,26 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         : [],
       limit: optionalInteger(args.limit)
     });
-    return jsonResult(capsule);
+    const candidateQuery = optionalString(args.project) ?? optionalString(args.workspace_project) ?? query;
+    const projectCandidates = capsule.resolvedProjectId === null || optionalString(args.project) || optionalString(args.workspace_project)
+      ? await runtime.projects.suggest(runtime.accountId, candidateQuery, 8)
+      : [];
+    return jsonResult({
+      ...capsule,
+      projectCandidates: projectCandidates.map((project) => ({
+        project: project.projectId,
+        name: project.name,
+        description: project.description,
+        aliases: project.aliases,
+        similarity: project.similarity,
+        matchedBy: project.matchedBy,
+        descriptionMissing: !project.description
+      }))
+    });
   });
 
   server.registerTool("memmy_remember", {
-    description: "在任务结束前的 memory hygiene 阶段写入真正耐久的新事实、决定、偏好或纠正。不要逐轮复制聊天内容；默认写全局，project scope 必须能明确解析出唯一项目，不能凭模型猜测。",
+    description: "在任务结束前的 memory hygiene 阶段写入真正耐久的新事实、决定、偏好或纠正。不要逐轮复制聊天内容；默认写全局，project scope 必须解析到注册表中的唯一 canonical project。未知/相似名称先用 memmy_project_list 核对，不允许通过写入隐式创建新项目。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
@@ -155,6 +180,15 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     if (scope !== "global" && scope !== "project") throw new TypeError("scope must be global or project");
     const conversationId = optionalString(args.conversation_id);
     let projectId = optionalString(args.project) ?? null;
+    await knownProjectRecords(runtime);
+    if (scope === "project" && projectId !== null) {
+      const requestedProject = projectId;
+      projectId = await runtime.projects.resolve(runtime.accountId, requestedProject);
+      if (projectId === null) {
+        const candidates = await runtime.projects.suggest(runtime.accountId, requestedProject, 5);
+        throw new Error(`unknown project "${requestedProject}". Call memmy_project_list with query="${requestedProject}" before creating or writing a new project. Similar: ${candidates.map((item) => item.projectId).join(", ") || "none"}`);
+      }
+    }
     if (scope === "project" && projectId === null && conversationId) {
       projectId = await runtime.router.currentProject(runtime.accountId, conversationId);
     }
@@ -618,8 +652,170 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     return jsonResult({ scope, project: projectId, result });
   });
 
+  server.registerTool("memmy_project_list", {
+    description: "只读列出当前账号的项目注册表。返回 canonical project slug、显示名、description、aliases 和状态；query 可按相似名称检索候选。模型在准备创建项目、绑定一个不确定项目、或发现大小写/近似名称时，应先调用本工具，用名称相似度 + description 判断是否已有同一项目，禁止盲目新建。",
+    inputSchema: fromJsonSchema<Record<string, unknown>>({
+      type: "object",
+      properties: {
+        query: { type: "string", description: "可选的项目名称/slug/关键词，用于查找相似项目候选" },
+        include_inactive: { type: "boolean", description: "是否包含 merged/deleted 历史项目；默认 false" },
+        limit: { type: "integer", minimum: 1, maximum: 20, description: "相似候选最大数量；默认 8" }
+      },
+      additionalProperties: false
+    } as JsonSchemaType)
+  }, async (args) => {
+    await knownProjectRecords(runtime);
+    const includeInactive = optionalBoolean(args.include_inactive) ?? false;
+    const projects = await runtime.projects.list(runtime.accountId, { includeInactive });
+    const query = optionalString(args.query);
+    const matches = query
+      ? await runtime.projects.suggest(runtime.accountId, query, optionalInteger(args.limit) ?? 8)
+      : [];
+    return jsonResult({
+      projects: projects.map(projectForModel),
+      matches: matches.map((project) => ({
+        ...projectForModel(project),
+        similarity: project.similarity,
+        matchedBy: project.matchedBy
+      })),
+      instructions: "Prefer an existing canonical project when name/alias and description describe the same work. If still ambiguous, ask the user. Only create through memmy_project_manage after explicit authorization."
+    });
+  });
+
+  server.registerTool("memmy_project_manage", {
+    description: "受控项目管理工具。支持 create/update/delete/merge，但所有修改都必须先 action=plan；plan 只返回一次性 authorization_id 和影响说明，不修改数据。模型必须把计划展示给用户，并在收到针对该计划的明确授权后才能 action=execute。禁止把 plan 本身、历史授权或模型推断当成授权。delete 是逻辑删除，不物理清空 Memory；merge 将 source 变成 target 的历史 alias，未来写入统一到 target，旧 alias 下的历史记忆仍参与召回。",
+    inputSchema: fromJsonSchema<Record<string, unknown>>({
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["plan", "execute"] },
+        operation: { type: "string", enum: ["create", "update", "delete", "merge"] },
+        project: { type: "string", description: "create 时为新 canonical slug；其它操作为 source/current project ref" },
+        target: { type: "string", description: "merge 的目标 canonical project ref" },
+        name: { type: "string", description: "create/update 的显示名；不改变稳定 canonical slug" },
+        description: { type: "string", description: "create 必填；update 可修改。用于 AI 项目消歧。" },
+        aliases: { type: "array", items: { type: "string" }, description: "create/update 的显式别名集合" },
+        authorization_id: { type: "string", description: "execute 时必须使用刚才 plan 返回的一次性授权 ID" }
+      },
+      required: ["action"],
+      additionalProperties: false
+    } as JsonSchemaType)
+  }, async (args) => {
+    const action = requiredString(args.action, "action");
+    if (action === "plan") {
+      await knownProjectRecords(runtime);
+      const operation = requiredString(args.operation, "operation");
+      if (!["create", "update", "delete", "merge"].includes(operation)) throw new TypeError("unsupported project management operation");
+      const project = requiredString(args.project, "project");
+      const payload: Record<string, unknown> = { project };
+      let impact: Record<string, unknown>;
+
+      if (operation === "create") {
+        const description = requiredString(args.description, "description");
+        if (await runtime.projects.resolve(runtime.accountId, project)) {
+          throw new Error(`project already exists or aliases to an existing project: ${project}`);
+        }
+        payload.description = description;
+        if (optionalString(args.name)) payload.name = optionalString(args.name);
+        if (stringArray(args.aliases)) payload.aliases = stringArray(args.aliases);
+        impact = {
+          createsCanonicalProject: project,
+          similarProjects: (await runtime.projects.suggest(runtime.accountId, project, 6)).map(projectForModel),
+          requiresDescription: true
+        };
+      } else {
+        const canonical = await runtime.projects.resolve(runtime.accountId, project);
+        if (!canonical) throw new Error(`unknown or inactive project: ${project}`);
+        payload.project = canonical;
+        if (operation === "update") {
+          const hasName = typeof args.name === "string";
+          const hasDescription = typeof args.description === "string";
+          const hasAliases = Array.isArray(args.aliases);
+          if (!hasName && !hasDescription && !hasAliases) throw new TypeError("update requires name, description, or aliases");
+          if (hasName) payload.name = String(args.name);
+          if (hasDescription) payload.description = String(args.description);
+          if (hasAliases) payload.aliases = stringArray(args.aliases) ?? [];
+          impact = {
+            project: canonical,
+            stableCanonicalSlug: canonical,
+            changesMetadataOnly: true
+          };
+        } else if (operation === "delete") {
+          impact = {
+            project: canonical,
+            logicalDelete: true,
+            memoryPurged: false,
+            note: "Existing durable evidence is retained; the project becomes unavailable for new routing/writes."
+          };
+        } else {
+          const target = requiredString(args.target, "target");
+          const canonicalTarget = await runtime.projects.resolve(runtime.accountId, target);
+          if (!canonicalTarget) throw new Error(`unknown merge target: ${target}`);
+          if (canonicalTarget === canonical) throw new Error("source and target already resolve to the same project");
+          payload.target = canonicalTarget;
+          impact = {
+            source: canonical,
+            target: canonicalTarget,
+            logicalMerge: true,
+            futureWritesUse: canonicalTarget,
+            historicalAliasRecallPreserved: true,
+            physicalMemoryRewrite: false
+          };
+        }
+      }
+
+      const authorizationId = randomUUID();
+      const expiresAt = Date.now() + 10 * 60_000;
+      projectMutationAuthorizations.set(authorizationId, {
+        accountId: runtime.accountId,
+        operation: operation as "create" | "update" | "delete" | "merge",
+        payload,
+        expiresAt
+      });
+      return jsonResult({
+        status: "awaiting_user_authorization",
+        operation,
+        payload,
+        impact,
+        authorization_id: authorizationId,
+        expires_at: new Date(expiresAt).toISOString(),
+        instructions: "Show this plan to the user. Call action=execute with authorization_id only after the user explicitly approves this exact plan."
+      });
+    }
+    if (action !== "execute") throw new TypeError("action must be plan or execute");
+    const authorizationId = requiredString(args.authorization_id, "authorization_id");
+    const authorization = projectMutationAuthorizations.get(authorizationId);
+    if (!authorization || authorization.accountId !== runtime.accountId) throw new Error("invalid or already-used project authorization");
+    projectMutationAuthorizations.delete(authorizationId);
+    if (authorization.expiresAt < Date.now()) throw new Error("project authorization expired; create a new plan");
+    const project = requiredString(authorization.payload.project, "project");
+    let result: unknown;
+    if (authorization.operation === "create") {
+      result = await runtime.projects.create(runtime.accountId, {
+        projectId: project,
+        name: optionalString(authorization.payload.name),
+        description: requiredString(authorization.payload.description, "description"),
+        aliases: stringArray(authorization.payload.aliases)
+      });
+    } else if (authorization.operation === "update") {
+      result = await runtime.projects.update(runtime.accountId, project, {
+        ...(typeof authorization.payload.name === "string" ? { name: authorization.payload.name } : {}),
+        ...(typeof authorization.payload.description === "string" ? { description: authorization.payload.description } : {}),
+        ...(Array.isArray(authorization.payload.aliases) ? { aliases: stringArray(authorization.payload.aliases) ?? [] } : {})
+      });
+    } else if (authorization.operation === "delete") {
+      result = await runtime.projects.delete(runtime.accountId, project);
+    } else {
+      result = await runtime.projects.merge(
+        runtime.accountId,
+        project,
+        requiredString(authorization.payload.target, "target")
+      );
+    }
+    return jsonResult({ ok: true, operation: authorization.operation, result });
+  });
+
   server.registerTool("memmy_project", {
-    description: "列出、查看、绑定或解除当前会话项目，也可读取 Normify 权威项目架构。Memhub 被提及或调用时，应先完成 memmy_context，再用 action=current 核对当前会话 primary project；若本轮有明确项目/workspace 证据，以本轮证据为准，不要凭旧绑定或模型猜测项目。",
+    description: "兼容项目上下文工具：列出、查看、绑定或解除当前会话项目，也可读取 Normify 权威项目架构。新的项目发现/消歧优先使用 memmy_project_list；项目修改使用 memmy_project_manage。Memhub 被提及或调用时，应先完成 memmy_context，再用 action=current 核对当前会话 primary project；若本轮有明确项目/workspace 证据，以本轮证据为准，不要凭旧绑定或模型猜测项目。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
@@ -634,18 +830,26 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   }, async (args) => {
     const action = requiredString(args.action, "action");
     if (action === "list") {
-      return jsonResult({ projects: await knownProjectIds(runtime) });
+      const details = await knownProjectRecords(runtime);
+      return jsonResult({ projects: details.map((project) => project.projectId), projectDetails: details.map(projectForModel) });
     }
     const conversationId = optionalString(args.conversation_id);
     if (action === "current") {
       if (!conversationId) throw new TypeError("conversation_id is required for current");
+      await knownProjectRecords(runtime);
       return jsonResult({ project: await runtime.router.currentProject(runtime.accountId, conversationId) });
     }
     if (action === "bind") {
       if (!conversationId) throw new TypeError("conversation_id is required for bind");
       const projectId = requiredString(args.project, "project");
-      await runtime.router.bindProject(runtime.accountId, conversationId, projectId);
-      return jsonResult({ ok: true, project: projectId });
+      await knownProjectRecords(runtime);
+      const canonical = await runtime.projects.resolve(runtime.accountId, projectId);
+      if (!canonical) {
+        const matches = await runtime.projects.suggest(runtime.accountId, projectId, 6);
+        throw new Error(`unknown project "${projectId}". Use memmy_project_list before binding. Similar: ${matches.map((item) => item.projectId).join(", ") || "none"}`);
+      }
+      await runtime.router.bindProject(runtime.accountId, conversationId, canonical);
+      return jsonResult({ ok: true, project: canonical, requested: projectId });
     }
     if (action === "unbind") {
       if (!conversationId) throw new TypeError("conversation_id is required for unbind");
@@ -653,10 +857,13 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     }
     if (action === "architecture") {
       const projectId = requiredString(args.project, "project");
+      await knownProjectRecords(runtime);
+      const canonical = await runtime.projects.resolve(runtime.accountId, projectId);
+      if (!canonical) throw new Error(`unknown project: ${projectId}`);
       const query = optionalString(args.query) ?? "project architecture, ownership, dependencies and current constraints";
       return jsonResult({
-        project: projectId,
-        architecture: await runtime.router.projectArchitecture(runtime.accountId, projectId, query)
+        project: canonical,
+        architecture: await runtime.router.projectArchitecture(runtime.accountId, canonical, query)
       });
     }
     throw new TypeError(`unsupported memmy_project action: ${action}`);
@@ -1140,6 +1347,21 @@ async function serveHttp(
         const runtime = runtimeFor(summary.account_id);
         if (url.pathname === "/memhub/admin/api" && request.method === "GET") {
           const kind = url.searchParams.get("kind") ?? "overview";
+          if (kind === "projects") {
+            const projects = await knownProjectRecords(runtime);
+            const items = projects.map((project) => ({
+              id: project.projectId,
+              title: project.name || project.projectId,
+              project_id: project.projectId,
+              description: project.description,
+              aliases: project.aliases,
+              status: project.state,
+              updated_at: project.updatedAt
+            }));
+            response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" })
+              .end(JSON.stringify({ items, total: items.length }));
+            return;
+          }
           if (kind === "captures") {
             const captures = await listCaptureEvents(options.stateRoot, summary.account_id);
             const items = captures.map((capture) => ({
@@ -1244,7 +1466,7 @@ async function serveHttp(
           response.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
           return;
         }
-        const projects = await knownProjectIds(runtime);
+        const projects = await knownProjectRecords(runtime);
         const devices = await listDevices(options.stateRoot, summary.account_id);
         const visibleAccounts = isAdmin && url.pathname.startsWith("/memhub/admin") ? accounts : [];
         response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
@@ -1565,7 +1787,7 @@ function localAdminAccount(
 
 function renderConsole(input: {
   account: Awaited<ReturnType<typeof listAccounts>>[number];
-  projects: string[];
+  projects: ProjectDescriptor[];
   devices: Awaited<ReturnType<typeof listDevices>>;
   accounts: Awaited<ReturnType<typeof listAccounts>>;
   adminView: boolean;
@@ -1579,20 +1801,20 @@ function renderConsole(input: {
   const logoutLink = input.localControl ? "" : '<a class="logout" href="/cdn-cgi/access/logout" data-i18n="logout" data-zh="退出" data-en="Sign out">退出</a>';
   const accountLabel = e(input.account.cloudflare_email ?? input.account.username);
   const content = input.adminView
-    ? `<div class="admin-shell"><aside><div class="brand">Memhub <em>Control</em></div><button data-view="overview">◫ <span data-i18n="overview">总览</span></button><button data-view="captures">◉ <span data-i18n="captures">原始捕获</span></button><button data-view="episodes">◷ <span data-i18n="episodes">对话与 Episode</span></button><button data-view="distillation">⌬ <span data-i18n="distillation">蒸馏任务</span></button><button data-view="memories">◇ <span data-i18n="memories">记忆</span></button><button data-view="traces">⌁ <span data-i18n="traces">L1 轨迹</span></button><button data-view="skills">✦ <span data-i18n="skills">技能</span></button><button data-view="world-models">◎ <span data-i18n="world">世界模型</span></button><button data-view="knowledge">▤ <span data-i18n="knowledge">L2 域知识</span></button><button data-view="accounts">♙ <span data-i18n="accounts">账号</span></button><div class="aside-foot">${e(authBoundary)}<br><small data-zh="身份边界" data-en="Identity boundary">身份边界</small></div></aside><div class="console"><div class="hero"><div><small data-i18n="control">MEMORY CONTROL PLANE</small><h1 data-i18n="title">长期记忆管理</h1><p data-i18n="subtitle">查看从 Raw Capture 到 Episode、蒸馏任务、Memory、Skill 与 World Model 的完整生命周期。</p></div><div class="hero-actions"><button id="theme-toggle" class="ui-toggle">亮色</button><button id="lang">EN</button>${logoutLink}</div></div><div id="account-panel" class="panel hidden"><h2 data-i18n="accounts">账号</h2><div class="grid">${input.accounts.map((a) => `<article><b>${e(a.cloudflare_email ?? a.username)}</b><span class="pill">${e(a.role)}</span><small>${e(a.account_id)}</small><div class="actions"><button class="soft" onclick="accountRole('${e(a.account_id)}','admin')">Admin</button><button class="soft" onclick="accountRole('${e(a.account_id)}','user')">User</button></div></article>`).join("")}</div></div><div id="data-panel" class="panel"><div class="panel-head"><div><h2 id="view-title">总览</h2><p id="view-desc" class="muted">正在读取 Memory Core…</p></div><input id="filter" placeholder="搜索 / Search"></div><div id="cards" class="stats"></div><div id="items" class="items"><div class="empty">Loading…</div></div></div></div></div><div id="drawer" class="drawer hidden"><button class="drawer-close" onclick="closeDrawer()">×</button><div id="drawer-body"></div></div><script>${consoleScript()}</script>`
-    : `<section class="user-hero"><div><small data-zh="账号工作区" data-en="ACCOUNT WORKSPACE">账号工作区</small><h1 data-zh="我的 Memhub" data-en="My Memhub">我的 Memhub</h1><p data-zh="查看当前稳定账号自己的项目记忆边界、连接设备与访问权限。项目内容保持隔离；长期记忆治理仍由管理员 Control Plane 负责。" data-en="Inspect the project memory boundaries, connected devices and access role owned by this stable account. Project content stays isolated; long-term memory governance remains in the admin Control Plane.">查看当前稳定账号自己的项目记忆边界、连接设备与访问权限。项目内容保持隔离；长期记忆治理仍由管理员 Control Plane 负责。</p></div><div class="user-identity"><span data-zh="身份" data-en="IDENTITY">身份</span><b>${accountLabel}</b><small>${e(input.account.account_id)}</small></div></section><section class="user-stats"><article><span data-zh="项目空间" data-en="PROJECT SPACES">项目空间</span><b>${input.projects.length}</b><small data-zh="当前账号可见项目" data-en="Projects visible to this account">当前账号可见项目</small></article><article><span data-zh="连接设备" data-en="CONNECTED DEVICES">连接设备</span><b>${input.devices.filter((d) => !d.revoked_at).length}</b><small><span>${input.devices.length}</span> <span data-zh="台已注册" data-en="total registered">台已注册</span></small></article><article><span data-zh="访问角色" data-en="ACCESS ROLE">访问角色</span><b class="role-value">${e(input.account.role)}</b><small data-zh="${input.account.role === "admin" ? "可进入管理 Control Plane" : "账号工作区权限"}" data-en="${input.account.role === "admin" ? "Admin Control Plane access" : "Workspace access"}">${input.account.role === "admin" ? "可进入管理 Control Plane" : "账号工作区权限"}</small></article></section><div class="user-grid"><section class="user-panel"><div class="user-panel-head"><div><small data-zh="项目记忆" data-en="PROJECT MEMORY">项目记忆</small><h2 data-zh="项目空间" data-en="Project spaces">项目空间</h2></div><span><span>${input.projects.length}</span> <span data-zh="个空间" data-en="spaces">个空间</span></span></div><div class="user-list">${input.projects.map((p) => `<article><div class="user-icon">P</div><div><b>${e(p)}</b><span data-zh="项目级独立记忆边界" data-en="Project-scoped memory boundary">项目级独立记忆边界</span></div><small data-zh="已隔离" data-en="ISOLATED">已隔离</small></article>`).join("") || '<div class="user-empty" data-zh="暂无项目。项目建立后会在这里显示独立的长期记忆空间。" data-en="No projects yet. Each project will appear here as an isolated long-term memory space.">暂无项目。项目建立后会在这里显示独立的长期记忆空间。</div>'}</div></section><section class="user-panel"><div class="user-panel-head"><div><small data-zh="设备访问" data-en="DEVICE ACCESS">设备访问</small><h2 data-zh="连接设备" data-en="Connected devices">连接设备</h2></div><span><span>${input.devices.length}</span> <span data-zh="台已注册" data-en="registered">台已注册</span></span></div><div class="user-list">${input.devices.map((d) => `<article><div class="user-icon">D</div><div><b>${e(d.name)}</b><span>${e(d.device_id)}</span></div><small class="${d.revoked_at ? "state-revoked" : "state-live"}" data-zh="${d.revoked_at ? "已撤销" : "已连接"}" data-en="${d.revoked_at ? "REVOKED" : "CONNECTED"}">${d.revoked_at ? "已撤销" : "已连接"}</small></article>`).join("") || '<div class="user-empty" data-zh="暂无连接设备。设备接入后会显示稳定 device_id 与连接状态。" data-en="No connected devices yet. Registered devices will show a stable device_id and connection state here.">暂无连接设备。设备接入后会显示稳定 device_id 与连接状态。</div>'}</div></section></div><section class="user-boundary"><div><small data-zh="治理边界" data-en="GOVERNANCE BOUNDARY">治理边界</small><h2 data-zh="个人工作区只展示属于这个账号的边界。" data-en="The workspace only exposes boundaries owned by this account.">个人工作区只展示属于这个账号的边界。</h2></div><p><span data-zh="Raw Capture、Episode、蒸馏任务、Memory、Skill、L2 与 L3 的检查和治理入口位于管理员 Control Plane。" data-en="Inspection and governance for Raw Capture, Episodes, distillation jobs, Memory, Skills, L2 and L3 live in the admin Control Plane.">Raw Capture、Episode、蒸馏任务、Memory、Skill、L2 与 L3 的检查和治理入口位于管理员 Control Plane。</span>${input.account.role === "admin" ? ' <span data-zh="当前账号拥有管理员权限，可从顶部切换到" data-en="This account has administrator access; switch to">当前账号拥有管理员权限，可从顶部切换到</span> <a href="/memhub/admin">Admin</a>。' : ""}</p></section>`;
+    ? `<div class="admin-shell"><aside><div class="brand">Memhub <em>Control</em></div><button data-view="overview">◫ <span data-i18n="overview">总览</span></button><button data-view="projects">▦ <span data-i18n="projects">项目</span></button><button data-view="captures">◉ <span data-i18n="captures">原始捕获</span></button><button data-view="episodes">◷ <span data-i18n="episodes">对话与 Episode</span></button><button data-view="distillation">⌬ <span data-i18n="distillation">蒸馏任务</span></button><button data-view="memories">◇ <span data-i18n="memories">记忆</span></button><button data-view="traces">⌁ <span data-i18n="traces">L1 轨迹</span></button><button data-view="skills">✦ <span data-i18n="skills">技能</span></button><button data-view="world-models">◎ <span data-i18n="world">世界模型</span></button><button data-view="knowledge">▤ <span data-i18n="knowledge">L2 域知识</span></button><button data-view="accounts">♙ <span data-i18n="accounts">账号</span></button><div class="aside-foot">${e(authBoundary)}<br><small data-zh="身份边界" data-en="Identity boundary">身份边界</small></div></aside><div class="console"><div class="hero"><div><small data-i18n="control">MEMORY CONTROL PLANE</small><h1 data-i18n="title">长期记忆管理</h1><p data-i18n="subtitle">先浏览轻量目录，再按需加载项目、Capture、Memory、Skill 与 World Model。</p></div><div class="hero-actions"><button id="theme-toggle" class="ui-toggle">暗色</button><button id="lang">EN</button>${logoutLink}</div></div><div id="account-panel" class="panel hidden"><h2 data-i18n="accounts">账号</h2><div class="grid">${input.accounts.map((a) => `<article><b>${e(a.cloudflare_email ?? a.username)}</b><span class="pill">${e(a.role)}</span><small>${e(a.account_id)}</small><div class="actions"><button class="soft" onclick="accountRole('${e(a.account_id)}','admin')">Admin</button><button class="soft" onclick="accountRole('${e(a.account_id)}','user')">User</button></div></article>`).join("")}</div></div><div id="data-panel" class="panel"><div class="panel-head"><div><h2 id="view-title">总览</h2><p id="view-desc" class="muted">选择一个数据域后再加载内容。</p></div><input id="filter" placeholder="搜索"></div><div id="cards" class="stats"></div><div id="items" class="items"></div></div></div></div><div id="drawer" class="drawer hidden"><button class="drawer-close" onclick="closeDrawer()">×</button><div id="drawer-body"></div></div><script>${consoleScript()}</script>`
+    : `<section class="user-hero"><div><small data-zh="账号工作区" data-en="ACCOUNT WORKSPACE">账号工作区</small><h1 data-zh="我的 Memhub" data-en="My Memhub">我的 Memhub</h1><p data-zh="查看当前稳定账号自己的项目记忆边界、连接设备与访问权限。项目内容保持隔离；长期记忆治理仍由管理员 Control Plane 负责。" data-en="Inspect the project memory boundaries, connected devices and access role owned by this stable account. Project content stays isolated; long-term memory governance remains in the admin Control Plane.">查看当前稳定账号自己的项目记忆边界、连接设备与访问权限。项目内容保持隔离；长期记忆治理仍由管理员 Control Plane 负责。</p></div><div class="user-identity"><span data-zh="身份" data-en="IDENTITY">身份</span><b>${accountLabel}</b><small>${e(input.account.account_id)}</small></div></section><section class="user-stats"><article><span data-zh="项目空间" data-en="PROJECT SPACES">项目空间</span><b>${input.projects.length}</b><small data-zh="当前账号可见项目" data-en="Projects visible to this account">当前账号可见项目</small></article><article><span data-zh="连接设备" data-en="CONNECTED DEVICES">连接设备</span><b>${input.devices.filter((d) => !d.revoked_at).length}</b><small><span>${input.devices.length}</span> <span data-zh="台已注册" data-en="total registered">台已注册</span></small></article><article><span data-zh="访问角色" data-en="ACCESS ROLE">访问角色</span><b class="role-value">${e(input.account.role)}</b><small data-zh="${input.account.role === "admin" ? "可进入管理 Control Plane" : "账号工作区权限"}" data-en="${input.account.role === "admin" ? "Admin Control Plane access" : "Workspace access"}">${input.account.role === "admin" ? "可进入管理 Control Plane" : "账号工作区权限"}</small></article></section><div class="user-grid"><section class="user-panel"><div class="user-panel-head"><div><small data-zh="项目记忆" data-en="PROJECT MEMORY">项目记忆</small><h2 data-zh="项目空间" data-en="Project spaces">项目空间</h2></div><span><span>${input.projects.length}</span> <span data-zh="个空间" data-en="spaces">个空间</span></span></div><div class="user-list">${input.projects.map((p) => `<article><div class="user-icon">P</div><div><b>${e(p.name || p.projectId)}</b><span>${e(p.description || (p.aliases.length ? `aliases: ${p.aliases.join(", ")}` : p.projectId))}</span></div><small>${e(p.projectId)}</small></article>`).join("") || '<div class="user-empty" data-zh="暂无项目。项目建立后会在这里显示独立的长期记忆空间。" data-en="No projects yet. Each project will appear here as an isolated long-term memory space.">暂无项目。项目建立后会在这里显示独立的长期记忆空间。</div>'}</div></section><section class="user-panel"><div class="user-panel-head"><div><small data-zh="设备访问" data-en="DEVICE ACCESS">设备访问</small><h2 data-zh="连接设备" data-en="Connected devices">连接设备</h2></div><span><span>${input.devices.length}</span> <span data-zh="台已注册" data-en="registered">台已注册</span></span></div><div class="user-list">${input.devices.map((d) => `<article><div class="user-icon">D</div><div><b>${e(d.name)}</b><span>${e(d.device_id)}</span></div><small class="${d.revoked_at ? "state-revoked" : "state-live"}" data-zh="${d.revoked_at ? "已撤销" : "已连接"}" data-en="${d.revoked_at ? "REVOKED" : "CONNECTED"}">${d.revoked_at ? "已撤销" : "已连接"}</small></article>`).join("") || '<div class="user-empty" data-zh="暂无连接设备。设备接入后会显示稳定 device_id 与连接状态。" data-en="No connected devices yet. Registered devices will show a stable device_id and connection state here.">暂无连接设备。设备接入后会显示稳定 device_id 与连接状态。</div>'}</div></section></div><section class="user-boundary"><div><small data-zh="治理边界" data-en="GOVERNANCE BOUNDARY">治理边界</small><h2 data-zh="个人工作区只展示属于这个账号的边界。" data-en="The workspace only exposes boundaries owned by this account.">个人工作区只展示属于这个账号的边界。</h2></div><p><span data-zh="Raw Capture、Episode、蒸馏任务、Memory、Skill、L2 与 L3 的检查和治理入口位于管理员 Control Plane。" data-en="Inspection and governance for Raw Capture, Episodes, distillation jobs, Memory, Skills, L2 and L3 live in the admin Control Plane.">Raw Capture、Episode、蒸馏任务、Memory、Skill、L2 与 L3 的检查和治理入口位于管理员 Control Plane。</span>${input.account.role === "admin" ? ' <span data-zh="当前账号拥有管理员权限，可从顶部切换到" data-en="This account has administrator access; switch to">当前账号拥有管理员权限，可从顶部切换到</span> <a href="/memhub/admin">Admin</a>。' : ""}</p></section>`;
   const pageTitle = input.adminView ? "Memhub Control Plane" : "Memhub Workspace";
   const bodyClass = input.adminView ? "" : "user-body";
   const mainClass = input.adminView ? "admin-main" : "user-main";
-  const userControls = input.adminView ? "" : '<div class="ui-controls"><button id="theme-toggle" class="ui-toggle">亮色</button><button id="lang-toggle" class="ui-toggle">EN</button></div>';
+  const userControls = input.adminView ? "" : '<div class="ui-controls"><button id="theme-toggle" class="ui-toggle">暗色</button><button id="lang-toggle" class="ui-toggle">EN</button></div>';
   const prefsScript = input.adminView ? "" : `<script>${pagePreferencesScript()}</script>`;
-  return `<!doctype html><html lang="zh-CN" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><title>${pageTitle}</title><style>${consoleCss()}${themeCss()}</style></head><body class="${bodyClass}"><header><b>Memhub</b><nav>${nav}<span>${accountLabel}</span>${userControls}${input.adminView ? "" : logoutLink}</nav></header><main class="${mainClass}">${content}</main>${prefsScript}</body></html>`;
+  return `<!doctype html><html lang="zh-CN" data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><title>${pageTitle}</title><style>${consoleCss()}${themeCss()}</style></head><body class="${bodyClass}"><header><b>Memhub</b><nav>${nav}<span>${accountLabel}</span>${userControls}${input.adminView ? "" : logoutLink}</nav></header><main class="${mainClass}">${content}</main>${prefsScript}</body></html>`;
 }
 
 
 function renderLanding(): string {
-  return `<!doctype html><html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><meta name="description" content="Memhub is a private, project-aware long-term memory and context hub for AI harnesses."><title>Memhub — durable memory for AI work</title><style>${landingCss()}${themeCss()}</style></head><body class="landing-body">
-  <header class="landing-header"><a class="landing-brand" href="/memhub"><span class="landing-mark">M</span><b>Memhub</b></a><nav><a href="#system" data-zh="系统" data-en="System">System</a><a href="#deploy" data-zh="部署" data-en="Deploy">Deploy</a><a href="https://github.com/PhSanqi/Memhub">GitHub</a><a class="header-cta" href="/memhub/user" data-zh="打开工作区" data-en="Open workspace">Open workspace</a><div class="ui-controls"><button id="theme-toggle" class="ui-toggle">Light</button><button id="lang-toggle" class="ui-toggle">中文</button></div></nav></header>
+  return `<!doctype html><html lang="en" data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><meta name="description" content="Memhub is a private, project-aware long-term memory and context hub for AI harnesses."><title>Memhub — durable memory for AI work</title><style>${landingCss()}${themeCss()}</style></head><body class="landing-body">
+  <header class="landing-header"><a class="landing-brand" href="/memhub"><span class="landing-mark">M</span><b>Memhub</b></a><nav><a href="#system" data-zh="系统" data-en="System">System</a><a href="#deploy" data-zh="部署" data-en="Deploy">Deploy</a><a href="https://github.com/PhSanqi/Memhub">GitHub</a><a class="header-cta" href="/memhub/user" data-zh="打开工作区" data-en="Open workspace">Open workspace</a><div class="ui-controls"><button id="theme-toggle" class="ui-toggle">Dark</button><button id="lang-toggle" class="ui-toggle">中文</button></div></nav></header>
   <main class="landing-main">
     <section class="landing-home">
       <div class="landing-copy"><span class="landing-eyebrow" data-zh="项目感知长期记忆" data-en="PROJECT-AWARE LONG-TERM MEMORY">PROJECT-AWARE LONG-TERM MEMORY</span><h1 data-zh="让记忆始终连接到正在进行的工作。" data-en="Memory that stays connected to the work.">Memory that stays connected to the work.</h1><p data-zh="Memhub 为 Codex、Claude Code、ChatGPT 风格 MCP 客户端和其他 AI Harness 提供统一、持久的记忆边界，而不强迫所有宿主采用同一种接入方式。" data-en="Memhub gives Codex, Claude Code, ChatGPT-style MCP clients and other AI harnesses one durable memory boundary without forcing every host into the same integration path.">Memhub gives Codex, Claude Code, ChatGPT-style MCP clients and other AI harnesses one durable memory boundary without forcing every host into the same integration path.</p><div class="landing-actions"><a class="primary-link" href="/memhub/user"><span data-zh="打开工作区" data-en="Open workspace">Open workspace</span> <span>→</span></a><a class="soft-link" href="https://github.com/PhSanqi/Memhub" data-zh="查看源码" data-en="View source">View source</a></div><div class="hero-proof"><span><i></i><span data-zh="账号 + 项目隔离" data-en="Account + project isolation">Account + project isolation</span></span><span><i></i><span data-zh="私有 Memory Core" data-en="Private Memory Core">Private Memory Core</span></span><span><i></i>Linux + Windows</span></div></div>
@@ -1614,7 +1836,7 @@ function pagePreferencesScript(): string {
   return `
 const root=document.documentElement;
 let uiLang=localStorage.memhubLang||((navigator.language||'').toLowerCase().startsWith('zh')?'zh':'en');
-let uiTheme=localStorage.memhubTheme||'dark';
+let uiTheme=localStorage.memhubTheme||'light';
 function applyUiPreferences(){
   root.lang=uiLang==='zh'?'zh-CN':'en';
   root.dataset.theme=uiTheme;
@@ -1648,29 +1870,30 @@ function renderUnprovisionedAccount(email: string): string {
 
 function consoleCss(): string { return `
 *{box-sizing:border-box}body{margin:0;font:14px Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;background:#f7fbff;color:#17324d}header{height:54px;display:flex;justify-content:space-between;align-items:center;padding:0 28px;background:rgba(255,255,255,.92);border-bottom:1px solid #dbeaf5}nav{display:flex;gap:12px;align-items:center}a{color:#2877a8;text-decoration:none}.view-switch{padding:7px 10px;border-radius:9px}.view-switch.active{background:#e3f3f8;color:#156f91;font-weight:700}.logout,#lang{border:1px solid #c9dfec;background:white;border-radius:10px;padding:8px 13px;color:#35657e}.admin-main{max-width:none;margin:0;padding:0}.admin-shell{display:grid;grid-template-columns:220px 1fr;min-height:calc(100vh - 54px)}aside{padding:24px 14px;background:#eef8fc;border-right:1px solid #d6eaf3}.brand{font-size:19px;font-weight:750;padding:0 12px 24px}.brand em{font-style:normal;color:#4aa6c6}aside button{width:100%;text-align:left;border:0;background:transparent;padding:11px 12px;margin:3px 0;border-radius:10px;color:#42667a;font-weight:600}aside button:hover,aside button.active{background:#dff2f8;color:#147b9f}.aside-foot{position:sticky;top:calc(100vh - 130px);padding:18px 12px;color:#7595a5}.console{padding:30px 4vw 60px;max-width:1500px}.hero{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;padding:12px 2px 25px}.hero small,.landing-hero small{letter-spacing:.16em;color:#4a9ab8;font-weight:800}.hero h1{font-size:32px;margin:8px 0;color:#153d57}.hero p{margin:0;color:#6c8a9a}.hero-actions{display:flex;gap:9px}.panel{background:white;border:1px solid #dcebf2;box-shadow:0 8px 30px rgba(35,111,143,.06);border-radius:18px;padding:22px;margin-bottom:18px}.panel-head{display:flex;justify-content:space-between;gap:20px;align-items:center}.panel-head input{width:min(320px,40vw);border:1px solid #d3e5ee;border-radius:11px;padding:10px 13px;outline:none}.stats,.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:18px 0}.stats article,.grid article{padding:16px;border:1px solid #deedf3;background:#fbfeff;border-radius:13px;display:flex;flex-direction:column;gap:6px}.stats b{font-size:25px;color:#197b9e}.pill{align-self:flex-start;background:#e1f5f6;color:#237f88;border-radius:999px;padding:3px 8px}.items{display:flex;flex-direction:column;gap:9px}.row{cursor:pointer;border:1px solid #e2edf2;border-radius:12px;padding:14px 16px;background:#fff;display:grid;grid-template-columns:minmax(140px,1fr) minmax(220px,3fr) auto;gap:14px;align-items:start}.row:hover{border-color:#a9d7e7;background:#fbfeff}.row h3{font-size:14px;margin:0 0 5px;color:#24526c}.row p{margin:0;color:#587688;white-space:pre-wrap;overflow-wrap:anywhere;max-height:100px;overflow:hidden}.row small{color:#91a7b3}.empty{padding:48px;text-align:center;color:#8ca3af}.hidden{display:none!important}.muted{color:#7793a2}article small{overflow-wrap:anywhere}.drawer{position:fixed;z-index:20;right:0;top:54px;width:min(600px,94vw);height:calc(100vh - 54px);overflow:auto;background:#fff;border-left:1px solid #d6e8f0;box-shadow:-18px 0 50px rgba(24,86,112,.12);padding:30px}.drawer-close{float:right;border:0;background:#eef7fa;border-radius:50%;width:34px;height:34px;font-size:22px}.drawer pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f7fbfd;border:1px solid #e1edf2;border-radius:12px;padding:14px;font-size:12px}.actions{display:flex;gap:8px;margin:20px 0}.danger,.soft{border:1px solid #d8e7ed;background:#f7fbfc;border-radius:9px;padding:8px 12px}.danger{color:#a43b43;border-color:#efcdd0;background:#fff9f9}main{max-width:1180px;margin:0 auto;padding:46px 28px 70px}.landing-hero{padding:60px 0 48px;max-width:880px}.landing-hero h1{font-size:clamp(38px,7vw,72px);line-height:1.02;margin:16px 0;color:#123a54}.landing-hero p{font-size:18px;line-height:1.7;color:#557487;max-width:780px}.landing-actions{display:flex;gap:12px;margin-top:28px}.primary-link,.soft-link{display:inline-block;padding:11px 16px;border-radius:11px}.primary-link{background:#177b9d;color:white}.soft-link{background:#e8f4f8}.flow{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:18px 0 34px}.flow span{padding:9px 12px;background:#fff;border:1px solid #dbeaf1;border-radius:10px}.flow b{color:#80a5b7}@media(max-width:760px){.admin-shell{grid-template-columns:1fr}aside{display:flex;overflow:auto;padding:8px;position:sticky;top:54px;z-index:2}aside .brand,.aside-foot{display:none}aside button{min-width:max-content}.console{padding:18px}.hero{flex-direction:column}.row{grid-template-columns:1fr}.panel-head{align-items:flex-start;flex-direction:column}.panel-head input{width:100%}header{padding:0 14px}header nav span{display:none}main{padding:32px 18px}.landing-hero{padding-top:32px}}
-body.admin-body{background:#090d12;color:#edf3f6}body.admin-body header{background:rgba(9,13,18,.94);border-color:#19232d;backdrop-filter:blur(14px)}body.admin-body header b{color:#edf3f6}body.admin-body header a{color:#8f9da8}body.admin-body .view-switch.active{background:#14231f;color:#91dfc3}body.admin-body .logout,body.admin-body #lang{border-color:#24303d;background:#0f151c;color:#a9b6c0}body.admin-body .admin-shell{grid-template-columns:226px minmax(0,1fr);min-height:calc(100vh - 54px)}body.admin-body aside{position:sticky;top:54px;height:calc(100vh - 54px);padding:22px 12px;background:#0b1016;border-color:#19232d;overflow:auto}body.admin-body .brand{font-size:17px;padding:0 10px 22px}body.admin-body .brand em{color:#72d0ae}body.admin-body aside button{border:1px solid transparent;padding:9px 10px;margin:2px 0;border-radius:8px;color:#8998a4}body.admin-body aside button:hover{background:#111922;color:#e1e9ed}body.admin-body aside button.active{background:#14231f;border-color:#203a32;color:#91dfc3}body.admin-body .aside-foot{position:static;margin:20px 10px 0;padding:16px 0 0;border-top:1px solid #19232d;color:#61707d;font-size:11px}body.admin-body .console{padding:34px clamp(20px,4vw,56px) 60px;max-width:1500px}body.admin-body .hero{padding:5px 0 26px}body.admin-body .hero small{color:#55a488;font:700 10px ui-monospace,SFMono-Regular,Menlo,monospace}body.admin-body .hero h1{font-size:36px;letter-spacing:-.035em;margin:7px 0 8px;color:#edf3f6}body.admin-body .hero p{color:#8b99a6;line-height:1.6}body.admin-body .panel{background:#0f151c;border-color:#19232d;box-shadow:0 20px 60px rgba(0,0,0,.16);border-radius:13px;padding:20px;margin-bottom:18px}body.admin-body .panel-head{align-items:flex-start}body.admin-body .panel-head h2{margin:0 0 6px;color:#edf3f6}body.admin-body .panel-head input{border-color:#24303d;background:#0a1016;color:#edf3f6;border-radius:8px;padding:9px 11px}body.admin-body .muted{color:#8b99a6}body.admin-body .stats{grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;margin:15px 0 18px}body.admin-body .stats article,body.admin-body .grid article{border-color:#19232d;background:#0c1218;border-radius:9px;padding:13px}body.admin-body .stats b{font:650 23px ui-monospace,SFMono-Regular,Menlo,monospace;color:#e9f2f4}body.admin-body .stats span,body.admin-body article small{color:#70808d}body.admin-body .pill{background:#14251f;color:#82d8b9}body.admin-body .items{gap:0;border-top:1px solid #19232d}body.admin-body .row{border:0;border-bottom:1px solid #19232d;border-radius:0;padding:13px 8px;background:transparent}body.admin-body .row:hover{background:#111820}body.admin-body .row h3{color:#d9e3e8}body.admin-body .row p{color:#8d9ca8;line-height:1.5}body.admin-body .row small{color:#53626e;font:10px ui-monospace,SFMono-Regular,Menlo,monospace}body.admin-body .empty{color:#73818d}body.admin-body .soft{border-color:#24303d;background:#111922;color:#aebac3}body.admin-body .danger{border-color:#563237;background:#1b1113;color:#ff969b}body.admin-body .drawer{background:#0e141b;border-color:#24303d;color:#edf3f6;box-shadow:-24px 0 70px rgba(0,0,0,.35)}body.admin-body .drawer-close{background:#151d25;color:#aeb8c1}body.admin-body .drawer pre{background:#090e13;border-color:#19232d;color:#a8bac4}.admin-toolbar{display:flex;gap:8px;align-items:center}.admin-toolbar #filter{min-width:min(320px,38vw)}@media(max-width:760px){body.admin-body .admin-shell{grid-template-columns:1fr}body.admin-body aside{position:sticky;top:54px;height:auto;display:flex;padding:7px;border-right:0;border-bottom:1px solid #19232d;z-index:3}body.admin-body aside .brand,body.admin-body .aside-foot{display:none}body.admin-body aside button{width:auto;min-width:max-content;margin:0}body.admin-body .console{padding:18px 14px 48px}.admin-toolbar{width:100%}.admin-toolbar #filter{min-width:0;flex:1}}
+body.admin-body{background:#090d12;color:#edf3f6}body.admin-body header{background:rgba(9,13,18,.94);border-color:#19232d;backdrop-filter:blur(14px)}body.admin-body header b{color:#edf3f6}body.admin-body header a{color:#8f9da8}body.admin-body .view-switch.active{background:#14231f;color:#91dfc3}body.admin-body .logout,body.admin-body #lang{border-color:#24303d;background:#0f151c;color:#a9b6c0}body.admin-body .admin-shell{grid-template-columns:226px minmax(0,1fr);min-height:calc(100vh - 54px)}body.admin-body aside{position:sticky;top:54px;height:calc(100vh - 54px);padding:22px 12px;background:#0b1016;border-color:#19232d;overflow:auto}body.admin-body .brand{font-size:17px;padding:0 10px 22px}body.admin-body .brand em{color:#72d0ae}body.admin-body aside button{border:1px solid transparent;padding:9px 10px;margin:2px 0;border-radius:8px;color:#8998a4}body.admin-body aside button:hover{background:#111922;color:#e1e9ed}body.admin-body aside button.active{background:#14231f;border-color:#203a32;color:#91dfc3}body.admin-body .aside-foot{position:static;margin:20px 10px 0;padding:16px 0 0;border-top:1px solid #19232d;color:#61707d;font-size:11px}body.admin-body .console{padding:34px clamp(20px,4vw,56px) 60px;max-width:1500px}body.admin-body .hero{padding:5px 0 26px}body.admin-body .hero small{color:#55a488;font:700 10px ui-monospace,SFMono-Regular,Menlo,monospace}body.admin-body .hero h1{font-size:36px;letter-spacing:-.035em;margin:7px 0 8px;color:#edf3f6}body.admin-body .hero p{color:#8b99a6;line-height:1.6}body.admin-body .panel{background:#0f151c;border-color:#19232d;box-shadow:0 20px 60px rgba(0,0,0,.16);border-radius:13px;padding:20px;margin-bottom:18px}body.admin-body .panel-head{align-items:flex-start}body.admin-body .panel-head h2{margin:0 0 6px;color:#edf3f6}body.admin-body .panel-head input{border-color:#24303d;background:#0a1016;color:#edf3f6;border-radius:8px;padding:9px 11px}body.admin-body .muted{color:#8b99a6}body.admin-body .stats{grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;margin:15px 0 18px}body.admin-body .stats article,body.admin-body .grid article{border-color:#19232d;background:#0c1218;border-radius:9px;padding:13px}body.admin-body .stats b{font:650 23px ui-monospace,SFMono-Regular,Menlo,monospace;color:#e9f2f4}body.admin-body .stats span,body.admin-body article small{color:#70808d}body.admin-body .pill{background:#14251f;color:#82d8b9}body.admin-body .items{gap:0;border-top:1px solid #19232d}body.admin-body .row{border:0;border-bottom:1px solid #19232d;border-radius:0;padding:13px 8px;background:transparent}body.admin-body .row:hover{background:#111820}body.admin-body .row h3{color:#d9e3e8}body.admin-body .row p{color:#8d9ca8;line-height:1.5}body.admin-body .row small{color:#53626e;font:10px ui-monospace,SFMono-Regular,Menlo,monospace}body.admin-body .empty{color:#73818d}body.admin-body .soft{border-color:#24303d;background:#111922;color:#aebac3}body.admin-body .danger{border-color:#563237;background:#1b1113;color:#ff969b}body.admin-body .drawer{background:#0e141b;border-color:#24303d;color:#edf3f6;box-shadow:-24px 0 70px rgba(0,0,0,.35)}body.admin-body .drawer-close{background:#151d25;color:#aeb8c1}body.admin-body .drawer pre{background:#090e13;border-color:#19232d;color:#a8bac4}.admin-toolbar{display:flex;gap:8px;align-items:center}.admin-toolbar #filter{min-width:min(320px,38vw)}body.admin-body .overview-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;border-top:0}body.admin-body .overview-card{appearance:none;border:1px solid #19232d;background:#0c1218;color:#edf3f6;border-radius:10px;padding:18px;text-align:left;display:grid;grid-template-columns:34px 1fr auto;gap:12px;align-items:center;cursor:pointer}body.admin-body .overview-card:hover{border-color:#2d4b40;background:#101a17}body.admin-body .overview-card>span{font:700 15px ui-monospace,SFMono-Regular,Menlo,monospace;color:#72d0ae}body.admin-body .overview-card div{display:flex;flex-direction:column;gap:5px}body.admin-body .overview-card b{font-size:14px}body.admin-body .overview-card small{color:#657582;font:10px ui-monospace,SFMono-Regular,Menlo,monospace}body.admin-body .overview-card i{font-style:normal;color:#52635c}@media(max-width:760px){body.admin-body .admin-shell{grid-template-columns:1fr}body.admin-body aside{position:sticky;top:54px;height:auto;display:flex;padding:7px;border-right:0;border-bottom:1px solid #19232d;z-index:3}body.admin-body aside .brand,body.admin-body .aside-foot{display:none}body.admin-body aside button{width:auto;min-width:max-content;margin:0}body.admin-body .console{padding:18px 14px 48px}.admin-toolbar{width:100%}.admin-toolbar #filter{min-width:0;flex:1}}
 body.user-body{background:#090d12;color:#edf3f6;min-height:100vh}body.user-body header{background:rgba(9,13,18,.94);border-color:#19232d;backdrop-filter:blur(14px)}body.user-body header>b{color:#edf3f6}body.user-body header a{color:#8f9da8}body.user-body .view-switch.active{background:#14231f;color:#91dfc3}body.user-body .logout{border-color:#24303d;background:#0f151c;color:#a9b6c0}.user-main{max-width:1240px;padding:52px 28px 86px}.user-hero{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(280px,.65fr);gap:60px;align-items:end;padding:36px 0 42px;border-bottom:1px solid #19232d}.user-hero>div:first-child>small,.user-panel-head small,.user-boundary small{color:#55a488;font:700 10px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.14em}.user-hero h1{font-size:clamp(44px,6vw,72px);line-height:.96;letter-spacing:-.055em;margin:12px 0 18px}.user-hero p{max-width:720px;margin:0;color:#8b99a6;font-size:16px;line-height:1.7}.user-identity{padding:18px;border:1px solid #24303d;border-radius:10px;background:#0d1319;display:flex;flex-direction:column;gap:7px}.user-identity>span{color:#61717d;font:10px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.12em}.user-identity b{font-size:14px;overflow-wrap:anywhere}.user-identity small{color:#667582;font:10px ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}.user-stats{display:grid;grid-template-columns:repeat(3,1fr);margin:0;border-bottom:1px solid #19232d}.user-stats article{min-height:142px;padding:24px 20px;border-right:1px solid #19232d;display:flex;flex-direction:column;gap:7px;background:transparent}.user-stats article:last-child{border-right:0}.user-stats span{color:#64747f;font:10px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.1em}.user-stats b{font:650 31px ui-monospace,SFMono-Regular,Menlo,monospace;color:#e9f2f4}.user-stats b.role-value{text-transform:uppercase;font-size:23px;color:#8edcbe}.user-stats small{color:#61717d}.user-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:42px 0 12px}.user-panel{margin:0;padding:0;border:1px solid #19232d;border-radius:12px;background:#0d1319;overflow:hidden}.user-panel-head{display:flex;justify-content:space-between;gap:20px;align-items:flex-end;padding:20px;border-bottom:1px solid #19232d}.user-panel-head h2{font-size:20px;margin:7px 0 0}.user-panel-head>span{color:#5f6f7b;font:10px ui-monospace,SFMono-Regular,Menlo,monospace}.user-list{display:flex;flex-direction:column}.user-list article{display:grid;grid-template-columns:34px minmax(0,1fr) auto;gap:12px;align-items:center;padding:15px 18px;border-bottom:1px solid #19232d}.user-list article:last-child{border-bottom:0}.user-list article>div:nth-child(2){min-width:0;display:flex;flex-direction:column;gap:4px}.user-list article b{font-size:13px}.user-list article span{color:#697986;font-size:11px;overflow-wrap:anywhere}.user-list article>small{font:9px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.08em;color:#61717d}.user-icon{width:30px;height:30px;display:grid;place-items:center;border:1px solid #2a3b47;border-radius:8px;background:#101820;color:#759489;font:700 10px ui-monospace,SFMono-Regular,Menlo,monospace}.user-list .state-live{color:#6bc5a4}.user-list .state-revoked{color:#c2767d}.user-empty{padding:34px 20px;color:#667582;line-height:1.6}.user-boundary{display:grid;grid-template-columns:1fr 1fr;gap:50px;align-items:start;margin-top:12px;padding:38px 2px;border-top:1px solid #19232d}.user-boundary h2{font-size:29px;line-height:1.12;letter-spacing:-.03em;margin:9px 0 0}.user-boundary p{margin:0;color:#84929e;line-height:1.7}.user-boundary a{color:#8edcbe}@media(max-width:820px){.user-hero,.user-boundary{grid-template-columns:1fr;gap:24px}.user-grid{grid-template-columns:1fr}.user-stats{grid-template-columns:1fr}.user-stats article{min-height:auto;border-right:0;border-bottom:1px solid #19232d}.user-stats article:last-child{border-bottom:0}}@media(max-width:760px){body.user-body header nav span{display:none}.user-main{padding:28px 18px 60px}.user-hero{padding-top:22px}.user-hero h1{font-size:47px}.user-panel-head{align-items:flex-start;flex-direction:column;gap:9px}.user-list article{grid-template-columns:32px minmax(0,1fr)}.user-list article>small{grid-column:2}}
 `; }
 
 function consoleScript(): string { return `
 document.body.classList.add("admin-body");
-const dict={zh:{overview:'总览',captures:'原始捕获',memories:'记忆',episodes:'对话与 Episode',distillation:'蒸馏任务',traces:'L1 轨迹',skills:'技能',world:'世界模型',knowledge:'L2 域知识',accounts:'账号',control:'MEMORY CONTROL PLANE',title:'长期记忆管理',subtitle:'查看从 Raw Capture 到 Episode、蒸馏任务、Memory、Skill 与 World Model 的完整生命周期。',logout:'退出'},en:{overview:'Overview',captures:'Raw Captures',memories:'Memories',episodes:'Conversations & Episodes',distillation:'Distillation Jobs',traces:'L1 Traces',skills:'Skills',world:'World Models',knowledge:'L2 Knowledge',accounts:'Accounts',control:'MEMORY CONTROL PLANE',title:'Long-term Memory',subtitle:'Inspect the lifecycle from raw captures through episodes, distillation jobs, memories, skills and world models.',logout:'Sign out'}};
-let lang=localStorage.memhubLang||((navigator.language||'').toLowerCase().startsWith('zh')?'zh':'en'), theme=localStorage.memhubTheme||'dark', current='overview', payload=null, viewCache={}, activeRequest=null, requestSeq=0;
+const dict={zh:{overview:'总览',projects:'项目',captures:'原始捕获',memories:'记忆',episodes:'对话与 Episode',distillation:'蒸馏任务',traces:'L1 轨迹',skills:'技能',world:'世界模型',knowledge:'L2 域知识',accounts:'账号',control:'MEMORY CONTROL PLANE',title:'长期记忆管理',subtitle:'先浏览轻量目录，再按需加载项目、Capture、Memory、Skill 与 World Model。',logout:'退出'},en:{overview:'Overview',projects:'Projects',captures:'Raw Captures',memories:'Memories',episodes:'Conversations & Episodes',distillation:'Distillation Jobs',traces:'L1 Traces',skills:'Skills',world:'World Models',knowledge:'L2 Knowledge',accounts:'Accounts',control:'MEMORY CONTROL PLANE',title:'Long-term Memory',subtitle:'Browse the lightweight directory first, then load projects, captures, memories, skills and world models on demand.',logout:'Sign out'}};
+let lang=localStorage.memhubLang||((navigator.language||'').toLowerCase().startsWith('zh')?'zh':'en'), theme=localStorage.memhubTheme||'light', current='overview', payload=null, viewCache={}, activeRequest=null, requestSeq=0;
 const filterInput=document.getElementById("filter"),adminToolbar=document.createElement("div"),refreshButton=document.createElement("button");
 adminToolbar.className="admin-toolbar";refreshButton.className="soft";refreshButton.type="button";refreshButton.id="refresh";refreshButton.textContent="↻ Refresh";filterInput.replaceWith(adminToolbar);adminToolbar.append(filterInput,refreshButton);refreshButton.onclick=()=>{delete viewCache[current];load(current)};
-const titles={overview:['总览','Overview'],captures:['原始捕获','Raw Captures'],memories:['记忆','Memories'],episodes:['对话与 Episode','Conversations & Episodes'],distillation:['蒸馏任务','Distillation Jobs'],traces:['L1 轨迹','L1 Traces'],skills:['技能','Skills'],'world-models':['世界模型','World Models'],knowledge:['L2 域知识','L2 Knowledge']};
+const titles={overview:['总览','Overview'],projects:['项目','Projects'],captures:['原始捕获','Raw Captures'],memories:['记忆','Memories'],episodes:['对话与 Episode','Conversations & Episodes'],distillation:['蒸馏任务','Distillation Jobs'],traces:['L1 轨迹','L1 Traces'],skills:['技能','Skills'],'world-models':['世界模型','World Models'],knowledge:['L2 域知识','L2 Knowledge']};
 function tr(){document.documentElement.lang=lang==='zh'?'zh-CN':'en';document.documentElement.dataset.theme=theme;document.querySelectorAll('[data-i18n]').forEach(x=>x.textContent=dict[lang][x.dataset.i18n]||x.textContent);document.querySelectorAll('[data-zh][data-en]').forEach(x=>x.textContent=x.dataset[lang]||x.textContent);document.getElementById('lang').textContent=lang==='zh'?'EN':'中文';document.getElementById('theme-toggle').textContent=theme==='dark'?(lang==='zh'?'亮色':'Light'):(lang==='zh'?'暗色':'Dark');refreshButton.textContent=lang==='zh'?'↻ 刷新':'↻ Refresh';filterInput.placeholder=lang==='zh'?'搜索':'Search';}
 function values(o){if(!o||typeof o!=='object')return[];for(const k of ['items','tasks','memories','episodes','skills','records'])if(Array.isArray(o[k]))return o[k];return[]}
 function textOf(x){if(current==='captures')return (x.user_text||'')+'\n→ '+(x.assistant_text||'');if(current==='distillation'){if(x.type==='history_distillation')return (x.scope==='project'?'project:'+x.project_id:'account')+' · '+x.target+'\n'+(x.processed_in_run||0)+'/'+(x.evidence_count||0)+' evidence processed';return (x.conversation_id||'conversation job')+'\n'+(x.evidence?.length||0)+' evidence turns'}return x.snippet||x.content||x.summary||x.description||x.title||x.text||JSON.stringify(x)}
 function itemId(x){return x.id||x.memoryId||x.skillId||x.event_id||x.job_id||x.conversation_id}
 function render(data){payload=data;const items=values(data),cards=document.getElementById('cards'),total=data?.total??items.length;let html='<article><b>'+total+'</b><span>'+(lang==='zh'?'当前条目':'Current items')+'</span></article><article><b>'+items.filter(x=>x.status==='pending'||x.status==='resolving').length+'</b><span>'+(lang==='zh'?'待处理':'Pending')+'</span></article><article><b>'+items.filter(x=>x.status==='failed').length+'</b><span>'+(lang==='zh'?'失败':'Failed')+'</span></article>';if(current==='distillation'&&data.config){html+='<article><b>'+(data.config.auto_enabled?'ON':'OFF')+'</b><span>'+(lang==='zh'?'自动队列':'Auto queue')+' · '+data.config.turn_threshold+' '+(lang==='zh'?'轮':'turns')+' / '+data.config.idle_minutes+' '+(lang==='zh'?'分钟空闲':'min idle')+'</span><button class="soft" onclick="configureAuto()">'+(lang==='zh'?'配置':'Configure')+'</button></article>'}cards.innerHTML=html;filter();}
+function renderOverview(){payload=null;document.getElementById('cards').innerHTML='';const sections=[['projects','▦','项目','Projects','canonical slug / aliases / description'],['captures','◉','原始捕获','Raw Captures','capture / ingest'],['episodes','◷','对话与 Episode','Conversations & Episodes','conversation / episode'],['distillation','⌬','蒸馏任务','Distillation Jobs','queue / history distillation'],['memories','◇','记忆','Memories','L1 / durable memory'],['traces','⌁','L1 轨迹','L1 Traces','trace / provenance'],['skills','✦','技能','Skills','reusable capability'],['world-models','◎','世界模型','World Models','L3 / evolution'],['knowledge','▤','L2 域知识','L2 Knowledge','policy / domain knowledge']];const items=document.getElementById('items');items.className='items overview-grid';items.innerHTML=sections.map(s=>'<button class="overview-card" onclick="load(\''+s[0]+'\')"><span>'+s[1]+'</span><div><b>'+(lang==='zh'?s[2]:s[3])+'</b><small>'+s[4]+'</small></div><i>→</i></button>').join('')}
 function filter(){const q=document.getElementById('filter').value.toLowerCase();const items=values(payload).filter(x=>JSON.stringify(x).toLowerCase().includes(q));window.visibleItems=items;document.getElementById('items').innerHTML=items.length?items.map((x,i)=>'<div class="row" onclick="openItem('+i+')"><div><h3>'+esc(x.title||x.kind||x.type||x.event_id||x.job_id||x.id||'Item')+'</h3><small>'+esc(x.status||x.host||x.sourceAgent||x.source||'')+'</small></div><p>'+esc(textOf(x))+'</p><small>'+esc(x.updatedAt||x.updated_at||x.createdAt||x.created_at||x.timestamp||itemId(x)||'')+'</small></div>').join(''):'<div class="empty">'+(lang==='zh'?'暂无内容':'No items')+'</div>'}
 function openItem(i){const x=window.visibleItems[i],id=itemId(x);let actions='';if(id&&current==='captures')actions='<div class="actions"><button class="soft" onclick="event.stopPropagation();act(\'queue-distillation\',\''+js(x.event_id)+'\')">'+(lang==='zh'?'加入蒸馏队列':'Queue distillation')+'</button></div>';if(id&&current==='distillation'&&x.status==='failed')actions='<div class="actions"><button class="soft" onclick="event.stopPropagation();act(\'retry-distillation\',\''+js(x.job_id)+'\')">'+(lang==='zh'?'重试失败任务':'Retry failed job')+'</button></div>';if(id&&current==='memories')actions='<div class="actions"><button class="soft" onclick="event.stopPropagation();act(\'archive-memory\',\''+js(id)+'\')">'+(lang==='zh'?'归档':'Archive')+'</button><button class="danger" onclick="event.stopPropagation();act(\'delete-memory\',\''+js(id)+'\')">'+(lang==='zh'?'删除':'Delete')+'</button></div>';if(id&&current==='skills')actions='<div class="actions"><button class="soft" onclick="act(\'archive-skill\',\''+js(id)+'\')">'+(lang==='zh'?'归档':'Archive')+'</button></div>';if(id&&current==='world-models')actions='<div class="actions"><button class="soft" onclick="act(\'archive-world-model\',\''+js(id)+'\')">'+(lang==='zh'?'归档':'Archive')+'</button></div>';document.getElementById('drawer-body').innerHTML='<small>'+esc(current)+'</small><h2>'+esc(x.title||x.kind||x.event_id||x.job_id||x.id||(lang==='zh'?'详情':'Detail'))+'</h2><p>'+esc(textOf(x))+'</p>'+actions+'<h3>'+(lang==='zh'?'元数据 / 来源':'Metadata / Provenance')+'</h3><pre>'+esc(JSON.stringify(x,null,2))+'</pre>';document.getElementById('drawer').classList.remove('hidden')}
 function closeDrawer(){document.getElementById('drawer').classList.add('hidden')}function js(s){return String(s).replace(/[\\']/g,'\\$&')}async function act(action,id){if(!confirm((lang==='zh'?'确认执行：':'Confirm action: ')+action+'?'))return;const r=await fetch('/memhub/admin/action',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action,id})});if(!r.ok){alert(await r.text());return}delete viewCache[current];delete viewCache.overview;closeDrawer();load(current)}
 async function configureAuto(){const c=payload.config||{},enabled=confirm(lang==='zh'?'确定=开启自动形成蒸馏待办；取消=关闭。不会由 Memhub 后端调用模型。':'OK enables automatic distillation job creation; Cancel disables it. Memhub itself will not call a model.');const t=Number(prompt('Turn threshold',String(c.turn_threshold||8))),idle=Number(prompt('Idle minutes',String(c.idle_minutes||30)));const r=await fetch('/memhub/admin/action',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'set-distillation-config',auto_enabled:enabled,turn_threshold:t,idle_minutes:idle})});if(!r.ok){alert(await r.text());return}delete viewCache.distillation;load('distillation')}
 async function accountRole(id,role){if(!confirm((lang==='zh'?'确认账号权限改为 ':'Change account role to ')+role+'?'))return;const r=await fetch('/memhub/admin/action',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'set-account-role',id,role})});if(!r.ok){alert(await r.text());return}location.reload()}
 async function fetchView(view,signal){if(viewCache[view])return viewCache[view];const r=await fetch('/memhub/admin/api?kind='+encodeURIComponent(view),{signal});if(!r.ok)throw Error(await r.text());const data=await r.json();viewCache[view]=data;return data}
-async function load(view){const seq=++requestSeq;current=view;if(activeRequest)activeRequest.abort();activeRequest=null;document.querySelectorAll('aside button').forEach(b=>b.classList.toggle('active',b.dataset.view===view));if(view==='accounts'){document.getElementById('account-panel').classList.remove('hidden');document.getElementById('data-panel').classList.add('hidden');return}document.getElementById('account-panel').classList.add('hidden');document.getElementById('data-panel').classList.remove('hidden');document.getElementById('view-title').textContent=titles[view][lang==='zh'?0:1];document.getElementById('view-desc').textContent=(view==='captures'||view==='distillation')?(lang==='zh'?'Memhub Capture / Evidence 层数据':'Memhub capture / evidence-layer data'):(lang==='zh'?'来自 Memory Core 的账号隔离数据；读取可随时切换/取消':'Account-scoped Memory Core data; navigation remains cancellable');if(viewCache[view]){render(viewCache[view]);return}document.getElementById('items').innerHTML='<div class="empty">'+(lang==='zh'?'正在读取；可直接切换其它页面…':'Loading; you can switch views immediately…')+'</div>';const controller=new AbortController();activeRequest=controller;const timer=setTimeout(()=>controller.abort('timeout'),6500);try{const data=await fetchView(view,controller.signal);if(seq===requestSeq)render(data)}catch(e){if(seq!==requestSeq||controller.signal.aborted&&controller.signal.reason!=='timeout')return;if(seq===requestSeq)document.getElementById('items').innerHTML='<div class="empty">'+(controller.signal.reason==='timeout'?(lang==='zh'?'Memory Core 读取超时。此页面未阻塞其它功能，可重试或切换。':'Memory Core timed out. Other views remain usable; retry or switch views.'):esc(String(e)))+'</div>'}finally{clearTimeout(timer);if(activeRequest===controller)activeRequest=null}}
+async function load(view){const seq=++requestSeq;current=view;if(activeRequest)activeRequest.abort();activeRequest=null;document.querySelectorAll('aside button').forEach(b=>b.classList.toggle('active',b.dataset.view===view));if(view==='accounts'){document.getElementById('account-panel').classList.remove('hidden');document.getElementById('data-panel').classList.add('hidden');return}document.getElementById('account-panel').classList.add('hidden');document.getElementById('data-panel').classList.remove('hidden');document.getElementById('view-title').textContent=titles[view][lang==='zh'?0:1];if(view==='overview'){adminToolbar.style.display='none';document.getElementById('view-desc').textContent=lang==='zh'?'首屏不请求 Memory Core；选择一个数据域后再按需加载，并在本页缓存结果。':'The first screen does not query Memory Core. Choose a data domain to load it on demand; results are cached in this page.';renderOverview();return}adminToolbar.style.display='flex';document.getElementById('items').className='items';document.getElementById('view-desc').textContent=view==='projects'?(lang==='zh'?'项目注册表：canonical slug、aliases 与 description。':'Project registry: canonical slug, aliases and description.'):(view==='captures'||view==='distillation')?(lang==='zh'?'Memhub Capture / Evidence 层数据':'Memhub capture / evidence-layer data'):(lang==='zh'?'按需读取账号隔离数据；读取可取消，已加载视图会缓存。':'Load account-scoped data on demand; requests are cancellable and loaded views are cached.');if(viewCache[view]){render(viewCache[view]);return}document.getElementById('cards').innerHTML='';document.getElementById('items').innerHTML='<div class="empty">'+(lang==='zh'?'正在读取当前数据域；可以随时切换其它页面…':'Loading this data domain; you can switch views immediately…')+'</div>';const controller=new AbortController();activeRequest=controller;const timer=setTimeout(()=>controller.abort('timeout'),6500);try{const data=await fetchView(view,controller.signal);if(seq===requestSeq)render(data)}catch(e){if(seq!==requestSeq||controller.signal.aborted&&controller.signal.reason!=='timeout')return;if(seq===requestSeq)document.getElementById('items').innerHTML='<div class="empty">'+(controller.signal.reason==='timeout'?(lang==='zh'?'当前数据域读取超时。其它页面仍可正常使用，可重试或切换。':'This data domain timed out. Other views remain usable; retry or switch views.'):esc(String(e)))+'</div>'}finally{clearTimeout(timer);if(activeRequest===controller)activeRequest=null}}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 document.querySelectorAll('aside button').forEach(b=>b.onclick=()=>load(b.dataset.view));document.getElementById('filter').oninput=filter;document.getElementById('lang').onclick=()=>{lang=lang==='zh'?'en':'zh';localStorage.memhubLang=lang;tr();load(current)};document.getElementById('theme-toggle').onclick=()=>{theme=theme==='dark'?'light':'dark';localStorage.memhubTheme=theme;tr()};tr();load('overview');
 `; }
@@ -1733,19 +1956,28 @@ async function collectHistoryEvidence(input: {
   target: "memory" | "skill";
 }): Promise<HistoryEvidence[]> {
   const dbPath = process.env.MEMHUB_MEMORY_DB?.trim() || join(homedir(), ".memmy", "memory-service", "memory.sqlite");
-  const core = listCoreMemoryEvidence({
-    dbPath,
-    userId: input.runtime.userId,
-    ...(input.scope === "project" ? { projectId: input.projectId, excludeCaptureDerived: true } : {})
-  }).filter((item) => input.target === "skill" || item.layer !== "Skill");
-  if (input.scope === "account") return core;
+  const projectStorageIds = input.scope === "project" && input.projectId
+    ? await input.runtime.projects.storageIds(input.runtime.accountId, input.projectId)
+    : [];
+  const core = input.scope === "project"
+    ? projectStorageIds.flatMap((projectId) => listCoreMemoryEvidence({
+        dbPath,
+        userId: input.runtime.userId,
+        projectId,
+        excludeCaptureDerived: true
+      }).map((item) => ({ ...item, ...(input.projectId ? { project_id: input.projectId } : {}) })))
+    : listCoreMemoryEvidence({ dbPath, userId: input.runtime.userId });
+  const filteredCore = core.filter((item) => input.target === "skill" || item.layer !== "Skill");
+  if (input.scope === "account") return filteredCore;
 
   const captures = await listCaptureEvents(input.stateRoot, input.runtime.accountId);
   const projectByConversation = new Map<string, string | null>();
   const turns: HistoryEvidence[] = [];
   for (const capture of captures) {
     if (!capture.ingested || !capture.user_text?.trim() || !capture.assistant_text?.trim()) continue;
-    let resolvedProject = capture.project_hint ?? projectByConversation.get(capture.conversation_id);
+    let resolvedProject = capture.project_hint
+      ? await input.runtime.projects.resolve(input.runtime.accountId, capture.project_hint) ?? capture.project_hint
+      : projectByConversation.get(capture.conversation_id);
     if (resolvedProject === undefined) {
       resolvedProject = await input.runtime.router.currentProject(input.runtime.accountId, capture.conversation_id);
       projectByConversation.set(capture.conversation_id, resolvedProject);
@@ -1762,11 +1994,20 @@ async function collectHistoryEvidence(input: {
       tags: ["memhub-capture", `host:${capture.host}`]
     });
   }
-  return [...turns, ...core];
+  return [...turns, ...filteredCore];
 }
 
 async function knownProjectIds(runtime: MemhubRuntime): Promise<string[]> {
-  const discovered = await runtime.router.listProjects(runtime.accountId).catch(() => []);
+  return (await knownProjectRecords(runtime)).map((project) => project.projectId);
+}
+
+async function knownProjectRecords(runtime: MemhubRuntime): Promise<ProjectDescriptor[]> {
+  const discovered = await rawDiscoveredProjectIds(runtime);
+  return runtime.projects.reconcile(runtime.accountId, discovered);
+}
+
+async function rawDiscoveredProjectIds(runtime: MemhubRuntime): Promise<string[]> {
+  const discovered = await runtime.architecture.listProjects(runtime.accountId).catch(() => []);
   const dbPath = process.env.MEMHUB_MEMORY_DB?.trim() || join(homedir(), ".memmy", "memory-service", "memory.sqlite");
   let remembered: string[] = [];
   try {
@@ -1779,6 +2020,19 @@ async function knownProjectIds(runtime: MemhubRuntime): Promise<string[]> {
   }
   return [...new Set([...discovered, ...remembered].map((value) => value.trim()).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right));
+}
+
+function projectForModel(project: ProjectDescriptor): Record<string, unknown> {
+  return {
+    project: project.projectId,
+    name: project.name,
+    description: project.description,
+    aliases: project.aliases,
+    state: project.state,
+    ...(project.mergedInto ? { mergedInto: project.mergedInto } : {}),
+    descriptionMissing: !project.description,
+    updatedAt: project.updatedAt
+  };
 }
 
 function historyMemoryContract(): Record<string, unknown> {
@@ -1846,6 +2100,15 @@ async function resolveToolScope(
     throw new TypeError("scope must be global or project");
   }
   let projectId = input.project ?? null;
+  if (input.scope === "project") await knownProjectRecords(runtime);
+  if (input.scope === "project" && projectId !== null) {
+    const requestedProject = projectId;
+    projectId = await runtime.projects.resolve(runtime.accountId, requestedProject);
+    if (projectId === null) {
+      const candidates = await runtime.projects.suggest(runtime.accountId, requestedProject, 5);
+      throw new Error(`unknown project "${requestedProject}". Use memmy_project_list before project-scoped operations. Similar: ${candidates.map((item) => item.projectId).join(", ") || "none"}`);
+    }
+  }
   if (input.scope === "project" && projectId === null && input.conversationId) {
     projectId = await runtime.router.currentProject(runtime.accountId, input.conversationId);
   }
@@ -1853,12 +2116,6 @@ async function resolveToolScope(
     throw new Error("project scope requires an explicit or conversation-bound project");
   }
   if (input.scope === "global") projectId = null;
-  if (projectId) {
-    const projects = await runtime.router.listProjects(runtime.accountId);
-    if (projects.length > 0 && !projects.includes(projectId)) {
-      throw new Error(`unknown project for account: ${projectId}`);
-    }
-  }
   return {
     projectId,
     ...(input.conversationId ? { conversationId: input.conversationId } : {})

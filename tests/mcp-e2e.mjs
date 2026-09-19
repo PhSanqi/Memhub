@@ -262,6 +262,10 @@ async function testLocalAdmin(memoryPort) {
     assert.match(authenticatedHtml, /id="theme-toggle"/);
     assert.match(authenticatedHtml, /localStorage\.memhubTheme/);
     assert.match(authenticatedHtml, /localStorage\.memhubLang/);
+    assert.match(authenticatedHtml, /data-theme="light"/);
+    assert.match(authenticatedHtml, /data-view="projects"/);
+    assert.match(authenticatedHtml, /function renderOverview/);
+    assert.match(authenticatedHtml, /首屏不请求 Memory Core/);
     const landing = await fetch(`http://127.0.0.1:${port}/memhub`);
     assert.equal(landing.status, 200);
     const landingHtml = await landing.text();
@@ -272,6 +276,7 @@ async function testLocalAdmin(memoryPort) {
     assert.match(landingHtml, /id="lang-toggle"/);
     assert.match(landingHtml, /data-zh="项目感知长期记忆"/);
     assert.match(landingHtml, /data-en="Memory that stays connected to the work\."/);
+    assert.match(landingHtml, /data-theme="light"/);
     const workspaceView = await fetch(`http://127.0.0.1:${port}/memhub/user`, { headers: { authorization } });
     assert.equal(workspaceView.status, 200);
     const workspaceHtml = await workspaceView.text();
@@ -285,6 +290,11 @@ async function testLocalAdmin(memoryPort) {
     assert.match(workspaceHtml, /id="lang-toggle"/);
     assert.match(workspaceHtml, /localStorage\.memhubTheme/);
     assert.match(workspaceHtml, /localStorage\.memhubLang/);
+    assert.match(workspaceHtml, /data-theme="light"/);
+    const projectView = await fetch(`http://127.0.0.1:${port}/memhub/admin/api?kind=projects`, { headers: { authorization } });
+    assert.equal(projectView.status, 200);
+    const projectPayload = await projectView.json();
+    assert.equal(Array.isArray(projectPayload.items), true);
     const tunnelLike = await fetch(`http://127.0.0.1:${port}/memhub/admin`, {
       headers: { authorization, "cf-ray": "test-ray" }
     });
@@ -681,7 +691,7 @@ async function testHttp(memoryPort) {
       try {
         await bridgeClient.connect(bridgeTransport);
         const bridgeTools = await bridgeClient.listTools();
-        assert.deepEqual(bridgeTools.tools.map((tool) => tool.name).sort(), ["memhub_distill", "memhub_evolution", "memhub_history_distill", "memmy_context", "memmy_project", "memmy_remember"]);
+        assert.deepEqual(bridgeTools.tools.map((tool) => tool.name).sort(), ["memhub_distill", "memhub_evolution", "memhub_history_distill", "memmy_context", "memmy_project", "memmy_project_list", "memmy_project_manage", "memmy_remember"]);
         const bridgeContext = await bridgeClient.callTool({
           name: "memmy_context",
           arguments: { query: "continue through local bridge", project: "aide", conversation_id: "bridge-proxy-chat" }
@@ -769,9 +779,62 @@ function historySkillDocument(title) {
 
 async function exerciseClient(client, conversationId) {
   const listed = await client.listTools();
-  assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["memhub_distill", "memhub_evolution", "memhub_history_distill", "memmy_context", "memmy_project", "memmy_remember"]);
+  assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["memhub_distill", "memhub_evolution", "memhub_history_distill", "memmy_context", "memmy_project", "memmy_project_list", "memmy_project_manage", "memmy_remember"]);
   assert.match(listed.tools.find((tool) => tool.name === "memmy_context")?.description ?? "", /先用本工具.*conversation_id.*memmy_project action=current/);
   assert.match(listed.tools.find((tool) => tool.name === "memmy_project")?.description ?? "", /先完成 memmy_context.*action=current/);
+  assert.match(listed.tools.find((tool) => tool.name === "memmy_project_list")?.description ?? "", /description.*禁止盲目新建/);
+  assert.match(listed.tools.find((tool) => tool.name === "memmy_project_manage")?.description ?? "", /action=plan.*明确授权.*action=execute/);
+  let projectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "AIDE" } })).content[0].text);
+  if (!projectList.projects.some((project) => project.project === "aide")) {
+    const createPlan = JSON.parse((await client.callTool({
+      name: "memmy_project_manage",
+      arguments: {
+        action: "plan",
+        operation: "create",
+        project: "aide",
+        description: "AIDE project used by MCP integration tests."
+      }
+    })).content[0].text);
+    assert.equal(createPlan.status, "awaiting_user_authorization");
+    const createResult = JSON.parse((await client.callTool({
+      name: "memmy_project_manage",
+      arguments: { action: "execute", authorization_id: createPlan.authorization_id }
+    })).content[0].text);
+    assert.equal(createResult.ok, true);
+    projectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "AIDE" } })).content[0].text);
+  }
+  assert.ok(projectList.projects.some((project) => project.project === "aide"));
+  assert.equal(projectList.matches[0]?.project, "aide");
+  const unresolved = JSON.parse((await client.callTool({
+    name: "memmy_context",
+    arguments: { query: "continue the AIDEE work", project: "aidee", conversation_id: conversationId + "-unknown" }
+  })).content[0].text);
+  assert.equal(unresolved.resolvedProjectId, null);
+  assert.equal(unresolved.recallScope, "global_only");
+  assert.ok(unresolved.projectCandidates.some((project) => project.project === "aide"));
+  const updatePlanResult = await client.callTool({
+    name: "memmy_project_manage",
+    arguments: {
+      action: "plan",
+      operation: "update",
+      project: "aide",
+      description: "AIDE project used by MCP integration tests."
+    }
+  });
+  const updatePlan = JSON.parse(updatePlanResult.content[0].text);
+  assert.equal(updatePlan.status, "awaiting_user_authorization");
+  const updateResult = await client.callTool({
+    name: "memmy_project_manage",
+    arguments: { action: "execute", authorization_id: updatePlan.authorization_id }
+  });
+  assert.equal(JSON.parse(updateResult.content[0].text).ok, true);
+  const replayedAuthorization = await client.callTool({
+    name: "memmy_project_manage",
+    arguments: { action: "execute", authorization_id: updatePlan.authorization_id }
+  });
+  assert.match(replayedAuthorization.content[0].text, /invalid or already-used project authorization/);
+  const updatedList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "aide" } })).content[0].text);
+  assert.match(updatedList.projects.find((project) => project.project === "aide")?.description ?? "", /integration tests/);
   await client.callTool({ name: "memmy_project", arguments: { action: "bind", conversation_id: conversationId, project: "aide" } });
   const context = await client.callTool({ name: "memmy_context", arguments: { query: "continue", conversation_id: conversationId } });
   const capsule = JSON.parse(context.content[0].text);
