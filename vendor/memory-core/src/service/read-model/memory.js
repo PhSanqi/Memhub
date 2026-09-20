@@ -36,28 +36,9 @@ export function memoryDetailWithLayerPayload(detail, memory) {
         if (tracePayload.episodeId && tracePayload.rawTurnId && tracePayload.turnId)
             item.trace = tracePayload;
     }
-    else if (memory.memoryLayer === "L2") {
-        const policy = policyMetaFromMemory(memory);
-        item.policy = { utilityScore: policy?.gain, confidence: policy?.confidence, evidenceMemoryIds: policy?.sourceTraceIds ?? sourceMemoryIdsFromMemory(memory), repairHints: policy?.verification ? [policy.verification] : [] };
-    }
-    else if (memory.memoryLayer === "L3") {
-        const worldModel = worldModelMetaFromMemory(memory);
-        item.worldModel = worldModel?.schemaVersion === 2 && worldModel.fields
-            ? {
-                schemaVersion: 2,
-                sourceMemoryIds: worldModel.policyIds,
-                summary: worldModel.summary,
-                ...worldModel.fields
-            }
-            : {
-                sourceMemoryIds: worldModel?.policyIds ?? sourceMemoryIdsFromMemory(memory),
-                confidence: worldModel?.confidence,
-                summary: worldModel?.summary
-            };
-    }
     else if (memory.memoryLayer === "Skill") {
         const skill = skillMetaFromMemory(memory);
-        item.skill = { invocationGuide: skill?.invocationGuide ?? detail.body, retrievalBlurb: skill?.retrievalBlurb, triggerContext: skill?.triggerContext, procedure: procedureFromSkillMemory(memory), sourcePolicyIds: skill?.sourcePolicyIds ?? [], sourceWorldModelIds: skill?.sourceWorldModelIds ?? [], reliabilityScore: skill?.eta, utilityScore: skill?.eta, evidenceCount: skill?.evidenceAnchorIds.length };
+        item.skill = { invocationGuide: skill?.invocationGuide ?? detail.body, retrievalBlurb: skill?.retrievalBlurb, triggerContext: skill?.triggerContext, procedure: procedureFromSkillMemory(memory), sourceMemoryIds: sourceMemoryIdsFromMemory(memory), reliabilityScore: skill?.eta, utilityScore: skill?.eta, evidenceCount: skill?.evidenceAnchorIds.length };
     }
     return item;
 }

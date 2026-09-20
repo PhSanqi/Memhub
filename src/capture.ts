@@ -7,14 +7,18 @@ export interface MemhubCaptureEvent {
   host: string;
   host_version?: string;
   conversation_id: string;
+  continuity_id: string;
   turn_id?: string;
+  previous_event_id?: string;
   timestamp: string;
   workspace_id?: string;
   workspace_path?: string;
   project_hint?: string;
   user_text?: string;
   assistant_text?: string;
+  reasoning_summary?: string;
   tool_summary?: string;
+  capture_status: "open" | "partial" | "complete" | "truncated" | "failed";
   provenance?: Record<string, unknown>;
 }
 
@@ -48,19 +52,23 @@ export function normalizeCaptureEvent(value: unknown): MemhubCaptureEvent {
     event_id: requiredId(input.event_id, "event_id", 200),
     host: requiredId(input.host, "host", 100),
     conversation_id: requiredId(input.conversation_id, "conversation_id", 500),
+    continuity_id: optionalText(input.continuity_id, 500) ?? requiredId(input.conversation_id, "conversation_id", 500),
     timestamp: normalizeTimestamp(input.timestamp),
     ...(optionalText(input.host_version, 200) ? { host_version: optionalText(input.host_version, 200) } : {}),
     ...(optionalText(input.turn_id, 500) ? { turn_id: optionalText(input.turn_id, 500) } : {}),
+    ...(optionalText(input.previous_event_id, 500) ? { previous_event_id: optionalText(input.previous_event_id, 500) } : {}),
     ...(optionalText(input.workspace_id, 500) ? { workspace_id: optionalText(input.workspace_id, 500) } : {}),
     ...(optionalText(input.workspace_path, 4000) ? { workspace_path: optionalText(input.workspace_path, 4000) } : {}),
     ...(optionalText(input.project_hint, 500) ? { project_hint: optionalText(input.project_hint, 500) } : {}),
     ...(optionalText(input.user_text, 300_000) ? { user_text: optionalText(input.user_text, 300_000) } : {}),
     ...(optionalText(input.assistant_text, 300_000) ? { assistant_text: optionalText(input.assistant_text, 300_000) } : {}),
+    ...(optionalText(input.reasoning_summary, 100_000) ? { reasoning_summary: optionalText(input.reasoning_summary, 100_000) } : {}),
     ...(optionalText(input.tool_summary, 100_000) ? { tool_summary: optionalText(input.tool_summary, 100_000) } : {}),
+    capture_status: normalizeCaptureStatus(input.capture_status, input.user_text, input.assistant_text),
     ...(normalizeProvenance(input.provenance) ? { provenance: normalizeProvenance(input.provenance) } : {})
   };
-  if (!event.user_text && !event.assistant_text && !event.tool_summary) {
-    throw new TypeError("capture event requires user_text, assistant_text, or tool_summary");
+  if (!event.user_text && !event.assistant_text && !event.reasoning_summary && !event.tool_summary) {
+    throw new TypeError("capture event requires user_text, assistant_text, reasoning_summary, or tool_summary");
   }
   return event;
 }
@@ -151,13 +159,21 @@ export async function storeCaptureEvent(
     const merged = mergeCaptureEvent(existing, event);
     if (!merged.updated) return { created: false, updated: false, event: existing };
     const updated: StoredCaptureEvent = { ...existing, ...merged.event };
+    assertCaptureCompleteness(updated);
     await writeStoredCapture(path, updated);
     return { created: false, updated: true, event: updated };
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
   }
+  assertCaptureCompleteness(stored);
   await writeStoredCapture(path, stored, true);
   return { created: true, updated: false, event: stored };
+}
+
+function assertCaptureCompleteness(event: MemhubCaptureEvent): void {
+  if (event.capture_status === "complete" && (!event.user_text || !event.assistant_text)) {
+    throw new TypeError("complete capture requires both user_text and assistant_text");
+  }
 }
 
 export async function isCaptureIngested(stateRoot: string, accountId: string, eventId: string): Promise<boolean> {
@@ -257,14 +273,23 @@ export function mergeCaptureEvent(
   }
   let updated = false;
   const event: MemhubCaptureEvent = { ...existing };
+  if (incoming.continuity_id !== existing.continuity_id) {
+    if (existing.continuity_id !== existing.conversation_id) {
+      throw new Error("capture event conflict for continuity_id");
+    }
+    event.continuity_id = incoming.continuity_id;
+    updated = true;
+  }
   for (const field of [
     "host_version",
     "turn_id",
+    "previous_event_id",
     "workspace_id",
     "workspace_path",
     "project_hint",
     "user_text",
     "assistant_text",
+    "reasoning_summary",
     "tool_summary"
   ] as const) {
     const current = existing[field];
@@ -276,6 +301,21 @@ export function mergeCaptureEvent(
       continue;
     }
     if (current !== next) throw new Error(`capture event conflict for ${field}`);
+  }
+  const nextStatus = mergeCaptureStatus(existing.capture_status, incoming.capture_status);
+  if (nextStatus !== existing.capture_status) {
+    event.capture_status = nextStatus;
+    updated = true;
+  }
+  if (
+    event.user_text &&
+    event.assistant_text &&
+    event.capture_status !== "failed" &&
+    event.capture_status !== "truncated" &&
+    event.capture_status !== "complete"
+  ) {
+    event.capture_status = "complete";
+    updated = true;
   }
   if (incoming.provenance) {
     const provenance = { ...(existing.provenance ?? {}) };
@@ -291,6 +331,29 @@ export function mergeCaptureEvent(
     event.provenance = provenance;
   }
   return { updated, event };
+}
+
+function normalizeCaptureStatus(
+  value: unknown,
+  userText: unknown,
+  assistantText: unknown
+): MemhubCaptureEvent["capture_status"] {
+  if (value === "open" || value === "partial" || value === "complete" || value === "truncated" || value === "failed") {
+    return value;
+  }
+  return optionalText(userText, 300_000) && optionalText(assistantText, 300_000) ? "complete" : "open";
+}
+
+function mergeCaptureStatus(
+  current: MemhubCaptureEvent["capture_status"],
+  incoming: MemhubCaptureEvent["capture_status"]
+): MemhubCaptureEvent["capture_status"] {
+  if (current === incoming) return current;
+  if (incoming === "complete") return "complete";
+  if (current === "complete") return current;
+  if (incoming === "failed" || incoming === "truncated") return incoming;
+  if (current === "failed" || current === "truncated") return current;
+  return incoming === "partial" || current === "partial" ? "partial" : "open";
 }
 
 async function writeStoredCapture(path: string, event: StoredCaptureEvent, exclusive = false): Promise<void> {

@@ -1,14 +1,14 @@
 import { isRecord } from "../../utils/json.js";
 import { clip } from "../../utils/text.js";
-import { compileRetrievalQuery, displayReflectionText, failureAvoidancePolicyIsRetrievalEligible, focusResearchRetrievalQuery, isRepositoryRepairPrompt, isResearchDomain, isStandaloneMathFinalAnswerTask, policyMetaFromMemory, policyRequiresRevalidation, renderMathFinalAnswerProtocol, renderRepositoryRepairProtocol, RETRIEVAL_FILTER_PROMPT, RETRIEVAL_QUERY_EXTRACT_PROMPT, retrievalForIntent, retrievalLayersForMode, retrievalLayersForProfile, retrievePluginMemories, skillMetaFromMemory, STANDALONE_MATH_FINAL_ANSWER_TASK_KIND, traceMetaFromMemory, worldModelMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
+import { compileRetrievalQuery, displayReflectionText, focusResearchRetrievalQuery, isRepositoryRepairPrompt, isResearchDomain, isStandaloneMathFinalAnswerTask, renderMathFinalAnswerProtocol, renderRepositoryRepairProtocol, RETRIEVAL_FILTER_PROMPT, RETRIEVAL_QUERY_EXTRACT_PROMPT, retrievalForIntent, retrievalLayersForMode, retrievalLayersForProfile, retrievePluginMemories, skillMetaFromMemory, STANDALONE_MATH_FINAL_ANSWER_TASK_KIND, traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import { MEMORY_SUMMARY_MAX_TOKENS } from "../../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../../logging/logger.js";
-import { isStrictL3WorldModelV2Memory, kindFromMemory, Repositories } from "../../storage/repositories.js";
+import { kindFromMemory, Repositories } from "../../storage/repositories.js";
 import { newId, stableHash } from "../../utils/id.js";
 import { formatZonedTime, nowIso, resolveTimeZone } from "../../utils/time.js";
 import { recordApiLog } from "../model-audit/model-call-audit.js";
 import { sourceMemoryIdsFromMemory } from "../read-model/memory.js";
-import { isDynamicCurrentFactQuery } from "../user-memory/user-memory.js";
+import { isDynamicCurrentFactQuery } from "../capture/capture-heuristics.js";
 import { mergeRetrievalResults, normalizeQueryRewriteQueries } from "../retrieval/query-rewrite.js";
 import { normalizeRetrievalExtractKeywords } from "../turn/turn-normalization.js";
 import { IndexedCandidatePool } from "./indexed-candidate-pool.js";
@@ -80,16 +80,16 @@ function describeRetrievalFilterCandidate(hit, bodyChars) {
     const body = clip(hit.snippet, bodyChars);
     const title = clip(hit.title ?? hit.id, 120);
     switch (hit.memoryLayer) {
-        case "UserMemory":
-            return `[USER MEMORY] ${title}${body ? `\n   ${body}` : ""}`;
         case "Skill":
             return `[SKILL] ${title}${body ? `\n   ${body}` : ""}`;
         case "L1":
             return `[TRACE] ${body || title}`;
         case "L2":
-            return `[EXPERIENCE] ${title}${body ? `\n   ${body}` : ""}`;
+            return `[PROJECT TIMELINE] ${title}${body ? `\n   ${body}` : ""}`;
         case "L3":
-            return `[WORLD-MODEL] ${title}${body ? `\n   ${body}` : ""}`;
+            return `[PROJECT PROFILE] ${title}${body ? `\n   ${body}` : ""}`;
+        case "L4":
+            return `[USER PROFILE] ${title}${body ? `\n   ${body}` : ""}`;
     }
 }
 function uniqMemories(memories) {
@@ -152,34 +152,6 @@ function emptyRetrievalResult() {
         }
     };
 }
-function userMemoryRecallHit(memory, score) {
-    return {
-        id: memory.id,
-        kind: "user_memory",
-        memoryLayer: "UserMemory",
-        status: "activated",
-        title: memory.memoryTypes.join(" / "),
-        snippet: memory.content,
-        score,
-        tags: memory.memoryTypes,
-        createdAt: memory.createdAt,
-        updatedAt: memory.updatedAt,
-        source: "search",
-        sourceTurnId: memory.sourceTurnId,
-        memberMemoryIds: [memory.id],
-        retrievalRoutes: ["user_memory"],
-        members: [{
-                id: memory.id,
-                kind: "user_memory",
-                memoryLayer: "UserMemory",
-                status: memory.status,
-                content: memory.content,
-                createdAt: memory.createdAt,
-                updatedAt: memory.updatedAt,
-                retrievalRoute: "user_memory"
-            }]
-    };
-}
 function sourceTurnIdFromAgentMemory(memory) {
     const internal = memory.properties.internal_info;
     const direct = internal.source_raw_turn_id ?? internal.raw_turn_id;
@@ -188,7 +160,7 @@ function sourceTurnIdFromAgentMemory(memory) {
     const trace = isRecord(internal.trace) ? internal.trace : undefined;
     return trace && typeof trace.raw_turn_id === "string" ? trace.raw_turn_id : undefined;
 }
-export function mergeSameTurnRecallHits(agentHits, agentMemories, userHits) {
+export function mergeSameTurnRecallHits(agentHits, agentMemories) {
     const memoryById = new Map(agentMemories.map((memory) => [memory.id, memory]));
     const annotatedAgentHits = agentHits.map((hit) => {
         const memory = memoryById.get(hit.id);
@@ -222,51 +194,10 @@ export function mergeSameTurnRecallHits(agentHits, agentMemories, userHits) {
                 : {})
         };
     });
-    const l1ByTurn = new Map();
-    for (const hit of annotatedAgentHits) {
-        if (hit.memoryLayer !== "L1" || !hit.sourceTurnId)
-            continue;
-        const bucket = l1ByTurn.get(hit.sourceTurnId) ?? [];
-        bucket.push(hit);
-        l1ByTurn.set(hit.sourceTurnId, bucket);
-    }
-    const userByTurn = new Map();
-    for (const hit of userHits) {
-        if (!hit.sourceTurnId)
-            continue;
-        const bucket = userByTurn.get(hit.sourceTurnId) ?? [];
-        bucket.push(hit);
-        userByTurn.set(hit.sourceTurnId, bucket);
-    }
-    const mergedSourceTurnIds = [...l1ByTurn.keys()].filter((id) => userByTurn.has(id));
-    const mergedTurns = new Set(mergedSourceTurnIds);
-    const membersBySourceTurnId = {};
-    const mergedHits = mergedSourceTurnIds.map((sourceTurnId) => {
-        const members = [...(l1ByTurn.get(sourceTurnId) ?? []), ...(userByTurn.get(sourceTurnId) ?? [])];
-        const representative = [...members].sort((left, right) => {
-            const leftL1 = left.memoryLayer === "L1" ? 1 : 0;
-            const rightL1 = right.memoryLayer === "L1" ? 1 : 0;
-            return rightL1 - leftL1 || right.score - left.score;
-        })[0];
-        const memberMemoryIds = uniq(members.flatMap((hit) => hit.memberMemoryIds ?? [hit.id]));
-        membersBySourceTurnId[sourceTurnId] = memberMemoryIds;
-        return {
-            ...representative,
-            score: Math.max(...members.map((hit) => hit.score)),
-            sourceTurnId,
-            memberMemoryIds,
-            retrievalRoutes: ["user_memory", "l1"],
-            members: members.flatMap((hit) => hit.members ?? [])
-        };
-    });
     return {
-        hits: [
-            ...annotatedAgentHits.filter((hit) => !hit.sourceTurnId || !mergedTurns.has(hit.sourceTurnId)),
-            ...userHits.filter((hit) => !hit.sourceTurnId || !mergedTurns.has(hit.sourceTurnId)),
-            ...mergedHits
-        ],
-        mergedSourceTurnIds,
-        membersBySourceTurnId
+        hits: annotatedAgentHits,
+        mergedSourceTurnIds: [],
+        membersBySourceTurnId: {}
     };
 }
 export function mmrRecallHits(hits, limit, lambda) {
@@ -279,9 +210,7 @@ export function mmrRecallHits(hits, limit, lambda) {
             const candidate = pool[index];
             const redundancy = selected.length === 0
                 ? 0
-                : Math.max(...selected.map((prior) => candidate.memoryLayer === "UserMemory" && prior.memoryLayer === "UserMemory"
-                    ? 0
-                    : recallTextSimilarity(candidate.snippet, prior.snippet)));
+                : Math.max(...selected.map((prior) => recallTextSimilarity(candidate.snippet, prior.snippet)));
             const score = lambda * candidate.score - (1 - lambda) * redundancy;
             if (score > bestScore) {
                 bestIndex = index;
@@ -305,9 +234,6 @@ function recallTextSimilarity(left, right) {
         if (b.has(term))
             overlap += 1;
     return overlap / Math.max(a.size, b.size);
-}
-export function parallelMemoryLaneLimit(limit) {
-    return Math.ceil(1.5 * limit);
 }
 function isOnboardingFirstReportContinuationQuery(query) {
     return /memmy/i.test(query) &&
@@ -380,27 +306,12 @@ function normalizeRetrievalTimeFilter(value) {
     };
 }
 export function retrievedMemorySourceIds(memory) {
-    const policy = policyMetaFromMemory(memory);
     const skill = skillMetaFromMemory(memory);
-    const worldModel = worldModelMetaFromMemory(memory);
     return [
         memory.id,
         ...sourceMemoryIdsFromMemory(memory),
-        ...(policy?.sourceTraceIds ?? []),
-        ...(skill?.sourcePolicyIds ?? []),
-        ...(skill?.evidenceAnchorIds ?? []),
-        ...(worldModel?.policyIds ?? [])
+        ...(skill?.evidenceAnchorIds ?? [])
     ];
-}
-function memoryUsesStalePolicy(memory, stalePolicyIds) {
-    if (stalePolicyIds.has(memory.id))
-        return true;
-    const sourcePolicyIds = memory.memoryLayer === "Skill"
-        ? skillMetaFromMemory(memory)?.sourcePolicyIds ?? []
-        : memory.memoryLayer === "L3"
-            ? worldModelMetaFromMemory(memory)?.policyIds ?? []
-            : [];
-    return sourcePolicyIds.some((policyId) => stalePolicyIds.has(policyId));
 }
 function llmFilterFallbackCap(hits, maxKeep) {
     const capped = Math.max(0, maxKeep);
@@ -423,10 +334,10 @@ export function buildInjectedContext(hits, budget, contextMemories = [], retriev
         timeZone: tuning?.timeZone
     };
     const memoryById = new Map(contextMemories.map((memory) => [memory.id, memory]));
-    const rendered = hits.flatMap((hit) => splitUserMemoryMembersForInjection(hit).flatMap((memberHit) => {
-        const section = renderInjectedSection(memberHit, memoryById.get(memberHit.id), options);
+    const rendered = hits.flatMap((hit) => {
+        const section = renderInjectedSection(hit, memoryById.get(hit.id), options);
         return section ? [section] : [];
-    }));
+    });
     const memories = isStandaloneMathInjected(options)
         ? suppressLowSpecificityStandaloneMathSections(suppressIsolatedMathSkillSections(rendered), options.query)
         : rendered;
@@ -436,20 +347,7 @@ export function buildInjectedContext(hits, budget, contextMemories = [], retriev
     const sourceMemoryIds = memories.flatMap((section) => section.section.memoryIds);
     const droppedDueToBudget = [];
     let used = sections.reduce((sum, section) => sum + (section.tokenEstimate ?? 0), 0);
-    const guidance = decisionGuidanceSection(contextMemoriesForInjectedSources(contextMemories, sourceMemoryIds));
-    const avoidance = failureAvoidanceSection(contextMemoriesForInjectedSources(contextMemories, sourceMemoryIds));
-    if (guidance) {
-        const estimate = guidance.tokenEstimate ?? 0;
-        sections.push(guidance);
-        sourceMemoryIds.push(...guidance.memoryIds);
-        used += estimate;
-    }
-    if (avoidance) {
-        sections.push(avoidance);
-        sourceMemoryIds.push(...avoidance.memoryIds);
-        used += avoidance.tokenEstimate ?? 0;
-    }
-    const markdown = renderInjectedMarkdown(renderedSections, guidance, avoidance, retrievalMode, options);
+    const markdown = renderInjectedMarkdown(renderedSections, retrievalMode, options);
     return {
         injectedContext: {
             markdown,
@@ -534,55 +432,7 @@ function renderInjectedSection(hit, memory, options) {
         }
     };
 }
-function splitUserMemoryMembersForInjection(hit) {
-    if (hit.memoryLayer === "UserMemory")
-        return [hit];
-    const userMembers = (hit.members ?? []).filter((member) => member.memoryLayer === "UserMemory");
-    if (userMembers.length === 0)
-        return [hit];
-    const agentMembers = (hit.members ?? []).filter((member) => member.memoryLayer !== "UserMemory");
-    const agentIds = agentMembers.map((member) => member.id);
-    return [
-        {
-            ...hit,
-            memberMemoryIds: agentIds.length > 0 ? agentIds : [hit.id],
-            members: agentMembers
-        },
-        ...userMembers.map((member) => ({
-            id: member.id,
-            kind: "user_memory",
-            memoryLayer: "UserMemory",
-            status: "activated",
-            title: "User Memory",
-            snippet: member.content,
-            score: hit.score,
-            tags: [],
-            createdAt: member.createdAt,
-            updatedAt: member.updatedAt,
-            source: "search",
-            sourceTurnId: hit.sourceTurnId,
-            memberMemoryIds: [member.id],
-            retrievalRoutes: ["user_memory"],
-            members: [member]
-        }))
-    ];
-}
 function renderInjectedSnippet(hit, memory, options) {
-    if (hit.kind === "user_memory" || hit.memoryLayer === "UserMemory") {
-        return {
-            refKind: "user-memory",
-            title: hit.id,
-            body: truncateInjectedSnippet([
-                ...(hit.memberMemoryIds && hit.memberMemoryIds.length > 1
-                    ? [`member ids: ${hit.memberMemoryIds.join(", ")}`]
-                    : []),
-                ...(hit.createdAt ? [`created at: ${formatInjectedTimestamp(undefined, hit.createdAt, options.timeZone)}`] : []),
-                ...(hit.updatedAt ? [`updated at: ${formatInjectedTimestamp(undefined, hit.updatedAt, options.timeZone)}`] : []),
-                "",
-                ...labeledInjectedBlock("Historical user statement", hit.snippet)
-            ].join("\n"))
-        };
-    }
     if (hit.kind === "skill" || hit.memoryLayer === "Skill") {
         const skill = memory ? skillMetaFromMemory(memory) : null;
         const name = skill?.name || hit.title || "Skill";
@@ -662,64 +512,37 @@ function renderInjectedSnippet(hit, memory, options) {
             body: truncateInjectedSnippet(renderInjectedTraceBody(hit, trace, options.timeZone))
         };
     }
-    if (hit.kind === "world_model" || hit.memoryLayer === "L3") {
-        const world = memory ? worldModelMetaFromMemory(memory) : null;
-        const title = world?.title || hit.title || "World model";
-        const body = world?.body || hit.snippet;
+    if (hit.memoryLayer === "L3" || hit.kind === "project_profile") {
         return {
-            refKind: "world-model",
-            title: "Environment Knowledge",
+            refKind: "project-profile",
+            title: hit.title || "Project profile",
             body: truncateInjectedSnippet([
                 `id: ${hit.id}`,
                 "",
-                ...labeledInjectedBlock("Title", title),
-                "",
-                ...labeledInjectedBlock("Content", body)
+                ...labeledInjectedBlock("Content", memory?.memoryValue ?? hit.snippet)
             ].join("\n"))
         };
     }
-    const policy = memory ? policyMetaFromMemory(memory) : null;
-    const parts = policy ? [
-        `id: ${hit.id}`,
-        "",
-        ...labeledInjectedBlock("Use", renderInjectedExperienceUseHint(policy)),
-        "",
-        ...labeledInjectedBlock("Trigger", policy.trigger || "(not provided)"),
-        "",
-        ...labeledInjectedBlock("Guidance", policy.procedure || hit.snippet),
-        ...(policy.decisionGuidance.antiPattern.length > 0
-            ? ["", ...labeledInjectedBlock("Avoid", policy.decisionGuidance.antiPattern.join("; "))]
-            : []),
-        ...(policy.boundary ? ["", ...labeledInjectedBlock("Scope", policy.boundary)] : []),
-        ...(policy.verification ? ["", ...labeledInjectedBlock("Check", policy.verification)] : [])
-    ] : [
-        `id: ${hit.id}`,
-        "",
-        ...labeledInjectedBlock("Guidance", hit.snippet)
-    ];
+    if (hit.memoryLayer === "L4" || hit.kind === "user_profile") {
+        return {
+            refKind: "user-profile",
+            title: hit.title || "User profile",
+            body: truncateInjectedSnippet([
+                `id: ${hit.id}`,
+                "",
+                ...labeledInjectedBlock("Content", memory?.memoryValue ?? hit.snippet)
+            ].join("\n"))
+        };
+    }
     return {
-        refKind: "experience",
-        title: policy?.status === "candidate" ? "Candidate Experience (unverified)" : "Experience",
-        body: truncateInjectedSnippet(parts.join("\n") || hit.snippet)
+        refKind: "timeline",
+        title: hit.title || "Project timeline",
+        body: truncateInjectedSnippet([
+            `id: ${hit.id}`,
+            "",
+            ...labeledInjectedBlock("Content", memory?.memoryValue ?? hit.snippet)
+        ].join("\n"))
     };
-}
-function renderInjectedExperienceUseHint(policy) {
-    if (policy.status === "candidate") {
-        return "Candidate, unverified guidance. Treat it as a hypothesis and verify it in the current task before use.";
-    }
-    if (policy.experienceType === "failure_avoidance" || policy.evidencePolarity === "negative") {
-        return "Use as a guardrail before planning.";
-    }
-    if (policy.experienceType === "repair_instruction") {
-        return "Use as repair guidance before choosing the next action.";
-    }
-    if (policy.experienceType === "verifier_feedback") {
-        return "Use as a verification checklist before finalizing.";
-    }
-    if (policy.experienceType === "preference") {
-        return "Use as a user preference when applicable.";
-    }
-    return "Use as prior successful guidance when the current task matches.";
 }
 function renderInjectedTraceBody(hit, trace, timeZone) {
     return [
@@ -799,10 +622,10 @@ function labeledInjectedBlock(label, value) {
     const body = value.trim();
     return [`${label}:`, body || "(empty)"];
 }
-function renderInjectedMarkdown(sections, guidance, avoidance, retrievalMode, options) {
+function renderInjectedMarkdown(sections, retrievalMode, options) {
     const standaloneMathFinalAnswer = isStandaloneMathInjected(options);
     const taskProtocol = injectedTaskProtocol(options.query);
-    if (sections.length === 0 && !guidance && !avoidance && !standaloneMathFinalAnswer && !taskProtocol)
+    if (sections.length === 0 && !standaloneMathFinalAnswer && !taskProtocol)
         return "";
     const parts = [];
     const header = injectedHeaderForMode(retrievalMode, standaloneMathFinalAnswer, Boolean(taskProtocol));
@@ -815,21 +638,27 @@ function renderInjectedMarkdown(sections, guidance, avoidance, retrievalMode, op
         parts.push(renderMathFinalAnswerProtocol(options.query));
     }
     const skills = sections.filter((section) => section.refKind === "skill");
-    const userMemories = sections.filter((section) => section.refKind === "user-memory");
     const episodes = sections.filter((section) => section.refKind === "episode");
     const traces = sections.filter((section) => section.refKind === "trace");
-    const experiences = sections.filter((section) => section.refKind === "experience");
-    const worlds = sections.filter((section) => section.refKind === "world-model");
-    parts.push(...renderInjectedMemoriesSection(userMemories, traces, episodes));
-    if (experiences.length > 0) {
-        parts.push("## L2 Experience Memories\n");
-        experiences.forEach((section, index) => {
+    const timelines = sections.filter((section) => section.refKind === "timeline");
+    const projectProfiles = sections.filter((section) => section.refKind === "project-profile");
+    const userProfiles = sections.filter((section) => section.refKind === "user-profile");
+    parts.push(...renderInjectedMemoriesSection(traces, episodes));
+    if (timelines.length > 0) {
+        parts.push("## L2 Project Timeline\n");
+        timelines.forEach((section, index) => {
             parts.push(renderNumberedInjectedSection(section, index + 1));
         });
     }
-    if (worlds.length > 0) {
-        parts.push("## L3 Environment Knowledge\n");
-        worlds.forEach((section, index) => {
+    if (projectProfiles.length > 0) {
+        parts.push("## L3 Project Profile\n");
+        projectProfiles.forEach((section, index) => {
+            parts.push(renderNumberedInjectedSection(section, index + 1));
+        });
+    }
+    if (userProfiles.length > 0) {
+        parts.push("## L4 User Profile\n");
+        userProfiles.forEach((section, index) => {
             parts.push(renderNumberedInjectedSection(section, index + 1));
         });
     }
@@ -844,10 +673,6 @@ function renderInjectedMarkdown(sections, guidance, avoidance, retrievalMode, op
             parts.push(renderNumberedInjectedSection(section, index + 1));
         });
     }
-    if (guidance)
-        parts.push(standaloneMathFinalAnswer ? mathDecisionGuidance(guidance) : guidance.content);
-    if (avoidance)
-        parts.push(avoidance.content);
     const footer = injectedFooterFor(sections, options.skillInjectionMode ?? "summary", standaloneMathFinalAnswer);
     if (footer)
         parts.push(footer);
@@ -880,16 +705,10 @@ function prependResearchPlaybook(markdown, domain) {
     const body = markdown.trim();
     return body ? `${RESEARCH_RETRIEVAL_PLAYBOOK}\n\n${body}` : RESEARCH_RETRIEVAL_PLAYBOOK;
 }
-function renderInjectedMemoriesSection(userMemories, traces, episodes) {
-    if (userMemories.length === 0 && episodes.length === 0 && traces.length === 0)
+function renderInjectedMemoriesSection(traces, episodes) {
+    if (episodes.length === 0 && traces.length === 0)
         return [];
     const parts = [];
-    if (userMemories.length > 0) {
-        parts.push("## User Memories");
-        userMemories.forEach((section, index) => {
-            parts.push(renderNumberedInjectedSection(section, index + 1));
-        });
-    }
     if (traces.length > 0) {
         parts.push("## L1 Trace Memories");
         traces.forEach((section, index) => {
@@ -964,8 +783,8 @@ function suppressIsolatedMathSkillSections(sections) {
     const onlySkill = skills[0];
     if (onlySkill && shouldKeepIsolatedMathSkillSection(onlySkill))
         return sections;
-    const hasGrounding = sections.some((section) => section.refKind === "user-memory" || section.refKind === "trace" ||
-        section.refKind === "episode" || section.refKind === "experience");
+    const hasGrounding = sections.some((section) => section.refKind === "trace" || section.refKind === "episode" ||
+        section.refKind === "timeline" || section.refKind === "project-profile" || section.refKind === "user-profile");
     if (hasGrounding)
         return sections;
     return sections.filter((section) => section.refKind !== "skill");
@@ -981,11 +800,11 @@ function shouldKeepIsolatedMathSkillSection(section) {
 function suppressLowSpecificityStandaloneMathSections(sections, taskText) {
     const taskTerms = extractSpecificMathTerms(taskText ?? "");
     return sections.filter((section) => {
-        if (section.refKind === "user-memory" || section.refKind === "trace" ||
-            section.refKind === "episode" || section.refKind === "experience") {
+        if (section.refKind === "trace" || section.refKind === "episode" || section.refKind === "timeline" ||
+            section.refKind === "user-profile") {
             return hasEnoughStandaloneMathOverlap(sectionTextForSpecificity(section), taskTerms, 2);
         }
-        if (section.refKind === "world-model") {
+        if (section.refKind === "project-profile") {
             return hasEnoughStandaloneMathOverlap(sectionTextForSpecificity(section), taskTerms, 3);
         }
         if (section.refKind === "skill") {
@@ -1057,11 +876,6 @@ const MATH_SPECIFICITY_STOPWORDS = new Set([
     "求解",
     "证明"
 ]);
-function mathDecisionGuidance(guidance) {
-    return guidance.content
-        .replace("## Decision guidance (distilled from past similar situations)", "## Method guidance (distilled from past similar math tasks)")
-        .replace("Apply these BEFORE choosing your next action. Each line was learned\nfrom one or more past episodes where the user told us what to prefer\nor avoid in this kind of context.", "Treat these as advisory heuristics, not facts about the current problem.\nApply a line only after it matches the original problem constraints.");
-}
 function injectedFooterFor(sections, skillMode, standaloneMathFinalAnswer = false) {
     if (standaloneMathFinalAnswer) {
         return [
@@ -1069,17 +883,9 @@ function injectedFooterFor(sections, skillMode, standaloneMathFinalAnswer = fals
             "Do not call them merely to browse when the original problem can be solved directly."
         ].join("\n");
     }
-    if (sections.length > 0 &&
-        sections.every((section) => section.refKind === "trace" || section.refKind === "user-memory")) {
-        return "";
-    }
+    void sections;
     void skillMode;
-    return [
-        "## Follow-up memory tools",
-        "",
-        "If details are needed, use `memmy_memory_get(id)` with a non-User-Memory id above; User Memory entries are complete as shown.",
-        "Use `memmy_memory_search(query)` only when the recalled memory is insufficient or ambiguous."
-    ].join("\n");
+    return "";
 }
 function firstLineSummary(guide, maxChars) {
     const trimmed = guide.trim();
@@ -1130,11 +936,6 @@ function stripRedundantInjectedTitle(title, body, refKind) {
         const nameMatch = line.match(/^Name:\s*(.+)\s*$/i);
         if (nameMatch && normalizeInjectedLabel(nameMatch[1]) === normalizedTitle)
             return false;
-        if (refKind === "experience") {
-            const triggerMatch = line.match(/^Trigger:\s*(.+)\s*$/i);
-            if (triggerMatch && normalizeInjectedLabel(triggerMatch[1]) === normalizedTitle)
-                return false;
-        }
         return true;
     })
         .join("\n")
@@ -1150,264 +951,16 @@ function indentInjectedBlock(value) {
         .join("\n")
         .replace(/^ {3}/, "");
 }
-function contextMemoriesForInjectedSources(memories, sourceMemoryIds) {
-    const visibleIds = new Set(sourceMemoryIds);
-    const visibleEpisodeIds = new Set();
-    const legacySkillSourcePolicyIds = new Set();
-    for (const id of sourceMemoryIds) {
-        if (readableMemoryIdKind(id) === "episode")
-            visibleEpisodeIds.add(id);
-    }
-    for (const memory of memories) {
-        if (!visibleIds.has(memory.id))
-            continue;
-        if (memory.memoryLayer === "L1") {
-            const trace = traceMetaFromMemory(memory);
-            if (trace?.episodeId)
-                visibleEpisodeIds.add(trace.episodeId);
-        }
-        for (const policyId of sourcePolicyIdsForLegacySkillGuidance(memory)) {
-            legacySkillSourcePolicyIds.add(policyId);
-        }
-    }
-    return memories.filter((memory) => {
-        if (visibleIds.has(memory.id))
-            return true;
-        if (memory.memoryLayer !== "L2")
-            return false;
-        const policy = policyMetaFromMemory(memory);
-        if (!policy ||
-            !policyHasDecisionGuidance(policy) ||
-            !failureAvoidancePolicyIsRetrievalEligible(policy))
-            return false;
-        if (legacySkillSourcePolicyIds.has(memory.id))
-            return true;
-        return policy.sourceTraceIds.some((id) => visibleIds.has(id)) ||
-            policy.sourceEpisodeIds.some((id) => visibleEpisodeIds.has(id));
-    });
-}
 function contextMemoriesForRecallHits(hits, memories) {
-    const byId = new Map(memories.map((memory) => [memory.id, memory]));
-    const selected = new Map();
-    const hitTraceIds = new Set();
-    const hitEpisodeIds = new Set();
-    const legacySkillSourcePolicyIds = new Set();
+    const visibleIds = new Set();
     for (const hit of hits) {
-        if (readableMemoryIdKind(hit.id) === "episode")
-            hitEpisodeIds.add(hit.id);
-        const memory = byId.get(hit.id);
-        if (!memory)
-            continue;
-        selected.set(memory.id, memory);
-        if (memory.memoryLayer === "L1") {
-            hitTraceIds.add(memory.id);
-            const trace = traceMetaFromMemory(memory);
-            if (trace?.episodeId)
-                hitEpisodeIds.add(trace.episodeId);
-        }
-        for (const policyId of sourcePolicyIdsForLegacySkillGuidance(memory)) {
-            legacySkillSourcePolicyIds.add(policyId);
-        }
+        visibleIds.add(hit.id);
+        for (const id of hit.memberMemoryIds ?? [])
+            visibleIds.add(id);
+        for (const member of hit.members ?? [])
+            visibleIds.add(member.id);
     }
-    for (const memory of memories) {
-        if (memory.memoryLayer !== "L2")
-            continue;
-        const policy = policyMetaFromMemory(memory);
-        if (!policy ||
-            !policyHasDecisionGuidance(policy) ||
-            !failureAvoidancePolicyIsRetrievalEligible(policy))
-            continue;
-        const traceOverlap = policy.sourceTraceIds.some((id) => hitTraceIds.has(id));
-        const episodeOverlap = policy.sourceEpisodeIds.some((id) => hitEpisodeIds.has(id));
-        const legacySkillFallback = legacySkillSourcePolicyIds.has(memory.id);
-        if (traceOverlap || episodeOverlap || legacySkillFallback || hits.some((hit) => hit.id === memory.id)) {
-            selected.set(memory.id, memory);
-        }
-    }
-    return [...selected.values()];
-}
-function decisionGuidanceSection(memories) {
-    const preference = new Map();
-    const antiPattern = new Map();
-    for (const memory of memories) {
-        const policy = policyMetaFromMemory(memory);
-        if (policy?.experienceType === "failure_avoidance"
-            || policy?.evidencePolarity === "negative") {
-            continue;
-        }
-        const guidance = decisionGuidanceFromMemory(memory);
-        for (const item of guidance.preference) {
-            addDecisionGuidanceLine(preference, item, memory.id);
-        }
-        for (const item of guidance.antiPattern) {
-            addDecisionGuidanceLine(antiPattern, item, memory.id);
-        }
-    }
-    const preferEntries = rankedDecisionGuidanceLines(preference).slice(0, 3);
-    const avoidEntries = rankedDecisionGuidanceLines(antiPattern).slice(0, 3);
-    const preferLines = preferEntries.map((entry) => entry.text);
-    const avoidLines = avoidEntries.map((entry) => entry.text);
-    if (preferLines.length === 0 && avoidLines.length === 0)
-        return undefined;
-    const memoryIds = new Set();
-    for (const entry of [...preferEntries, ...avoidEntries]) {
-        for (const id of entry.sourceIds) {
-            memoryIds.add(id);
-        }
-    }
-    const contentLines = [
-        "## Decision guidance (distilled from past similar situations)",
-        "",
-        "Apply these BEFORE choosing your next action. Each line was learned",
-        "from one or more past episodes where the user told us what to prefer",
-        "or avoid in this kind of context."
-    ];
-    if (preferLines.length > 0) {
-        contentLines.push("", "**Prefer**");
-        preferLines.forEach((item, index) => {
-            contentLines.push(`  ${index + 1}. ${item}`);
-        });
-    }
-    if (avoidLines.length > 0) {
-        contentLines.push("", "**Avoid**");
-        avoidLines.forEach((item, index) => {
-            contentLines.push(`  ${index + 1}. ${item}`);
-        });
-    }
-    const content = contentLines.join("\n");
-    return {
-        id: "decision-guidance",
-        title: "Decision guidance",
-        kind: "policy",
-        memoryLayer: "L2",
-        memoryIds: [...memoryIds],
-        content,
-        tokenEstimate: estimateTokens(content)
-    };
-}
-function failureAvoidanceSection(memories) {
-    const safer = new Map();
-    const avoid = new Map();
-    for (const memory of memories) {
-        const policy = policyMetaFromMemory(memory);
-        if (!policy
-            || !failureAvoidancePolicyIsRetrievalEligible(policy)
-            || (policy.experienceType !== "failure_avoidance"
-                && policy.evidencePolarity !== "negative")) {
-            continue;
-        }
-        for (const item of policy.decisionGuidance.preference) {
-            addDecisionGuidanceLine(safer, item, memory.id);
-        }
-        for (const item of policy.decisionGuidance.antiPattern) {
-            addDecisionGuidanceLine(avoid, item, memory.id);
-        }
-    }
-    const saferEntries = rankedDecisionGuidanceLines(safer).slice(0, 3);
-    const avoidEntries = rankedDecisionGuidanceLines(avoid).slice(0, 3);
-    if (saferEntries.length === 0 && avoidEntries.length === 0)
-        return undefined;
-    const memoryIds = new Set();
-    for (const entry of [...saferEntries, ...avoidEntries]) {
-        for (const id of entry.sourceIds)
-            memoryIds.add(id);
-    }
-    const contentLines = [
-        "## Failure avoidance",
-        "",
-        "Apply these as guardrails only when the current task matches the historical failure context."
-    ];
-    if (avoidEntries.length > 0) {
-        contentLines.push("", "**Avoid**");
-        avoidEntries.forEach((entry, index) => {
-            contentLines.push(`  ${index + 1}. ${entry.text}`);
-        });
-    }
-    if (saferEntries.length > 0) {
-        contentLines.push("", "**Safer behavior**");
-        saferEntries.forEach((entry, index) => {
-            contentLines.push(`  ${index + 1}. ${entry.text}`);
-        });
-    }
-    const content = contentLines.join("\n");
-    return {
-        id: "failure-avoidance",
-        title: "Failure avoidance",
-        kind: "policy",
-        memoryLayer: "L2",
-        memoryIds: [...memoryIds],
-        content,
-        tokenEstimate: estimateTokens(content)
-    };
-}
-function addDecisionGuidanceLine(into, raw, sourceId) {
-    const text = clip(singleLine(raw), 220);
-    const key = decisionGuidanceKey(text);
-    if (!key)
-        return;
-    const existing = into.get(key);
-    if (existing) {
-        existing.sourceIds.add(sourceId);
-        return;
-    }
-    into.set(key, {
-        text,
-        sourceIds: new Set([sourceId])
-    });
-}
-function rankedDecisionGuidanceLines(lines) {
-    return [...lines.values()].sort((a, b) => b.sourceIds.size - a.sourceIds.size ||
-        a.text.localeCompare(b.text));
-}
-function decisionGuidanceKey(value) {
-    return value
-        .toLowerCase()
-        .replace(/\s+/g, " ")
-        .replace(/[\s.。!！?？,，;；:：]+$/g, "")
-        .trim();
-}
-function decisionGuidanceFromMemory(memory) {
-    if (memory.memoryLayer === "L2") {
-        const policy = policyMetaFromMemory(memory);
-        return {
-            preference: policy?.decisionGuidance.preference ?? [],
-            antiPattern: policy?.decisionGuidance.antiPattern ?? []
-        };
-    }
-    if (memory.memoryLayer === "Skill") {
-        const skill = isRecord(memory.properties.internal_info.skill)
-            ? memory.properties.internal_info.skill
-            : {};
-        const procedure = isRecord(skill.procedure_json)
-            ? skill.procedure_json
-            : isRecord(memory.properties.internal_info.procedure_json)
-                ? memory.properties.internal_info.procedure_json
-                : {};
-        const guidance = isRecord(procedure.decisionGuidance)
-            ? procedure.decisionGuidance
-            : isRecord(procedure.decision_guidance)
-                ? procedure.decision_guidance
-                : {};
-        return {
-            preference: stringArray(guidance.preference),
-            antiPattern: stringArray(guidance.antiPattern ?? guidance.anti_pattern)
-        };
-    }
-    return { preference: [], antiPattern: [] };
-}
-function policyHasDecisionGuidance(policy) {
-    return policy.decisionGuidance.preference.length > 0 || policy.decisionGuidance.antiPattern.length > 0;
-}
-function sourcePolicyIdsForLegacySkillGuidance(memory) {
-    if (memory.memoryLayer !== "Skill")
-        return [];
-    const guidance = decisionGuidanceFromMemory(memory);
-    if (guidance.preference.length > 0 || guidance.antiPattern.length > 0)
-        return [];
-    return skillMetaFromMemory(memory)?.sourcePolicyIds ?? [];
-}
-function singleLine(value) {
-    return value.replace(/\s+/g, " ").trim();
+    return memories.filter((memory) => visibleIds.has(memory.id));
 }
 export function emptyInjectedContext() {
     return {
@@ -1468,25 +1021,10 @@ export class RetrievalService {
             ? allowedLayers
             : request.layers.filter((layer) => allowedLayers.includes(layer));
         const dynamicCurrentQuery = isDynamicCurrentFactQuery(request.query);
-        const stalePolicyIds = new Set(this.deps.repos.memories
-            .list({
-            userId: context.userId,
-            projectIds: context.namespace.projectId?.trim() ? [context.namespace.projectId.trim()] : [],
-            includeUnscopedProject: true,
-            memoryLayer: "L2",
-            status: "activated"
-        }, 1000)
-            .map(policyMetaFromMemory)
-            .filter((policy) => Boolean(policy && policyRequiresRevalidation(policy)))
-            .map((policy) => policy.id));
         const semanticLayers = dynamicCurrentQuery
             ? requestedSemanticLayers.filter((layer) => layer !== "L1")
             : requestedSemanticLayers;
         const searchAt = Date.now();
-        const includeUserMemory = !onboardingFirstReportHit && semanticLayers.includes("L1");
-        const userMemoryCount = includeUserMemory
-            ? this.deps.repos.userMemories.listActive(context.userId).length
-            : 0;
         const candidateCount = onboardingFirstReportHit
             ? 1
             : semanticLayers.length === 0
@@ -1496,7 +1034,7 @@ export class RetrievalService {
                     projectId: context.namespace.projectId,
                     layers: semanticLayers,
                     tags: request.tags
-                }) + userMemoryCount;
+                });
         const retrievalQuery = focusResearchRetrievalQuery(request.query, tuning.domain).text;
         const queryExtract = candidateCount > 0 && !onboardingFirstReportHit
             ? await this.extractRetrievalQuery(retrievalQuery, timeZone)
@@ -1507,9 +1045,7 @@ export class RetrievalService {
         const retrievalLimit = timeFilter
             ? TIME_FILTERED_TRACE_LIMIT
             : request.limit ?? this.deps.turnStartRetrievalLimit();
-        const agentLaneLimit = includeUserMemory
-            ? parallelMemoryLaneLimit(retrievalLimit)
-            : retrievalLimit;
+        const agentLaneLimit = retrievalLimit;
         const retrievalOutput = onboardingFirstReportHit && onboardingFirstReportMemory
             ? {
                 retrieval: directRetrievalResult(onboardingFirstReportHit),
@@ -1538,8 +1074,7 @@ export class RetrievalService {
                     currentAgentId: context.namespace.source
                 });
         const projectScopedMemories = filterMemoriesForProjectRecallScope(retrievalOutput.memories, context.namespace.projectId);
-        const memories = projectScopedMemories.filter((memory) => !memoryUsesStalePolicy(memory, stalePolicyIds) &&
-            (retrievalMode !== "turn_start" || !isStrictL3WorldModelV2Memory(memory)));
+        const memories = projectScopedMemories;
         const allowedMemoryIds = new Set(memories.map((memory) => memory.id));
         const allowedEpisodeIds = new Set(memories.flatMap((memory) => {
             const episodeId = traceMetaFromMemory(memory)?.episodeId;
@@ -1552,20 +1087,10 @@ export class RetrievalService {
                 (hit.memberMemoryIds ?? []).some((id) => allowedMemoryIds.has(id)) ||
                 (hit.members ?? []).some((member) => allowedMemoryIds.has(member.id)))
         };
-        const userMemoryOutput = includeUserMemory && !timeFilter
-            ? await this.retrieveUserMemories({
-                userId: context.userId,
-                query: retrievalQuery,
-                queryVectorText,
-                queryExtract,
-                limit: retrievalLimit,
-                excludeSourceTurnIds: recentRawTurnIds
-            })
-            : { hits: [], memories: [] };
         const agentHits = onboardingFirstReportHit || timeFilter
             ? retrieval.hits
             : filterL1TraceSpanRecallHits(retrieval.hits, memories);
-        const merged = mergeSameTurnRecallHits(agentHits, memories, userMemoryOutput.hits);
+        const merged = mergeSameTurnRecallHits(agentHits, memories, []);
         const rerankAt = Date.now();
         const filteredHits = onboardingFirstReportHit
             ? { hits: retrieval.hits, status: ["first_report_handoff:latest_only"] }
@@ -1582,14 +1107,11 @@ export class RetrievalService {
         const budgetAt = Date.now();
         const recallEventId = newId("recall");
         const queryId = request.turnId ?? `query_${stableHash(`${recallEventId}:${request.query}`).slice(0, 20)}`;
-        const userMemoryCandidateIds = userMemoryOutput.memories.map((memory) => memory.id);
+        const userMemoryCandidateIds = [];
         const l1CandidateIds = memories
             .filter((memory) => memory.memoryLayer === "L1")
             .map((memory) => memory.id);
-        const candidateMemoryIds = uniq([
-            ...memories.map((memory) => memory.id),
-            ...userMemoryCandidateIds
-        ]);
+        const candidateMemoryIds = memories.map((memory) => memory.id);
         const sourceMemoryIds = contextPacket.sourceMemoryIds;
         const hitIds = new Set(hits.flatMap((hit) => hit.memberMemoryIds ?? [hit.id]));
         const dropped = [
@@ -1603,15 +1125,6 @@ export class RetrievalService {
                 memoryLayer: memory.memoryLayer,
                 reason: "rank_threshold"
             })),
-            ...userMemoryOutput.memories
-                .filter((memory) => !hitIds.has(memory.id))
-                .slice(0, 50)
-                .map((memory) => ({
-                id: memory.id,
-                kind: "user_memory",
-                memoryLayer: "UserMemory",
-                reason: "rank_threshold"
-            }))
         ];
         const shouldRecordEvent = this.deps.memoryAddEnabled() && request.recordEvent !== false;
         if (shouldRecordEvent) {
@@ -1674,7 +1187,6 @@ export class RetrievalService {
             status: uniq([
                 ...filteredHits.status,
                 ...(dynamicCurrentQuery ? ["dynamic_current:refresh_required"] : []),
-                ...(stalePolicyIds.size > 0 ? ["policy:revalidation_required"] : []),
                 ...(!this.deps.memoryAddEnabled() ? ["memory_add:disabled:no_recall_log"] : [])
             ]),
             verbose: request.verbose === true,
@@ -1754,43 +1266,6 @@ export class RetrievalService {
                     droppedByThreshold: Math.max(0, candidates.length - hits.length)
                 }
             }
-        };
-    }
-    async retrieveUserMemories(input) {
-        if (input.limit <= 0)
-            return { hits: [], memories: [] };
-        const compiled = compileRetrievalQuery(input.query, input.queryExtract, {
-            domain: this.retrievalTuningConfig().domain
-        });
-        const active = this.deps.repos.userMemories.listActive(input.userId);
-        if (active.length === 0)
-            return { hits: [], memories: [] };
-        const excludedCount = active.filter((memory) => input.excludeSourceTurnIds?.has(memory.sourceTurnId)).length;
-        const routeLimit = input.limit + excludedCount;
-        const queryVector = active.some((memory) => memory.embedding?.length)
-            ? await this.queryVector(input.queryVectorText)
-            : undefined;
-        const routeHits = [
-            ...this.deps.repos.userMemories.searchFtsIds(input.userId, compiled.ftsMatch, routeLimit),
-            ...this.deps.repos.userMemories.searchPatternIds(input.userId, compiled.patternTerms, routeLimit),
-            ...(queryVector
-                ? this.deps.repos.userMemories.searchVectorIds(input.userId, queryVector, routeLimit)
-                : [])
-        ];
-        const bestScoreById = new Map();
-        for (const hit of routeHits) {
-            bestScoreById.set(hit.id, Math.max(bestScoreById.get(hit.id) ?? 0, hit.score));
-        }
-        const memories = this.deps.repos.userMemories.getMany([...bestScoreById.keys()])
-            .sort((left, right) => (bestScoreById.get(right.id) ?? 0) - (bestScoreById.get(left.id) ?? 0) ||
-            right.updatedAt.localeCompare(left.updatedAt))
-            .slice(0, routeLimit);
-        const injectableMemories = memories
-            .filter((memory) => !input.excludeSourceTurnIds?.has(memory.sourceTurnId))
-            .slice(0, input.limit);
-        return {
-            memories,
-            hits: injectableMemories.map((memory) => userMemoryRecallHit(memory, bestScoreById.get(memory.id) ?? 0))
         };
     }
     async retrieveSearchMemories(input) {
@@ -2114,36 +1589,6 @@ export class RetrievalService {
             decayHalfLifeDays: this.deps.config.algorithm.reward.decayHalfLifeDays,
             domain: this.deps.config.domain,
             readOnlyInjectionProfile: retrieval.readOnlyInjectionProfile
-        };
-    }
-    async worldModelQuery(input) {
-        this.deps.assertMemorySearchEnabled();
-        const result = await this.search({
-            ...input,
-            layers: ["L3"],
-            includeInjectedContext: true,
-            retrievalMode: "world_model"
-        });
-        const memories = this.deps.repos.memories.getMany(result.hits.map((hit) => hit.id));
-        const byId = new Map(memories.map((memory) => [memory.id, memory]));
-        return {
-            hits: result.hits,
-            queried: {
-                query: input.query,
-                tags: input.tags ?? [],
-                limit: input.limit ?? 8
-            },
-            worldModels: result.hits.map((hit) => {
-                const memory = byId.get(hit.id);
-                return {
-                    ...hit,
-                    body: memory?.memoryValue ?? hit.snippet,
-                    sourceMemoryIds: memory ? sourceMemoryIdsFromMemory(memory) : []
-                };
-            }),
-            injectedContext: result.injectedContext,
-            status: result.status,
-            serverTime: nowIso()
         };
     }
     async queryVector(query) {

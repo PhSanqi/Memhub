@@ -2,14 +2,19 @@
 
 [简体中文](README.zh-CN.md)
 
-Memhub is a private, project-aware memory and context hub for AI harnesses. It lets Codex, Claude Code, ChatGPT-style remote MCP clients, CoWorker, and other hosts share the same durable memory without forcing every host to use the same integration mechanism.
+Memhub is a private, project-aware memory and context hub for AI harnesses. Codex, Claude Code, ChatGPT-style remote MCP clients, CoWorker, and other hosts can share one durable memory system without sharing one integration mechanism.
 
-Memhub keeps two knowledge scopes deliberately separate:
+## Current memory model
 
-- **Account scope** — personal preferences, reusable workflows, cross-project rules, personal skills and general world-model knowledge.
-- **Project scope** — project memories, project-only skills, project environment profile, project contract, domain knowledge and authoritative architecture context.
+Memhub exposes four memory layers plus an orthogonal Skill layer:
 
-A project skill never silently merges into an account-level skill or another project's skill.
+- **L1 — Original Conversation**: source user/assistant turns plus bounded, auditable reasoning/tool summaries. Raw Capture and Episode remain internal processing mechanisms.
+- **L2 — Project Timeline**: a human-readable chronological account of project development, decisions, state changes, superseded history, and current truth.
+- **L3 — Project Rules & Experience**: durable project-scoped rules, preferences, working habits, and experience distilled from L2.
+- **L4 — User Profile**: account-scoped cross-project traits and stable working patterns distilled from evidence across multiple project L3 artifacts.
+- **Skill**: reusable executable procedures. Skills are not another memory depth and may be project-scoped or explicitly reusable across projects.
+
+L2 and L3 are always project-scoped. L4 is always account-scoped. Project business memory never silently crosses into another project.
 
 ## Architecture
 
@@ -22,16 +27,19 @@ AI host / plugin / remote MCP
             |
             v
        Memhub Server
-   +-------------------+
-   | Context Router    |
-   | Memory Core       |
-   | Evolution         |
-   | Project scopes    |
-   | Normify adapter   |
-   +-------------------+
+   +----------------------+
+   | Context Router       |
+   | L1 Turn Log          |
+   | Distillation Jobs    |
+   | Memory Core          |
+   | Project Registry     |
+   | Architecture Reader  |
+   +----------------------+
 ```
 
-Memhub supports two editions built from the same core:
+The architecture reader is deliberately small. It can read existing authoritative project architecture Markdown from legacy `normify-<project>` trees, but it does not execute or vendor the old Normify engine. New CLI/config naming is `architecture-root`; `--normify-root` remains a deprecated compatibility alias so existing service units can restart safely.
+
+Memhub supports Local and Server editions from the same codebase:
 
 ```text
 editions/
@@ -43,117 +51,71 @@ editions/
     └── windows/
 ```
 
-### Local Edition
-
-Everything runs on one machine. No VPS or Cloudflare is required. MCP, capture, SQLite, evolution and optional Normify context stay local.
-
-### Server Edition
-
-One server becomes the source of truth. Devices run the local Bridge and send captured turns through an authenticated reverse proxy such as Cloudflare Access. Remote MCP clients can use the same server endpoint.
+Local Edition keeps MCP, capture, SQLite and processing on one machine. Server Edition keeps the authoritative memory service on one server while device Bridges upload captured turns through authenticated transport.
 
 See [Memhub edition design](docs/EDITIONS.md).
 
-## Durable knowledge and evolution
+## MCP surface
 
-The original Memory Core capabilities are retained instead of being reduced to a simple chat-history store. The current codebase still contains:
+The high-level MCP surface is intentionally small:
 
-- L1 trace capture and recall;
-- reflection/reward processing;
-- L2 policy induction;
-- Skill crystallization and lifecycle management;
-- L3 World Model;
-- project environment profiling;
-- project contract and domain knowledge;
-- account-level general rules;
-- project/global retrieval isolation.
+- `memmy_turn` — open/checkpoint/commit/resume the L1 original-conversation turn log.
+- `memmy_context` — resolve the current project and recall L4, project L2/L3, reusable Skills, recent L1 continuity, and read-only project architecture.
+- `memhub_distill` — lease or submit L2/L3/L4/Skill distillation work. The connected Harness/model performs semantic synthesis; Memhub enforces evidence, scope, provenance and canonical artifact identity.
+- `memmy_project_list` — list/suggest canonical projects.
+- `memmy_project_manage` — controlled project create/update/delete/merge via plan then explicit authorization.
+- `memmy_project` — list/current/bind/unbind project context and read project architecture.
 
-Memhub's target evolution execution model supports three backends:
+A completed L2 job can enqueue L3. Completed L3 artifacts from at least two projects can form an L4 job. Memhub itself does not silently invoke an LLM.
 
-1. **Direct provider** — the server uses an explicitly configured model provider/API key.
-2. **Harness worker** — an already authenticated Codex/Claude/other harness pulls an evolution job over MCP, produces a structured candidate, and submits it for validation/commit.
-3. **Deferred/local-only** — raw memory remains usable while L3 / Project Environment model jobs remain queued/deferred; an unavailable model no longer burns retries into dead-letter while waiting for an executor.
+## Capture and Control Plane
 
-See [Evolution and scope model](docs/EVOLUTION_SCOPES.md).
+Capture is a host capability, not an MCP side effect. A host plugin/hook can write complete or partial turns to the local Bridge, which queues them durably and uploads them when connectivity is available.
 
-## MCP and capture
+The browser routes are:
 
-The current high-level MCP surface is intentionally small:
-
-- `memmy_context` — composed account/project memory plus authoritative project architecture;
-- `memmy_remember` — explicit durable memory;
-- `memhub_history_distill` — manually start incremental project-history or whole-account memory/Skill distillation, with processed-evidence ledgers and continuation from the previous canonical result;
-- `memhub_distill` — lease pending evidence or submit/skip a Harness-produced Skill, scoped summary, or curated knowledge artifact without bypassing native L2/L3 evolution;
-- `memhub_evolution` — lease and complete native L3 World Model jobs with an already-authenticated Harness while Memory Core retains scope/evidence/hash validation;
-- `memmy_project` — project listing/binding.
-
-The tool names retain `memmy_` temporarily for compatibility. The product and distribution are Memhub.
-
-Background capture is separate from MCP. A host plugin/hook sends complete or partial turns to the local Bridge; the Bridge queues them durably and uploads them when connectivity is available.
-
-The Codex/OpenAI lifecycle adapter also performs per-turn recall on
-`UserPromptSubmit`: it asks the local Bridge for Memhub account + resolved
-project context and injects the result as hook `additionalContext`. The active
-model is instructed to filter noisy/stale candidates before use and to persist
-only durable task deltas near task completion. Hosted ChatGPT MCP still has no
-server-push lifecycle equivalent, so its per-turn recall depends on the host
-actually invoking `memmy_context`.
-
-Automatic capture is a host capability, not an MCP side effect. The checked-in
-Codex/OpenAI hook adapter captures complete turns automatically. A plain hosted
-ChatGPT MCP connection does not passively stream the full conversation to
-Memhub, and the repository does not yet contain Claude/Gemini lifecycle capture
-overlays.
-
-The browser routes are intentionally split:
-
-- `/memhub` — public project introduction / landing page;
-- `/memhub/user` — authenticated account workspace;
+- `/memhub` — public landing page.
+- `/memhub/user` — authenticated user workspace.
 - `/memhub/admin` — authenticated admin Control Plane.
 
-An administrator can switch between User and Admin from the web header; role
-authorization still decides whether `/memhub/admin` is allowed.
-Loopback administration uses a separate local-admin token; public administration
-continues to require Cloudflare Access identity plus the stable Memhub account
-role. Distillation evidence can be queued manually, while optional automatic
-job creation is disabled by default and never invokes a model itself.
+The management model is intentionally the product taxonomy: Overview, Projects, L1, L2, L3, L4, Skills and Processing. Raw Capture and Episode are internal implementation details and are not management layers.
 
-`memmy_context` is turn-scoped rather than conversation-locked. Explicit
-project/workspace/unique project evidence from the current turn overrides an
-older conversation binding; that binding is only a fallback when the turn has
-no project evidence. Business project memory and authoritative architecture
-remain isolated to one primary project. Other projects may contribute only
-explicit Skill artifacts through the separate `reusableSkills` capability
-channel.
+Explicit current-turn project/workspace evidence overrides an older conversation binding. If project resolution is ambiguous, Memhub falls back to global-only recall rather than leaking project context.
 
-AgentSource history scanning is opt-in in all four editions. Continuous memory
-should normally enter through Memhub capture/lifecycle. Even when legacy
-AgentSource history is imported manually, imported traces are not promoted into
-durable user preferences.
+## Data migration and maintenance
 
-Long-term maintenance is read-first:
+The current SQLite schema migration is v8. During v7 → v8 migration Memhub:
+
+- changes the durable memory-layer constraint to L1/L2/L3/L4/Skill;
+- preserves old rows and archives legacy L2/L3 products instead of deleting them;
+- archives legacy `user_memories`;
+- dead-letters retired evolution jobs;
+- remaps embedding retry targets to the new artifact names.
+
+Production cutover is guarded by:
+
+```bash
+npm run core:preflight
+npm run core:verify -- --manifest <manifest>
+npm run core:preserved -- --manifest <manifest>
+```
+
+`core:preflight` verifies vendored runtime integrity and creates an online SQLite rollback snapshot. `core:preserved` is intended for schema-changing cutovers: schema/version changes are reported, while SQLite integrity, durable table presence and preservation of every baseline durable row identity are enforced.
+
+Long-term cleanup remains read-first:
 
 ```bash
 npm run memory:audit
 npm run memory:repair
-npm run normify:audit
-npm run normify:migrate
 ```
 
-`memory:repair` creates an online SQLite backup and JSON report before apply.
-Authoritative architecture is account-scoped; a valid legacy repo-local
-`normify-*` tree can be used as a bounded read-only fallback and explicitly
-copied with `normify:migrate`.
+`memory:repair` creates an online backup and report before applying changes.
 
-Historical consolidation is available through `memhub_history_distill`,
-which remembers exactly which evidence refs were already processed and
-supplies the previous canonical result to the next batch.
-
-See [Control Plane, capture and distillation](docs/CONTROL_PLANE_AND_DISTILLATION.md)
-and [remote authentication](docs/REMOTE_AUTH.md).
+See [Core migration](docs/CORE_MIGRATION.md), [architecture](docs/ARCHITECTURE.md), [memory scopes](docs/EVOLUTION_SCOPES.md), and [Control Plane / distillation](docs/CONTROL_PLANE_AND_DISTILLATION.md).
 
 ## Install from source
 
-Node.js 20+ is required. The first source install may run the workspace build.
+Node.js 20+ is required.
 
 Local Linux:
 
@@ -161,7 +123,7 @@ Local Linux:
 bash editions/local/linux/install.sh
 ```
 
-Local Windows (PowerShell):
+Local Windows:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\Memhub\editions\local\windows\install.ps1
@@ -179,12 +141,12 @@ Server Windows:
 powershell -ExecutionPolicy Bypass -File .\Memhub\editions\server\windows\install.ps1 -Username owner
 ```
 
-Server Edition intentionally does not create Cloudflare configuration for you. It binds Memhub to loopback; protecting `/memhub/*` with Cloudflare Access is appropriate when the same Access application should cover MCP, Control Plane and public capture traffic. Automated clients that traverse Access must use an allowed Service Auth policy/token in addition to Memhub's own device/account authentication.
+Server Edition binds Memhub to loopback and does not create Cloudflare configuration. Public access should remain behind an authenticated reverse proxy such as Cloudflare Access; device/account authentication remains enforced by Memhub itself.
 
 ## Repository status
 
-Memhub is currently an active fork/refactor. The shared Memory Core is derived from the open-source Memmy project by MemTensor; Memhub adds private gateway, device capture, project isolation, Bridge transport, deployment editions, and a different product boundary. See [upstream attribution](docs/UPSTREAM.md).
+Memhub is under active development. The embedded Memory Core originates from the open-source Memmy lineage and is maintained here as part of the Memhub runtime boundary. See [upstream notes](docs/UPSTREAM.md).
 
 ## License
 
-Retain the upstream repository license and notices for inherited code. New Memhub-specific code follows the repository license unless a file states otherwise.
+See [LICENSE](LICENSE).

@@ -1,40 +1,43 @@
-# Memhub Core lossless migration
+# Memhub Core migration
 
-This migration removes the server's runtime dependency on a separately
-installed Memmy Memory Core, AgentSourceCore workspace and Normify CLI without
-rewriting existing memory data.
+This document describes the production-safe migration from the deployed schema-v7 Memory Core to the schema-v8 L1/L2/L3/L4/Skill model.
 
-## Status
+## Current production boundary
 
-Completed on the active server deployment.
+- `memhub-core.service` runs the vendored Memory Core.
+- `memhub.service` runs the Memhub gateway/control plane.
+- The active SQLite path remains `~/.memmy/memory-service/memory.sqlite` for continuity.
+- The old Normify engine is not a runtime dependency. Existing project architecture Markdown is read through the lightweight compatibility reader.
 
-- production Memory Core runs from `vendor/memory-core`;
-- AgentSource helper runs from `vendor/agent-source-core`;
-- project architecture uses the embedded vendored architecture runtime;
-- `Memory/` and `AgentSourceCore/` standalone packages are retired and removed;
-- the external Normify CLI/MCP is not a production dependency;
-- the existing SQLite path is intentionally retained for lossless continuity;
-- preflight, post-cutover verification, preservation checks, typecheck and
-  Memhub end-to-end tests passed before legacy package retirement.
+## Invariants
 
-## Non-negotiable invariants
+1. The existing SQLite database is adopted in place; memory IDs are not regenerated.
+2. Historical durable rows are preserved. Schema-v8 semantic retirement archives old L2/L3 and `user_memories`; it does not silently delete them.
+3. SQLite integrity must remain `ok`.
+4. Every durable table present in the baseline must still exist after cutover.
+5. Every durable baseline row identity must still exist after migration.
+6. A consistent online backup is created before production ownership/state changes.
+7. Production service restart/migration is a separate authorized operation; passing tests alone does not perform cutover.
 
-1. The existing SQLite database is adopted; memory IDs are not regenerated.
-2. L1/L2/L3 records, project scope, provenance, evolution jobs, skills,
-   sessions, episodes and user memories remain in the same schema.
-3. The embedded Memory Core must be source-parity with the currently deployed
-   built Memory runtime before cutover. The only intentional rewrite is the
-   package import for AgentSourceCore, redirected to Memhub's vendored copy.
-4. The embedded architecture runtime must be source-parity with the currently
-   deployed Normify library before the legacy CLI is removed.
-5. A consistent online SQLite backup and semantic fingerprint are created
-   before any service ownership change.
-6. The rollback snapshot remains available after cutover. Legacy service/source
-   packages are removed once the post-cutover verifier passes.
+## What v8 changes
 
-## Phase 1: preflight and snapshot
+Schema v8 changes the allowed durable memory layers to:
 
-From the repository:
+```text
+L1 / L2 / L3 / L4 / Skill
+```
+
+During v7 -> v8 migration:
+
+- legacy active L2/L3 rows are archived and marked as the previous memory model;
+- active legacy `user_memories` are archived;
+- retired evolution jobs are moved to dead-letter state;
+- embedding retry targets are remapped from old Policy/World Model names to timeline/project-profile names;
+- historical rows remain present for audit and evidence lineage.
+
+## Phase 1 — preflight
+
+Run from the repository:
 
 ```bash
 npm run core:preflight
@@ -42,90 +45,69 @@ npm run core:preflight
 
 The command:
 
-- verifies `vendor/memory-core/src` against the pinned vendor manifest;
-- verifies `vendor/agent-source-core` against the pinned vendor manifest;
-- verifies `vendor/normify/lib` against the pinned vendor manifest;
+- verifies the current vendored Memory Core tree against `vendor/manifest.json`;
+- verifies the vendored AgentSource helper;
 - runs SQLite `quick_check`;
-- creates an online backup below
-  `~/.memmy/memhub/core-migrations/<timestamp>/`;
-- fingerprints the schema and every durable table;
-- copies the active config with owner-only permissions;
-- writes a `manifest.json` without exposing the storage token.
+- creates an online backup under the configured migration state root;
+- fingerprints schema and durable tables;
+- writes a migration manifest without exposing storage credentials.
 
-The snapshot is the rollback boundary. Do not delete it during the migration.
+The backup is the rollback boundary.
 
-## Phase 2: shadow validation
+## Phase 2 — shadow migration
 
-Never run the vendored Memory Core directly against the immutable rollback
-snapshot. First copy the snapshot database/config to a disposable shadow
-directory, then run the new core against that copy on a different port.
-Validate health, representative recall, project filtering, L3 lease/submit
-contract and the Memhub test suite.
+Never test schema v8 by pointing experimental code at the live database.
 
-The embedded architecture adapter is the production/default implementation.
-The external Normify source tree, CLI and MCP are no longer required by the
-runtime.
+1. Create an online backup of the live v7 database.
+2. Copy that backup to a disposable shadow path.
+3. Open the copy through the new `MemoryDb` initialization path so the real migration code runs.
+4. Confirm migration version 7 -> 8 and SQLite integrity.
+5. Run `core:preserved` against the v7 baseline and migrated copy.
 
-## Phase 3: quiesced cutover
+This validates the actual migration function without touching production.
 
-During the final ownership switch:
+## Phase 3 — quiesced production cutover
 
-1. stop capture/gateway writers;
-2. stop the legacy Memory service;
-3. run one final preflight to establish the cutover baseline;
-4. start the Memhub-owned embedded core on the same loopback endpoint;
-5. start Memhub gateway/capture;
-6. run smoke tests before accepting new writes.
+The production cutover must establish one frozen baseline and prevent concurrent writes while exact migration ownership changes occur:
 
-The database path remains unchanged during this phase. Moving it to
-`~/.memhub/core` is a separate optional maintenance operation and is not part
-of the core ownership migration.
+1. stop gateway/capture writers;
+2. stop `memhub-core.service`;
+3. create the final preflight baseline;
+4. start the v8 Memory Core against the existing database path;
+5. verify migration/integrity;
+6. start the Memhub gateway;
+7. run MCP, Control Plane and representative recall/capture smoke tests;
+8. run preservation verification before declaring the cutover complete.
 
-The server unit installed by `deploy/install-user-service.sh` is
-`memhub-core.service`. It runs
-`vendor/memory-core/src/server/index.js` and the gateway requires that
-unit. The gateway uses the vendored architecture core by default and no longer
-needs a `normify` executable.
+## Exact verification versus preservation verification
 
-## Phase 4: lossless verification
-
-Before accepting any new write after the quiesced cutover, run:
+`core:verify` is for a frozen copy where schema/content should match the recorded baseline exactly:
 
 ```bash
-npm run core:verify -- --manifest \
-  ~/.memmy/memhub/core-migrations/<timestamp>/manifest.json
+npm run core:verify -- --manifest <manifest>
 ```
 
-The verifier compares SQLite integrity, schema hash, durable-table row counts
-and cryptographic row fingerprints. Request/recall logs are recorded but are
-excluded from the content fingerprint because validation itself appends those
-rows. Migration IDs, versions and checksums are compared separately while
-their startup-updated timestamps are ignored. Any content mismatch blocks
-retirement of the legacy unit and preserves the rollback snapshot.
-
-After verification succeeds, re-enable writers and retain the snapshot for an
-operator-defined rollback window.
-
-For this deployment verification has succeeded and the standalone
-`Memory/` / `AgentSourceCore/` packages have been retired. Rollback data is
-the immutable migration snapshot rather than a second live legacy runtime.
-
-Once normal writes have resumed, the live database will legitimately diverge
-from the frozen baseline. Use the preservation check instead of exact verify:
+After a deliberate schema migration or once normal writes resume, exact schema/content hashes may legitimately differ. Use:
 
 ```bash
-npm run core:preserved -- --manifest \
-  ~/.memmy/memhub/core-migrations/<timestamp>/manifest.json
+npm run core:preserved -- --manifest <manifest>
 ```
 
-This checks that the schema is unchanged and every primary-key identity from
-the baseline still exists in every durable table. New rows and legitimate
-post-cutover state updates do not create false failures.
+`core:preserved` reports schema hash/version changes as audit information and enforces:
 
-## What is not migrated
+- current SQLite integrity is `ok`;
+- no baseline durable table disappeared;
+- no baseline durable primary-key identity disappeared;
+- tables without primary keys did not shrink.
 
-- Cloudflare remains an authentication/reverse-proxy boundary.
-- Conversation capture and Bridge remain Memhub adapters.
-- Harness models remain external execution engines for semantic distillation.
-- Project architecture stays authoritative architecture data; it is not
-  flattened into ordinary memory.
+New rows and legitimate state updates do not create false failures.
+
+## Rollback
+
+Do not delete the pre-cutover online backup during the migration window. If the new service fails before acceptance, restore service ownership using the frozen backup and the previously deployed code/configuration.
+
+Do not treat an old running process as a rollback copy after writes have diverged; the immutable snapshot is the rollback source of truth.
+
+## Architecture compatibility
+
+Project architecture is not flattened into ordinary memory. The current runtime reads existing authoritative Markdown using `FileProjectArchitectureSource`. New configuration uses `--architecture-root`; the legacy `--normify-root` CLI option remains a deprecated alias so existing service units can restart during migration.

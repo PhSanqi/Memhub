@@ -8,8 +8,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=@MEMHUB_DIR@
 EnvironmentFile=-%h/.memmy/memhub/memhub.env
-Environment="MEMHUB_ARCHITECTURE_CORE=embedded"
-ExecStart=@NODE@ @MEMHUB_DIR@/dist/mcp.js --http 3001 --http-path /memhub/mcp --capture-path /memhub/capture --state-root %h/.memmy/memhub --memory-url http://127.0.0.1:18960 --normify-root @NORMIFY_ROOT@
+ExecStart=@NODE@ @MEMHUB_DIR@/dist/mcp.js --http 3001 --http-path @HTTP_PATH@ --capture-path @CAPTURE_PATH@ --state-root %h/.memmy/memhub --memory-url http://127.0.0.1:18960 --architecture-root @ARCHITECTURE_ROOT@
 Restart=on-failure
 RestartSec=3s
 NoNewPrivileges=true

@@ -1,6 +1,6 @@
 import { buildContextCapsule, type ContextCapsule } from "./context-capsule.js";
 import { resolveProjectScope, type ProjectScopeResolution } from "./project-scope.js";
-import type { ProjectArchitectureSource } from "./architecture-source.js";
+import { NullProjectArchitectureSource, type ProjectArchitectureSource } from "./architecture-source.js";
 import type { ConversationProjectBindingStore } from "./binding-store.js";
 import type { ContextMemorySource } from "./memory-source.js";
 import type { JsonProjectRegistry, ProjectDescriptor } from "./project-registry.js";
@@ -19,12 +19,39 @@ export interface ContextRouterInput {
 }
 
 export class ContextRouter {
+  private readonly memory: ContextMemorySource;
+  private readonly architecture: ProjectArchitectureSource;
+  private readonly bindings: ConversationProjectBindingStore;
+  private readonly projects?: JsonProjectRegistry;
+
   constructor(
-    private readonly memory: ContextMemorySource,
-    private readonly architecture: ProjectArchitectureSource,
-    private readonly bindings: ConversationProjectBindingStore,
-    private readonly projects?: JsonProjectRegistry
-  ) {}
+    memory: ContextMemorySource,
+    bindings: ConversationProjectBindingStore,
+    projects?: JsonProjectRegistry
+  );
+  constructor(
+    memory: ContextMemorySource,
+    architecture: ProjectArchitectureSource,
+    bindings: ConversationProjectBindingStore,
+    projects?: JsonProjectRegistry
+  );
+  constructor(
+    memory: ContextMemorySource,
+    architectureOrBindings: ProjectArchitectureSource | ConversationProjectBindingStore,
+    bindingsOrProjects?: ConversationProjectBindingStore | JsonProjectRegistry,
+    projects?: JsonProjectRegistry
+  ) {
+    this.memory = memory;
+    if (isArchitectureSource(architectureOrBindings)) {
+      this.architecture = architectureOrBindings;
+      this.bindings = bindingsOrProjects as ConversationProjectBindingStore;
+      this.projects = projects;
+    } else {
+      this.architecture = new NullProjectArchitectureSource();
+      this.bindings = architectureOrBindings;
+      this.projects = bindingsOrProjects as JsonProjectRegistry | undefined;
+    }
+  }
 
   async context(input: ContextRouterInput): Promise<ContextCapsule> {
     const accountId = requireNonEmpty(input.accountId, "accountId");
@@ -124,7 +151,6 @@ export class ContextRouter {
     const projectArchitecture = resolution.projectId
       ? await this.projectArchitectureFromStorageIds(accountId, resolution.projectId, projectStorageIds, query)
       : [];
-
     return buildContextCapsule({
       accountId,
       conversationId,
@@ -174,7 +200,8 @@ export class ContextRouter {
   async listProjects(accountId: string): Promise<string[]> {
     const discovered = await this.architecture.listProjects(accountId);
     if (!this.projects) return discovered;
-    return (await this.projects.reconcile(accountId, discovered)).map((project) => project.projectId);
+    const existing = (await this.projects.list(accountId, { includeInactive: true })).map((project) => project.projectId);
+    return (await this.projects.reconcile(accountId, [...existing, ...discovered])).map((project) => project.projectId);
   }
 
   projectArchitecture(accountId: string, projectId: string, query: string) {
@@ -199,9 +226,7 @@ export class ContextRouter {
         projectId: storageProjectId,
         query
       });
-      if (items.length > 0) {
-        return items.map((item) => ({ ...item, projectId: canonicalProjectId }));
-      }
+      if (items.length > 0) return items.map((item) => ({ ...item, projectId: canonicalProjectId }));
     }
     return [];
   }
@@ -288,6 +313,13 @@ function requireNonEmpty(value: string, field: string): string {
   const normalized = value.trim();
   if (!normalized) throw new TypeError(`${field} must be non-empty`);
   return normalized;
+}
+
+function isArchitectureSource(
+  value: ProjectArchitectureSource | ConversationProjectBindingStore
+): value is ProjectArchitectureSource {
+  return typeof (value as ProjectArchitectureSource).listProjects === "function" &&
+    typeof (value as ProjectArchitectureSource).getProjectArchitecture === "function";
 }
 
 function uniqueProjectIds(values: readonly (string | undefined)[]): string[] {

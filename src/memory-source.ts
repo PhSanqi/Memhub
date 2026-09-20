@@ -20,23 +20,9 @@ export interface ContextMemorySource {
     limit: number;
     reusableSkillProjectIds?: readonly string[];
   }): Promise<{ globalMemory: ContextItem[]; projectMemory: ContextItem[]; reusableSkills: ContextItem[] }>;
-  remember(input: {
-    accountId: string;
-    userId: string;
-    content: string;
-    projectId: string | null;
-    conversationId?: string;
-    title?: string;
-    tags?: string[];
-    provenance?: Record<string, string | undefined>;
-    evidenceRefs?: string[];
-    sourceConversations?: string[];
-    confidence?: number;
-    contractVersion?: string;
-  }): Promise<unknown>;
 }
 
-export type DistilledArtifactKind = "skill" | "summary" | "knowledge";
+export type DistilledArtifactKind = "l2" | "l3" | "l4" | "skill";
 
 export class MemoryRestContextSource implements ContextMemorySource {
   constructor(private readonly client: LocalMemoryRestClient) {}
@@ -51,7 +37,7 @@ export class MemoryRestContextSource implements ContextMemorySource {
     limit: number;
     reusableSkillProjectIds?: readonly string[];
   }): Promise<{ globalMemory: ContextItem[]; projectMemory: ContextItem[]; reusableSkills: ContextItem[] }> {
-    const globalResponse = await this.search(input, null);
+    const globalResponse = await this.search(input, null, { layers: ["L4"] });
     const globalHits = hitsFromResponse(globalResponse)
       .filter((hit) => hit.tags.includes("global"));
     const globalIds = new Set(globalHits.map((hit) => hit.id));
@@ -59,17 +45,31 @@ export class MemoryRestContextSource implements ContextMemorySource {
     const projectStorageIds = input.projectId === null
       ? []
       : unique(input.projectStorageIds?.length ? input.projectStorageIds : [input.projectId]);
-    const projectMemory = input.projectId === null
-      ? []
-      : dedupeHits((await Promise.all(projectStorageIds.map(async (storageProjectId) =>
-          hitsFromResponse(await this.search(input, storageProjectId))
+    let projectHits: RecallHit[] = [];
+    if (input.projectId !== null) {
+      projectHits = dedupeHits((await Promise.all(projectStorageIds.map(async (storageProjectId) =>
+        hitsFromResponse(await this.search(input, storageProjectId, { layers: ["L3", "L2"] }))
+          .filter((hit) => hit.tags.includes(`project:${storageProjectId}`))
+      ))).flat());
+      // A freshly migrated/bootstrap project may not have a v2 L2/L3 artifact
+      // yet. Keep continuity by falling back to relevant L1 evidence only while
+      // the higher layers are absent. Once L2/L3 exists, raw L1 stays out of the
+      // normal context capsule and remains an evidence layer for distillation.
+      if (projectHits.length === 0) {
+        projectHits = dedupeHits((await Promise.all(projectStorageIds.map(async (storageProjectId) =>
+          hitsFromResponse(await this.search(input, storageProjectId, { layers: ["L1"] }))
             .filter((hit) => hit.tags.includes(`project:${storageProjectId}`))
-        ))).flat())
-          .filter((hit) => !globalIds.has(hit.id))
-          .map((hit) => contextItemFromHit(hit, "project", input.projectId ?? undefined));
+        ))).flat());
+      }
+    }
+    const projectMemory = projectHits
+      .filter((hit) => !globalIds.has(hit.id))
+      .map((hit) => contextItemFromHit(hit, "project", input.projectId ?? undefined));
 
-    const reusableSkillProjectIds = unique(input.reusableSkillProjectIds ?? [])
-      .filter((projectId) => projectId !== input.projectId)
+    const reusableSkillProjectIds = unique([
+      ...(input.projectId ? [input.projectId] : []),
+      ...(input.reusableSkillProjectIds ?? [])
+    ])
       .slice(0, 32);
     const perProjectSkillLimit = Math.min(20, Math.max(6, input.limit));
     const reusableHits = (await Promise.all(reusableSkillProjectIds.map(async (projectId) => {
@@ -97,34 +97,6 @@ export class MemoryRestContextSource implements ContextMemorySource {
     return { globalMemory, projectMemory, reusableSkills };
   }
 
-  remember(input: {
-    accountId: string;
-    userId: string;
-    content: string;
-    projectId: string | null;
-    conversationId?: string;
-    title?: string;
-    tags?: string[];
-    provenance?: Record<string, string | undefined>;
-  }): Promise<unknown> {
-    const namespace = namespaceFor(input, input.projectId);
-    const request = {
-      adapterId: "memhub",
-      namespace,
-      source: provenanceSource(input.provenance),
-      content: input.content,
-      title: input.title,
-      layer: "L1",
-      tags: unique([
-        "memhub",
-        ...provenanceTags(input.provenance),
-        ...(input.projectId ? [`project:${input.projectId}`] : ["global"]),
-        ...(input.tags ?? [])
-      ])
-    };
-    return this.client.addMemory(request);
-  }
-
   distill(input: {
     accountId: string;
     userId: string;
@@ -145,6 +117,13 @@ export class MemoryRestContextSource implements ContextMemorySource {
   }): Promise<unknown> {
     const namespace = namespaceFor(input, input.projectId);
     const skill = input.kind === "skill";
+    const layer = input.kind === "l2"
+      ? "L2"
+      : input.kind === "l3"
+        ? "L3"
+        : input.kind === "l4"
+          ? "L4"
+          : "Skill";
     const sourceHarness = requireNonEmpty(input.sourceHarness, "sourceHarness");
     const stableArtifactId = input.artifactId?.trim() || stableDistillId(input);
     const request = {
@@ -160,7 +139,7 @@ export class MemoryRestContextSource implements ContextMemorySource {
       source: `memhub:${sourceHarness}:${provenanceSource(input.provenance)}`,
       content: input.content,
       title: input.title,
-      layer: skill ? "Skill" : "L1",
+      layer,
       tags: unique([
         "memhub",
         "distilled",

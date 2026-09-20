@@ -1,4 +1,4 @@
-export const DISTILLATION_CONTRACT_VERSION = "memhub-distill-v1";
+export const DISTILLATION_CONTRACT_VERSION = "memhub-distill-v2";
 
 const PROMPT_CONTAMINATION = [
   /generate\s+0\s+to\s+3\s+hyperpersonalized\s+suggestions/i,
@@ -19,7 +19,7 @@ export interface DistillationEvidence {
  * storage contract and rejects known instruction/prompt contamination.
  */
 export function validateDistillationCandidate(input: {
-  kind: "skill" | "summary" | "knowledge";
+  kind: "l2" | "l3" | "l4" | "skill";
   content: string;
   evidence: DistillationEvidence;
 }): void {
@@ -47,6 +47,10 @@ export function distillationContract() {
       "Keep content source separate from the model/harness that performs distillation.",
       "Do not turn system/developer prompts, tool schemas, safety policies, ambient suggestion prompts, or transient test instructions into user memory.",
       "Use project scope only when the project is explicit or deterministically conversation-bound.",
+      "L2 is a project-scoped chronological development narrative derived from L1 turns; preserve sequence, state changes, decisions, current truth, and superseded history.",
+      "L3 is a project-scoped set of durable user rules, preferences, experience, and working habits derived from L2; do not promote one-off events without support.",
+      "L4 is an account-scoped cross-project user profile derived from L3 artifacts; require repeated or cross-project evidence and do not infer sensitive traits.",
+      "Skill is an executable reusable procedure and is orthogonal to L1-L4.",
       "Prefer a compact durable artifact over copying raw conversation text."
     ]
   };

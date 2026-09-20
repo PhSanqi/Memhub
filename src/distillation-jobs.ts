@@ -3,20 +3,37 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { StoredCaptureEvent } from "./capture.js";
 
+export type DistillationTarget = "l2" | "l3" | "l4" | "skill";
+
 export interface DistillationConfig {
   auto_enabled: boolean;
   turn_threshold: number;
   idle_minutes: number;
 }
 
+export interface DistillationEvidenceItem {
+  ref: string;
+  kind: "turn" | "artifact";
+  timestamp: string;
+  project_id?: string;
+  conversation_id?: string;
+  layer?: "L1" | "L2" | "L3" | "L4" | "Skill";
+  title?: string;
+  content?: string;
+  user_text?: string;
+  assistant_text?: string;
+  reasoning_summary?: string;
+}
+
 export interface DistillationJob {
   job_id: string;
   account_id: string;
-  scope: "global" | "project";
+  target: DistillationTarget;
+  scope: "account" | "project";
   project_id: string | null;
-  conversation_id: string;
+  conversation_id?: string;
   status: "pending" | "leased" | "completed" | "failed";
-  reason: "manual" | "turn_threshold" | "idle";
+  reason: "manual" | "turn_threshold" | "idle" | "upstream";
   created_at: string;
   updated_at: string;
   leased_until?: string;
@@ -25,14 +42,19 @@ export interface DistillationJob {
   failure?: string;
   failed_at?: string;
   attempts?: number;
-  result_kind?: "skill" | "summary" | "knowledge" | "noop";
+  result_kind?: DistillationTarget | "noop";
   result_id?: string;
+  result_content?: string;
   evidence_refs: string[];
   evidence_hash: string;
-  evidence: Array<{ event_id: string; timestamp: string; user_text: string; assistant_text: string }>;
+  evidence: DistillationEvidenceItem[];
 }
 
-interface JobStore { version: 1; jobs: DistillationJob[] }
+interface JobStore {
+  version: 2;
+  jobs: DistillationJob[];
+}
+
 let mutationTail = Promise.resolve();
 
 export async function getDistillationConfig(stateRoot: string): Promise<DistillationConfig> {
@@ -53,7 +75,8 @@ export async function setDistillationConfig(stateRoot: string, patch: Partial<Di
 
 export async function listDistillationJobs(stateRoot: string, accountId?: string): Promise<DistillationJob[]> {
   const store = await loadStore(stateRoot);
-  return store.jobs.filter((job) => !accountId || job.account_id === accountId)
+  return store.jobs
+    .filter((job) => !accountId || job.account_id === accountId)
     .sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 
@@ -63,48 +86,71 @@ export async function enqueueDistillationJob(input: {
   projectId: string | null;
   conversationId: string;
   captures: StoredCaptureEvent[];
-  reason: DistillationJob["reason"];
+  reason: "manual" | "turn_threshold" | "idle";
 }): Promise<{ created: boolean; job: DistillationJob }> {
-  const complete = input.captures
-    .filter((item) => item.account_id === input.accountId && item.conversation_id === input.conversationId && item.user_text?.trim() && item.assistant_text?.trim())
-    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-  if (complete.length === 0) throw new Error("distillation job requires complete captured turns");
-  const evidence = complete.map((item) => ({
-    event_id: item.event_id,
-    timestamp: item.timestamp,
-    user_text: item.user_text!.trim(),
-    assistant_text: item.assistant_text!.trim()
-  }));
-  const evidenceHash = createHash("sha256").update(JSON.stringify(evidence), "utf8").digest("hex");
-  return withMutation(async () => {
-    const store = await loadStore(input.stateRoot);
-    const existing = store.jobs.find((job) => job.account_id === input.accountId && job.conversation_id === input.conversationId && job.project_id === input.projectId && job.evidence_hash === evidenceHash);
-    if (existing) return { created: false, job: existing };
-    const now = new Date().toISOString();
-    const job: DistillationJob = {
-      job_id: randomUUID(),
-      account_id: input.accountId,
-      scope: input.projectId ? "project" : "global",
-      project_id: input.projectId,
-      conversation_id: input.conversationId,
-      status: "pending",
-      reason: input.reason,
-      created_at: now,
-      updated_at: now,
-      evidence_refs: evidence.map((item) => `capture:${item.event_id}`),
-      evidence_hash: evidenceHash,
-      evidence
-    };
-    store.jobs.push(job);
-    await saveStore(input.stateRoot, store);
-    return { created: true, job };
+  if (!input.projectId) throw new Error("L2 project timeline requires a resolved project");
+  const evidence: DistillationEvidenceItem[] = input.captures
+    .filter((item) =>
+      item.account_id === input.accountId &&
+      item.conversation_id === input.conversationId &&
+      item.capture_status === "complete" &&
+      item.user_text?.trim() &&
+      item.assistant_text?.trim()
+    )
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+    .map((item) => ({
+      ref: `l1:${item.event_id}`,
+      kind: "turn",
+      layer: "L1",
+      timestamp: item.timestamp,
+      project_id: input.projectId!,
+      conversation_id: item.conversation_id,
+      user_text: item.user_text!.trim(),
+      assistant_text: item.assistant_text!.trim(),
+      ...(item.reasoning_summary?.trim() ? { reasoning_summary: item.reasoning_summary.trim() } : {})
+    }));
+  if (evidence.length === 0) throw new Error("L2 distillation requires complete L1 turns");
+  return enqueueJob({
+    stateRoot: input.stateRoot,
+    accountId: input.accountId,
+    target: "l2",
+    projectId: input.projectId,
+    conversationId: input.conversationId,
+    evidence,
+    reason: input.reason
+  });
+}
+
+export async function enqueueDerivedDistillationJob(input: {
+  stateRoot: string;
+  accountId: string;
+  target: "l3" | "l4" | "skill";
+  projectId: string | null;
+  evidence: DistillationEvidenceItem[];
+  reason?: "manual" | "upstream";
+}): Promise<{ created: boolean; job: DistillationJob }> {
+  if (input.target === "l3" && !input.projectId) throw new Error("L3 project profile requires projectId");
+  if (input.target === "l4" && input.projectId) throw new Error("L4 user profile is account-scoped");
+  if (input.evidence.length === 0) throw new Error(`${input.target.toUpperCase()} distillation requires evidence`);
+  return enqueueJob({
+    stateRoot: input.stateRoot,
+    accountId: input.accountId,
+    target: input.target,
+    projectId: input.projectId,
+    evidence: input.evidence,
+    reason: input.reason ?? "upstream"
   });
 }
 
 export async function leaseDistillationJob(
   stateRoot: string,
   accountId: string,
-  input: { projectId?: string | null; harness: string; leaseSeconds?: number }
+  input: {
+    projectId?: string | null;
+    target?: DistillationTarget;
+    harness: string;
+    leaseSeconds?: number;
+  }
 ): Promise<DistillationJob | null> {
   return withMutation(async () => {
     const store = await loadStore(stateRoot);
@@ -117,8 +163,10 @@ export async function leaseDistillationJob(
       }
     }
     const job = store.jobs.find((item) =>
-      item.account_id === accountId && item.status === "pending" &&
-      (input.projectId === undefined || item.project_id === input.projectId)
+      item.account_id === accountId &&
+      item.status === "pending" &&
+      (input.projectId === undefined || item.project_id === input.projectId) &&
+      (input.target === undefined || item.target === input.target)
     );
     if (!job) {
       await saveStore(stateRoot, store);
@@ -139,19 +187,23 @@ export async function completeDistillationJob(
   stateRoot: string,
   accountId: string,
   jobId: string,
-  result: { kind: "skill" | "summary" | "knowledge" | "noop"; resultId?: string }
-): Promise<void> {
+  result: { kind: DistillationTarget | "noop"; resultId?: string; content?: string }
+): Promise<DistillationJob> {
+  let completed!: DistillationJob;
   await mutateJob(stateRoot, accountId, jobId, (job) => {
     job.status = "completed";
     job.completed_at = new Date().toISOString();
     job.updated_at = job.completed_at;
     job.result_kind = result.kind;
     if (result.resultId) job.result_id = result.resultId;
+    if (result.content) job.result_content = result.content;
     delete job.leased_until;
     delete job.leased_by;
     delete job.failure;
     delete job.failed_at;
+    completed = structuredClone(job);
   });
+  return completed;
 }
 
 export async function failDistillationJob(stateRoot: string, accountId: string, jobId: string, message: string): Promise<void> {
@@ -180,6 +232,59 @@ export async function retryDistillationJob(stateRoot: string, accountId: string,
   return retried;
 }
 
+async function enqueueJob(input: {
+  stateRoot: string;
+  accountId: string;
+  target: DistillationTarget;
+  projectId: string | null;
+  conversationId?: string;
+  evidence: DistillationEvidenceItem[];
+  reason: DistillationJob["reason"];
+}): Promise<{ created: boolean; job: DistillationJob }> {
+  const evidence = uniqueEvidence(input.evidence);
+  const evidenceHash = createHash("sha256")
+    .update(JSON.stringify({ target: input.target, project: input.projectId, evidence }), "utf8")
+    .digest("hex");
+  return withMutation(async () => {
+    const store = await loadStore(input.stateRoot);
+    const existing = store.jobs.find((job) =>
+      job.account_id === input.accountId &&
+      job.target === input.target &&
+      job.project_id === input.projectId &&
+      job.evidence_hash === evidenceHash
+    );
+    if (existing) return { created: false, job: structuredClone(existing) };
+    const now = new Date().toISOString();
+    const job: DistillationJob = {
+      job_id: randomUUID(),
+      account_id: input.accountId,
+      target: input.target,
+      scope: input.projectId ? "project" : "account",
+      project_id: input.projectId,
+      ...(input.conversationId ? { conversation_id: input.conversationId } : {}),
+      status: "pending",
+      reason: input.reason,
+      created_at: now,
+      updated_at: now,
+      evidence_refs: evidence.map((item) => item.ref),
+      evidence_hash: evidenceHash,
+      evidence
+    };
+    store.jobs.push(job);
+    await saveStore(input.stateRoot, store);
+    return { created: true, job: structuredClone(job) };
+  });
+}
+
+function uniqueEvidence(items: DistillationEvidenceItem[]): DistillationEvidenceItem[] {
+  const byRef = new Map<string, DistillationEvidenceItem>();
+  for (const item of items) {
+    if (!item.ref.trim()) throw new TypeError("distillation evidence ref must be non-empty");
+    byRef.set(item.ref, structuredClone(item));
+  }
+  return [...byRef.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.ref.localeCompare(b.ref));
+}
+
 function normalizeConfig(value: Partial<DistillationConfig>): DistillationConfig {
   return {
     auto_enabled: value.auto_enabled === true,
@@ -188,7 +293,12 @@ function normalizeConfig(value: Partial<DistillationConfig>): DistillationConfig
   };
 }
 
-async function mutateJob(stateRoot: string, accountId: string, jobId: string, fn: (job: DistillationJob) => void): Promise<void> {
+async function mutateJob(
+  stateRoot: string,
+  accountId: string,
+  jobId: string,
+  fn: (job: DistillationJob) => void
+): Promise<void> {
   await withMutation(async () => {
     const store = await loadStore(stateRoot);
     const job = store.jobs.find((item) => item.job_id === jobId && item.account_id === accountId);
@@ -204,12 +314,66 @@ function storePath(root: string): string {
 
 async function loadStore(root: string): Promise<JobStore> {
   try {
-    const raw = JSON.parse(await readFile(storePath(root), "utf8")) as JobStore;
-    return raw.version === 1 && Array.isArray(raw.jobs) ? raw : { version: 1, jobs: [] };
+    const raw = JSON.parse(await readFile(storePath(root), "utf8")) as {
+      version?: number;
+      jobs?: Array<Record<string, unknown>>;
+    };
+    if (!Array.isArray(raw.jobs)) return { version: 2, jobs: [] };
+    if (raw.version === 2) return { version: 2, jobs: raw.jobs as unknown as DistillationJob[] };
+    const jobs = raw.jobs.map((item) => migrateV1Job(item));
+    const store: JobStore = { version: 2, jobs };
+    await saveStore(root, store);
+    return store;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { version: 1, jobs: [] };
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { version: 2, jobs: [] };
     throw error;
   }
+}
+
+function migrateV1Job(item: Record<string, unknown>): DistillationJob {
+  const evidence = Array.isArray(item.evidence)
+    ? item.evidence.map((raw) => {
+        const row = raw as Record<string, unknown>;
+        return {
+          ref: `l1:${String(row.event_id ?? randomUUID())}`,
+          kind: "turn" as const,
+          layer: "L1" as const,
+          timestamp: String(row.timestamp ?? new Date(0).toISOString()),
+          ...(typeof item.project_id === "string" ? { project_id: item.project_id } : {}),
+          ...(typeof item.conversation_id === "string" ? { conversation_id: item.conversation_id } : {}),
+          ...(typeof row.user_text === "string" ? { user_text: row.user_text } : {}),
+          ...(typeof row.assistant_text === "string" ? { assistant_text: row.assistant_text } : {})
+        };
+      })
+    : [];
+  const legacyResult = typeof item.result_kind === "string" ? item.result_kind : undefined;
+  return {
+    job_id: String(item.job_id ?? randomUUID()),
+    account_id: String(item.account_id ?? ""),
+    target: legacyResult === "skill" ? "skill" : "l2",
+    scope: item.project_id ? "project" : "account",
+    project_id: typeof item.project_id === "string" ? item.project_id : null,
+    ...(typeof item.conversation_id === "string" ? { conversation_id: item.conversation_id } : {}),
+    status: (["pending", "leased", "completed", "failed"].includes(String(item.status))
+      ? item.status
+      : "failed") as DistillationJob["status"],
+    reason: (["manual", "turn_threshold", "idle"].includes(String(item.reason))
+      ? item.reason
+      : "manual") as DistillationJob["reason"],
+    created_at: String(item.created_at ?? new Date(0).toISOString()),
+    updated_at: String(item.updated_at ?? item.created_at ?? new Date(0).toISOString()),
+    ...(typeof item.leased_until === "string" ? { leased_until: item.leased_until } : {}),
+    ...(typeof item.leased_by === "string" ? { leased_by: item.leased_by } : {}),
+    ...(typeof item.completed_at === "string" ? { completed_at: item.completed_at } : {}),
+    ...(typeof item.failure === "string" ? { failure: item.failure } : {}),
+    ...(typeof item.failed_at === "string" ? { failed_at: item.failed_at } : {}),
+    ...(typeof item.attempts === "number" ? { attempts: item.attempts } : {}),
+    ...(legacyResult ? { result_kind: legacyResult === "skill" ? "skill" : legacyResult === "noop" ? "noop" : "l2" } : {}),
+    ...(typeof item.result_id === "string" ? { result_id: item.result_id } : {}),
+    evidence_refs: evidence.map((entry) => entry.ref),
+    evidence_hash: String(item.evidence_hash ?? createHash("sha256").update(JSON.stringify(evidence)).digest("hex")),
+    evidence
+  };
 }
 
 async function saveStore(root: string, store: JobStore): Promise<void> {
@@ -228,5 +392,9 @@ async function withMutation<T>(run: () => Promise<T>): Promise<T> {
   let release!: () => void;
   mutationTail = new Promise<void>((resolveLock) => { release = resolveLock; });
   await previous;
-  try { return await run(); } finally { release(); }
+  try {
+    return await run();
+  } finally {
+    release();
+  }
 }

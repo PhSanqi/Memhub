@@ -1,110 +1,81 @@
 # Memhub architecture
 
-Memhub is the account/project control layer around long-term memory. Human
-identity is currently Cloudflare Access; machine clients are explicit devices.
-All memory writes retain source provenance separately from the model/harness
-that later distills them.
+Memhub is the account/project control layer around durable AI memory. Human identity resolves to a stable Memhub account; machine clients are explicit account-bound devices. Source provenance is kept separate from the Harness/model that later performs semantic distillation.
 
-## Current boundaries
+## Product layers
 
-- gateway: Remote MCP, capture and web control-plane HTTP boundary.
-- identity: Cloudflare identity -> stable Memhub account_id; devices remain
-  account-bound principals rather than independent human identities.
-- projects: turn-scoped primary-project resolution. Current-turn evidence
-  overrides an older conversation binding; ambiguity is global-only.
-- capabilities: reusable Skill artifacts may be recalled across projects into
-  a separate capability channel. Project business memory and architecture do
-  not cross that boundary.
-- memory: account/project memory access over the Memhub-owned embedded Memory Core.
-- provenance: source platform/transport/principal/account/conversation/evidence.
-- distillation: the connected ChatGPT/Codex/Claude/DSH model performs
-  semantic distillation. Memhub supplies the contract, evidence boundary,
-  optional evidence jobs, schema validation, provenance and commit rules.
-- controlplane: inspection and governance; destructive administration stays
-  out of the default six-tool MCP surface.
+```text
+L1 original conversation
+        |
+        v
+L2 project timeline
+        |
+        v
+L3 project rules & experience
+        |
+        +---- project B L3 ----+
+        |                      |
+        +---- project C L3 ----+--> L4 cross-project user profile
 
-Content source and distillation executor are different fields. A ChatGPT
-conversation distilled by Codex remains sourced from ChatGPT and records Codex
-as the distillation executor.
+Skill ------------------------------ orthogonal reusable capability
+```
 
-## Distillation contract
+- L1 is append-oriented source evidence. Raw Capture and Episode are internal implementation details.
+- L2 is one canonical project-scoped chronological narrative.
+- L3 is one canonical project-scoped durable profile of rules, preferences and experience.
+- L4 is one canonical account-scoped profile derived from repeated/cross-project L3 evidence.
+- Skill remains an independently scoped executable procedure.
 
-memhub_distill exposes the current contract with inspect_contract=true.
-Candidates may cite evidence_refs, source_conversations and confidence.
-Memhub rejects known host/system/developer prompt contamination and records the
-contract version with committed artifacts.
+## Runtime boundaries
 
-Memhub intentionally does not require its own LLM API for semantic
-distillation. The connected MCP/harness model does that work.
+- Gateway: remote MCP, capture and web HTTP boundary.
+- Identity: authenticated human/device principal to stable `account_id`.
+- Project Registry: canonical slug, aliases, description and state.
+- Context Router: resolves exactly one primary project for project business memory; ambiguity becomes global-only.
+- L1 Turn Log: stores original conversation turns and continuity metadata.
+- Distillation Jobs: evidence-bounded L2/L3/L4/Skill work queue.
+- Memory Core: durable memory storage, search and read models.
+- Architecture Reader: read-only compatibility access to existing project architecture Markdown.
+- Control Plane: inspection and governance. Raw Capture and Episode are not product navigation layers.
 
-`memhub_history_distill` is the explicit incremental historical workflow. It
-maintains a per-account/per-project and per-target evidence ledger, so a
-processed evidence ref is not proposed again. Memory-target runs carry the
-previous canonical document forward into the next batch; Skill-target runs
-carry an existing Skill catalog forward for duplicate detection/evolution.
-Project-history evidence combines complete Raw Captures with non-duplicate
-project-scoped Memory Core evidence. Account-history evidence is enumerated
-read-only from the local Core database and filtered by the runtime `user_id`;
-the unscoped viewer list is never used as an MCP evidence boundary.
+Current-turn explicit project/workspace evidence has priority over an older conversation binding. Reusable Skills can cross project boundaries only through the separate capability channel.
 
-Distillation jobs are Memhub control-state, not a replacement evolution
-engine. Automatic job creation is opt-in and only forms evidence batches at a
-turn threshold or after conversation idle time; it never invokes a model. A
-Harness leases the evidence and explicitly submits a durable candidate or marks
-the batch as `noop`. Memory Core remains the owner of native Episode, L2, Skill
-and L3 lifecycle processing.
+Normal context recall prefers L4 account memory plus the current project's L3/L2 artifacts and reusable Skills. During bootstrap or immediately after a migration, if the resolved project has no L2/L3 hit yet, Memhub may fall back to relevant project-scoped L1 evidence. As soon as L2/L3 exists, raw L1 is excluded from normal context again and remains the evidence layer for later distillation.
 
-## Embedded-core consolidation
+## Distillation ownership
 
-Memhub now vendors the runtime cores needed by the server distribution:
+The connected ChatGPT/Codex/Claude/other Harness model performs semantic synthesis. Memhub owns evidence boundaries, target layer/scope validation, contamination rejection, canonical artifact identity, provenance, job leasing/completion/retry and durable commit.
 
-1. a headless Memory Core runtime under vendor/memory-core;
-2. the small AgentSourceCore used by Memory capture under
-   vendor/agent-source-core;
-3. the host-independent architecture engine under vendor/normify.
+Canonical artifacts are:
 
-The architecture adapter uses the embedded engine; the external Normify
-CLI/MCP is not required. Account-scoped `.normify/accounts/<hash>/normify-*`
-trees are authoritative. For migration compatibility, a repo-local
-`normify-*/modules` tree may be read as a bounded fallback and copied into
-the account tree with `scripts/normify-migration.mjs`.
-EmbeddedMemoryCore can launch the vendored headless
-memory service. Existing ~/.memmy config/database files are adopted in place
-when present so current data is preserved; a clean installation uses
-~/.memhub/core. The server systemd deployment now runs the Memhub-owned
-`vendor/memory-core` launcher and the gateway requires that unit. The legacy
-`memmy-memory.service`, standalone Memory/AgentSourceCore packages and external
-Normify runtime have been retired.
+- `project-timeline:<project>` for L2;
+- `project-profile:<project>` for L3;
+- `user-profile:<account>` for L4.
 
-The vendored Memory runtime is rewired to the vendored AgentSourceCore, so a
-server restart does not need the old `AgentSourceCore` workspace either.
+L2 completion can enqueue L3. L3 completion only enqueues L4 after completed L3 evidence exists for at least two projects.
 
-Memhub also declares the runtime dependencies required by the vendored Memory
-Core itself. The server distribution must not rely on dependencies being
-hoisted from the old `Memory` workspace merely because both directories happen
-to exist in one development checkout.
+## Project architecture compatibility
 
-The cutover is guarded by `scripts/core-migration.mjs`. It creates an online
-SQLite rollback snapshot, verifies source/vendor runtime parity, fingerprints
-the schema and durable tables, and provides an exact post-cutover verifier.
+The old Normify runtime is retired. Memhub no longer vendors or executes that engine.
+
+`FileProjectArchitectureSource` only reads existing authoritative Markdown from account-scoped legacy `.normify/accounts/<account-hash>/normify-<project>` trees and bounded repo-local `normify-<project>` fallback trees.
+
+The current configuration is `architecture-root` / `MEMHUB_ARCHITECTURE_ROOT`. `--normify-root`, `--no-normify` and `MEMHUB_NORMIFY_ROOT` remain compatibility aliases for existing deployments. `memmy_project action=architecture` is read-only.
+
+## Storage migration
+
+Memory Core schema v8 changes the durable memory taxonomy to L1/L2/L3/L4/Skill while preserving historical rows. Legacy L2/L3 and `user_memories` are archived rather than deleted; retired evolution jobs are dead-lettered.
+
+`scripts/core-migration.mjs` provides:
+
+- `preflight`: vendored-runtime integrity check plus online rollback snapshot and durable fingerprint;
+- `verify`: exact frozen-copy comparison;
+- `preserved`: schema-changing cutover verification based on database integrity, durable table presence and preservation of baseline durable row identities.
+
 See [CORE_MIGRATION.md](CORE_MIGRATION.md).
-
-The `memhub.core` architecture module is active for this implementation.
 
 ## Long-term-content hygiene
 
-All editions disable automatic AgentSource history scanning by default. Legacy
-history import is explicit and does not create durable `user_memories` from
-imported prompts. The high-level Memhub recall adapter also requires explicit
-`global` or `project:<id>` scope tags before a Memory Core hit can enter
-global/project context.
+All editions keep AgentSource history scanning opt-in. Continuous history should enter through capture/lifecycle. Legacy imports do not automatically become durable user-profile claims.
 
-Model-dependent L3 and Project Environment jobs are excluded from the internal
-worker when no evolution model is configured. They remain available for a
-future provider or external Harness executor instead of exhausting attempts
-into dead-letter.
-
-`scripts/long-term-repair.mjs` audits legacy scope contamination, known
-harness-prompt user memories and historical model-unavailable dead letters.
-Apply mode takes an online SQLite backup and emits a machine-readable report.
-
+`scripts/long-term-repair.mjs` remains the read-first audit/repair path for old scope contamination and historical legacy records.

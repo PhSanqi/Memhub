@@ -8,8 +8,6 @@ import { tool } from "@opencode-ai/plugin";
 import {
   closeRuntimeSession,
   completeRuntimeTurn,
-  loadRuntimeL3,
-  notifyRuntimeBoundary,
   openRuntimeSession,
   startRuntimeTurn
 } from "./memmy-workspace-bridge.mjs";
@@ -26,7 +24,6 @@ const TOOL_OUTPUT_MAX_CHARS = 12000;
 
 export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
   const sessionCache = new Map();
-  const l3InjectOnce = new Map();
   const pendingTurns = new Map();
   const pendingResumeSelections = new Map();
   const latestRequests = new Map();
@@ -63,8 +60,7 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
       adapterId: "memmy-opencode-plugin",
       profileId: normalizeText(agent) || "main",
       sessionKey: "opencode-memory-" + externalSessionId,
-      workspaceRoot: worktree || directory || null,
-      transition: "allow_legacy_rollover"
+      workspaceRoot: worktree || directory || null
     });
     if (!opened) throw new Error("Memmy session unavailable");
     sessionCache.set(externalSessionId, opened);
@@ -217,10 +213,10 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
   return {
     tool: {
       memmy_memory_search: tool({
-        description: "Search Memmy local memory for relevant facts, preferences, decisions, procedures, and prior tasks.",
+        description: "Search Memmy memory across L1 conversation history, L2 project timelines, L3 project profiles, L4 user profile, and Skills.",
         args: {
           query: tool.schema.string(),
-          layers: tool.schema.array(tool.schema.enum(["L1", "L2", "L3", "Skill"])).optional()
+          layers: tool.schema.array(tool.schema.enum(["L1", "L2", "L3", "L4", "Skill"])).optional()
         },
         async execute(args, context) {
           const memmy = await createMemmyClient();
@@ -254,33 +250,6 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
             latestRequests.get(context.sessionID) || "Read Memmy memory " + id
           );
         }
-      }),
-      memmy_memory_add: tool({
-        description: "Write an important durable fact, preference, decision, reusable procedure, or unresolved follow-up into Memmy.",
-        args: {
-          content: tool.schema.string(),
-          title: tool.schema.string().optional(),
-          tags: tool.schema.array(tool.schema.string()).optional(),
-          layer: tool.schema.enum(["L1", "L2", "L3", "Skill"]).optional()
-        },
-        async execute(args, context) {
-          const content = sanitizeCaptureText(args.content);
-          if (!content) {
-            throw new Error("Missing required parameter: content");
-          }
-          const memmy = await createMemmyClient();
-          const sessionId = (await ensureSession(memmy, context.sessionID, context.agent)).sessionId;
-          const result = await memmy.post("/api/v1/memory/add", {
-            content,
-            title: normalizeText(args.title) || undefined,
-            tags: Array.isArray(args.tags) ? args.tags.filter((item) => typeof item === "string") : undefined,
-            layer: normalizeText(args.layer) || "L1",
-            source: SOURCE,
-            sessionId
-          });
-          return "Stored Memmy memory " + normalizeText(result && result.id) + ": " +
-            (normalizeText(result && result.summary) || content);
-        }
       })
     },
 
@@ -297,9 +266,7 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
         await handleResumeSearch(input.sessionID, normalizeText(commandArguments), output.parts);
         return;
       }
-      const l3Context = l3InjectOnce.get(input.sessionID) || "";
-      l3InjectOnce.delete(input.sessionID);
-      await beginTurn(input, output, rawPrompt, l3Context);
+      await beginTurn(input, output, rawPrompt);
     },
 
     "tool.execute.before": async (input, output) => {
@@ -350,19 +317,12 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
       if (event && event.type === "session.created") {
         const info = properties.info && typeof properties.info === "object" ? properties.info : properties;
         const sessionID = normalizeText(info.id || info.sessionID);
-        if (sessionID) {
-          const runtimeSession = await ensureSession(null, sessionID, "main");
-          const loaded = await loadRuntimeL3(runtimeSession);
-          if (loaded.additionalContext) l3InjectOnce.set(sessionID, loaded.additionalContext);
-        }
+        if (sessionID) await ensureSession(null, sessionID, "main");
         return;
       }
       if (event && event.type === "session.compacted") {
         const sessionID = normalizeText(properties.sessionID || properties.id);
-        const runtimeSession = sessionCache.get(sessionID) || await ensureSession(null, sessionID, "main");
-        await notifyRuntimeBoundary(runtimeSession, "token_compaction");
-        const loaded = await loadRuntimeL3(runtimeSession);
-        if (loaded.additionalContext) l3InjectOnce.set(sessionID, loaded.additionalContext);
+        if (sessionID) await ensureSession(null, sessionID, "main");
         return;
       }
       if (event && event.type === "session.deleted") {
@@ -371,7 +331,6 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
         const runtimeSession = sessionCache.get(sessionID);
         if (runtimeSession) await closeRuntimeSession(runtimeSession).catch(() => undefined);
         sessionCache.delete(sessionID);
-        l3InjectOnce.delete(sessionID);
         return;
       }
       if (event && event.type === "message.part.updated") {
@@ -411,7 +370,6 @@ export const MemmyMemoryPlugin = async ({ client, directory, worktree }) => {
       await Promise.allSettled([...captureJobs]);
       await Promise.allSettled([...sessionCache.values()].map((session) => closeRuntimeSession(session)));
       sessionCache.clear();
-      l3InjectOnce.clear();
     }
   };
 };

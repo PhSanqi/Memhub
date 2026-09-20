@@ -1,120 +1,58 @@
-# Memmy Context Hub boundaries
+# Memhub boundaries
 
-This fork narrows Memmy around one job: provide private, durable context to many AI hosts without mixing unrelated projects.
+## Memhub owns
 
-## Product boundary
+- stable account/device identity mapping;
+- canonical project registry and conversation binding;
+- L1 original-conversation capture and continuity;
+- L2/L3/L4/Skill evidence contracts and canonical artifact identity;
+- distillation job control state;
+- Memory Core storage/retrieval;
+- Control Plane presentation and administrative authorization.
 
-The core product is:
+## The Harness/model owns
 
-```text
-AI hosts (ChatGPT, Codex, Claude, DevSpace, others)
-                    |
-                    v
-          authenticated MCP gateway
-                    |
-                    v
-             Context Router
-          /         |          \
-         v          v           v
- global memory  project memory  recent session
-                    |
-                    +----> authoritative project sources
-                              (Normify adapter first)
-```
+- semantic interpretation of supplied evidence;
+- deciding whether evidence justifies an L2/L3/L4/Skill update;
+- producing the candidate artifact within the Memhub contract.
 
-Memory Core remains a loopback service and durable local store. The public network boundary belongs to a separate authenticated gateway. AI hosts must not receive direct access to the raw Memory HTTP API.
+Memhub validates candidates but does not fabricate semantic conclusions when no model executor is present.
 
-## Core responsibilities
+## Project boundary
 
-The maintained core is intentionally small:
+At most one primary project contributes business memory to a context capsule. Current-turn explicit evidence overrides stale conversation binding. Ambiguity yields global-only recall.
 
-1. **Long-term memory**: capture, recall, correction, evolution and provenance.
-2. **Context routing**: resolve account, conversation and project scope before recall.
-3. **Project context**: combine project-scoped memory with authoritative architecture sources.
-4. **MCP gateway**: expose a small host-neutral context surface with identity and account isolation.
+Cross-project reuse is limited to explicit Skill artifacts. L2/L3 content from another project is not imported as ordinary project context.
 
-The existing Agent chat loop, Goal runtime, provider login, channel login and multi-channel gateway are not required by this product direction. They are retained temporarily for compatibility but are **deferred surfaces**, not dependencies of the core.
+## Architecture boundary
 
-## Context classes
+Project architecture is authoritative external context. The current reader supports existing architecture Markdown stored in legacy `normify-<project>` trees, but the Normify engine itself is retired.
 
-Context returned to a host must preserve source and authority instead of flattening everything into one vector search result.
+`memmy_project action=architecture` is read-only. Architecture mutation remains a separate explicitly authorized operation outside ordinary memory writes.
 
-| Class | Scope | Authority | Examples |
-| --- | --- | --- | --- |
-| Global memory | account | remembered | user preferences, recurring working rules, cross-project habits |
-| Project memory | account + project | remembered | prior decisions, unfinished work, project-specific history |
-| Project architecture | account + project | authoritative | modules, ownership, dependency rules, current/target contracts from Normify |
-| Recent session | account + conversation | observed | current thread, recent task state, unresolved follow-up |
+## Internal processing boundary
 
-Remembered context may evolve or be corrected. Authoritative project context must only change through its owning system; conversation text must never silently rewrite Normify architecture.
+Raw Capture and Episode are internal. They may be used as evidence lineage, but they are not user/admin product layers.
 
-## Project isolation rule
-
-Project selection is a security and correctness boundary, not merely a search hint.
-
-Resolution order:
-
-1. explicit authenticated `projectId`/workspace binding;
-2. an existing conversation-to-project binding;
-3. an exact project registry alias or repository/workspace identity;
-4. semantic classification only when it produces one unambiguous candidate.
-
-If no project is resolved, recall **global memory only**. If multiple projects are plausible, do not merge their memories. Return candidates to the host or require a project binding.
-
-Cross-project retrieval must be explicit in the request and visible in the response provenance.
-
-## Normify boundary
-
-Normify remains the owner of deterministic architecture truth. Memmy consumes it through an adapter.
+The management taxonomy is:
 
 ```text
-Context Router -> Normify Adapter -> Normify engine/data
+Overview / Projects / L1 / L2 / L3 / L4 / Skills / Processing
 ```
 
-Do not copy Normify module graphs into ordinary memory and then treat the copy as authoritative. A cached rendering may be stored for performance only when it includes project identity, source revision/hash and staleness metadata.
+## MCP boundary
 
-## Identity boundary
+Current high-level tools:
 
-The target gateway reuses the account model proven by the local Normify MCP work:
+- `memmy_turn`
+- `memmy_context`
+- `memhub_distill`
+- `memmy_project_list`
+- `memmy_project_manage`
+- `memmy_project`
 
-```text
-Cloudflare Access identity (email + sub)
-               |
-               v
-          local account_id
-               |
-        +------+------+
-        |             |
-   global memory   projects
-```
+Project mutation uses plan -> explicit authorization -> execute. Destructive Control Plane actions remain outside ordinary recall flow.
 
-`account_id` is the hard tenant boundary. A friend's account must never search, evolve or enumerate another account's memories or projects unless a future explicit project ACL is introduced.
+## Storage migration boundary
 
-Cloudflare is an authentication boundary, not a data-processing backend. Conversation history, project architecture and memory contents stay in the local Memmy data plane.
-
-## Initial MCP surface
-
-Prefer a small semantic surface rather than exposing internal L1/L2/L3 operations directly:
-
-- `memmy_context`: resolve scope and return a bounded Context Capsule.
-- `memmy_remember`: capture an explicit durable fact/decision with scope and provenance.
-- `memmy_project`: inspect or bind project identity and authoritative project context.
-
-Host adapters remain responsible for automatic turn capture when a host does not send every conversation turn through MCP. MCP recall and host capture are complementary responsibilities.
-
-## Context Capsule contract
-
-The eventual `memmy_context` result should be structurally separated:
-
-```text
-identity
-resolved_project
-global_memory[]
-project_memory[]
-project_architecture[]
-recent_session[]
-provenance[]
-ambiguities[]
-```
-
-The router, not the model, enforces account/project filtering. The model may help classify an ambiguous request, but it must not bypass deterministic namespace filters.
+Schema v8 preserves historical data while retiring old semantics. A cutover must use an online baseline snapshot and post-migration preservation verification. A successful service restart alone is not evidence that the migration is safe.
