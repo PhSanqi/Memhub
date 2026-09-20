@@ -10,15 +10,14 @@ export const VIEWER_API_ROUTES = [
     "GET /api/v1/auth/status",
     "POST /api/v1/telemetry/viewer-opened",
     "GET /api/v1/overview",
-    "GET /api/v1/memories",
-    "GET /api/v1/traces",
+    "GET /api/v1/l1",
+    "GET /api/v1/l2",
+    "GET /api/v1/l3",
+    "GET /api/v1/l4",
     "GET /api/v1/episodes",
-    "GET /api/v1/policies",
-    "GET /api/v1/world-models",
     "GET /api/v1/skills",
     "POST /api/v1/traces/delete",
     "POST /api/v1/skills/archive",
-    "POST /api/v1/world-models/:id/archive",
     "GET /api/v1/analytics",
     "GET /api/v1/api-logs",
     "GET /api/v1/service-logs",
@@ -98,7 +97,7 @@ export async function routeViewerRequest(context, method, url, body) {
         return { body: { ok: true } };
     }
     if (method === "GET" && path === "/api/v1/overview") {
-        const userId = viewerUserId(context);
+        const userId = query(url, "userId") ?? viewerUserId(context);
         return {
             body: {
                 ...context.service.panelOverview({ ...envelope, userId }),
@@ -113,6 +112,7 @@ export async function routeViewerRequest(context, method, url, body) {
         return {
             body: context.service.panelTasks({
                 ...envelope,
+                userId: query(url, "userId") ?? viewerUserId(context),
                 q: query(url, "q"),
                 sourceAgent: query(url, "sourceAgent"),
                 page: numberQuery(url, "page")
@@ -124,8 +124,9 @@ export async function routeViewerRequest(context, method, url, body) {
         return {
             body: context.service.panelItems({
                 ...envelope,
-                ...(layer === "UserMemory" ? { userId: viewerUserId(context) } : {}),
+                userId: query(url, "userId") ?? viewerUserId(context),
                 layer,
+                ...(query(url, "projectId") ? { projectIds: [query(url, "projectId")] } : {}),
                 q: query(url, "q"),
                 status: statusQuery(url),
                 sourceAgent: query(url, "sourceAgent"),
@@ -269,10 +270,6 @@ export async function routeViewerRequest(context, method, url, body) {
         const skillId = requiredString(record(body).skillId, "skillId");
         return { body: context.service.archiveMemory(skillId, envelope) };
     }
-    const worldModelArchive = path.match(/^\/api\/v1\/world-models\/([^/]+)\/archive$/);
-    if (method === "POST" && worldModelArchive?.[1]) {
-        return { body: context.service.archiveMemory(decodeURIComponent(worldModelArchive[1]), envelope) };
-    }
     const archive = path.match(/^\/api\/v1\/memory\/([^/]+)\/archive$/);
     if (method === "POST" && archive?.[1]) {
         const request = record(body);
@@ -378,14 +375,14 @@ async function rawMemoryConfig(configPath) {
     }
 }
 function layerForViewerPath(path) {
-    if (path === "/api/v1/memories")
-        return "UserMemory";
-    if (path === "/api/v1/traces")
+    if (path === "/api/v1/l1")
         return "L1";
-    if (path === "/api/v1/policies")
+    if (path === "/api/v1/l2")
         return "L2";
-    if (path === "/api/v1/world-models")
+    if (path === "/api/v1/l3")
         return "L3";
+    if (path === "/api/v1/l4")
+        return "L4";
     if (path === "/api/v1/skills")
         return "Skill";
     return undefined;

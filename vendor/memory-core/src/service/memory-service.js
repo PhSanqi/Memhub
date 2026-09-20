@@ -1,4 +1,4 @@
-import { assertJsonValue, canonicalJson, isLocalWorkspaceUri, sha256Hex } from "../contracts/index.js";
+import { assertJsonValue, canonicalJson, sha256Hex } from "../contracts/index.js";
 import { skillMetaFromMemory, traceMetaFromMemory } from "../algorithm/plugin-algorithms.js";
 import { PROJECT_VERSION } from "../cli/project-version.js";
 import { MEMORY_CAPABILITIES, MEMORY_PROTOCOL_VERSION, MEMORY_VIEWER_VERSION } from "../version.js";
@@ -8,7 +8,7 @@ import { createEmbedder } from "../model/embedder.js";
 import { createLlmClient } from "../model/llm.js";
 import { MemoryModelTaskRouter } from "../model/task-routing.js";
 import { sqliteBackendCapabilities } from "../storage/backend.js";
-import { Repositories, isStrictL3WorldModelV2Memory, jobToRef, kindFromMemory } from "../storage/repositories.js";
+import { Repositories, jobToRef, kindFromMemory } from "../storage/repositories.js";
 import { MemoryServiceError } from "../utils/error.js";
 import { newId, stableHash, stableStringify } from "../utils/id.js";
 import { isRecord, stringifyForMemory } from "../utils/json.js";
@@ -22,11 +22,9 @@ import { FeedbackExperienceService, polarityFromTurnFeedback, synthesizeDecision
 import { ImportJobProcessor, memoryHasImportPipeline } from "./import/import-job-processor.js";
 import { isAgentSourceImportMemoryAdd, memoryAddImportTrace, memoryAddKey, memoryAddQaPair, memoryAddTags, normalizeMemoryAddCreatedAt, titleFromImportTrace, toolCallsFromUnknown } from "./import/memory-import-pipeline.js";
 import { recordApiLog } from "./model-audit/model-call-audit.js";
-import { ProjectEnvironmentService } from "./project-environment/project-environment-service.js";
 import { namespaceForMemory, namespaceForRawTurn, namespaceForSession, normalizeNamespace } from "./namespace/namespace-scope.js";
 import { EpisodeReadModel, episodeRef } from "./read-model/episode.js";
 import { detailFromMemory, memoryDetailWithLayerPayload, memoryEtag, procedureFromSkillMemory } from "./read-model/memory.js";
-import { L3WorldModelContextReadModel } from "./read-model/l3-world-model-context.js";
 import { PanelReadModel } from "./read-model/panel-read.js";
 import { SkillReadModel } from "./read-model/skill.js";
 import { RetrievalService, memoryLayersForIntent, memoryMatchesTags, readableMemoryIdKind, retrievedMemorySourceIds } from "./retrieval/retrieval-service.js";
@@ -53,8 +51,6 @@ export class MemoryService {
     skillTrials;
     episodeReadModel;
     importJobs;
-    l3WorldModelContextReadModel;
-    projectEnvironment;
     panelReadModel;
     retrieval;
     sessionTurns;
@@ -73,18 +69,12 @@ export class MemoryService {
     constructor(options) {
         this.options = options;
         this.repos = options.backend?.repositories() ?? new Repositories(requireMemoryDb(options).db);
-        this.l3WorldModelContextReadModel = new L3WorldModelContextReadModel(this.repos);
         this.mode = options.mode ?? "local";
         this.config = cloneMemmyConfig(options.config ?? DEFAULT_MEMMY_CONFIG);
         this.modelTasks = new MemoryModelTaskRouter(() => this.resolveModelTaskContext());
         this.llm = this.modelTasks.client("summary");
         this.skillLlm = this.modelTasks.client("evolution");
         this.embedder = this.modelTasks.embedder();
-        const projectEnvironmentOwner = this;
-        this.projectEnvironment = new ProjectEnvironmentService({
-            repos: this.repos,
-            get llm() { return projectEnvironmentOwner.skillLlm; }
-        });
         const workerHandlerOwner = this;
         this.workerHandlers = createWorkerJobHandlers({
             repos: this.repos,
@@ -101,13 +91,6 @@ export class MemoryService {
                     summarizeImportedTrace: this.summarizeImportedTrace.bind(this)
                 },
                 evolution: {
-                    induceL2: (job) => this.evolutionJobs.induceL2(job),
-                    materializeNegativeExperience: (job) => this.evolutionJobs.materializeNegativeExperience(job),
-                    abstractL3: (job) => this.evolutionJobs.abstractL3(job),
-                    updateL3WorldModel: (job) => this.evolutionJobs.updateL3WorldModel(job),
-                    updateProjectEnvironment: (job) => this.projectEnvironment.processProfileJob(job),
-                    crystallizeSkill: (job) => this.evolutionJobs.crystallizeSkill(job),
-                    associateL2: (job) => this.evolutionJobs.associateL2(job),
                     splitBigTurn: (job) => this.evolutionJobs.splitBigTurn(job)
                 },
                 feedback: {
@@ -116,8 +99,7 @@ export class MemoryService {
                     resolveSkillTrial: (job) => this.skillTrials.resolveSkillTrial(job)
                 },
                 embedding: {
-                    embedMemory: this.embedMemory.bind(this),
-                    embedUserMemory: (job) => this.embeddingJobs.embedUserMemory(job)
+                    embedMemory: this.embedMemory.bind(this)
                 }
             }
         });
@@ -169,12 +151,9 @@ export class MemoryService {
             requireRawTurn: this.requireRawTurn.bind(this),
             requireExistingMemory: this.requireExistingMemory.bind(this),
             traceMeta: this.traceMeta.bind(this),
-            buildMemory: (input) => this.buildMemory(input),
             enqueueJob: this.workerHandlers.enqueueJob,
             encodeChangeCursor: this.encodeChangeCursor.bind(this),
             readOnlyCursor: this.readOnlyCursor.bind(this),
-            findExistingSkillForPolicy: this.evolutionJobs.findExistingSkillForPolicy.bind(this.evolutionJobs),
-            upsertEvolutionMemory: this.evolutionJobs.upsertEvolutionMemory.bind(this.evolutionJobs),
             pendingTrialsForFeedback: this.skillTrials.pendingTrialsForFeedback.bind(this.skillTrials)
         });
         const importJobOwner = this;
@@ -231,7 +210,6 @@ export class MemoryService {
             repos: this.repos,
             get embedder() { return workerRunnerOwner.embedder; },
             get capture() { return workerRunnerOwner.config.algorithm.capture; },
-            evolutionModelConfigured: () => workerRunnerOwner.skillLlm.isConfigured(),
             embeddingRetryWorkerId: this.embeddingRetryWorkerId,
             memoryAddEnabled: this.memoryAddEnabled.bind(this),
             nowIso,
@@ -239,8 +217,6 @@ export class MemoryService {
             namespaceIdFromMemory,
             runWorkerNoWrite: this.runWorkerNoWrite.bind(this),
             restartFailedProcessing: this.restartFailedProcessing.bind(this),
-            previewPolicyEvidenceReconciliation: this.evolutionJobs.previewPolicyEvidenceReconciliation.bind(this.evolutionJobs),
-            reconcileOrphanedPolicies: this.evolutionJobs.reconcileOrphanedPolicies.bind(this.evolutionJobs),
             enqueueJob: this.workerHandlers.enqueueJob,
             enqueueEmbeddingRetry: this.workerHandlers.enqueueEmbeddingRetry,
             appendJobChange: this.workerHandlers.appendJobChange,
@@ -420,11 +396,6 @@ export class MemoryService {
     memoryAddEnabled() {
         return this.config.algorithm.enableMemoryAdd;
     }
-    projectEnvironmentScanEnabled() {
-        return this.mode !== "cloud" &&
-            this.memoryAddEnabled() &&
-            this.storageCapabilities().backendId === "sqlite-local";
-    }
     memorySearchEnabled() {
         return this.config.algorithm.enableMemorySearch;
     }
@@ -482,17 +453,10 @@ export class MemoryService {
                     "panel.analysis",
                     "panel.items"
                 ],
-                memoryLayers: ["L1", "L2", "L3", "Skill"],
+                memoryLayers: ["L1", "L2", "L3", "L4", "Skill"],
                 supportsCli: true,
                 service: [...MEMORY_CAPABILITIES]
             },
-            ...(backend.backendId === "sqlite-local" && schema.version >= 6
-                ? {
-                    features: {
-                        l3WorldModelProtocolVersions: [2]
-                    }
-                }
-                : {}),
             serverTime: nowIso()
         };
     }
@@ -636,65 +600,10 @@ export class MemoryService {
         };
     }
     openSession(request) {
-        const response = this.sessionTurns.openSession(this.withTimeZone(request));
-        if (this.projectEnvironmentScanEnabled() && response.projectId) {
-            const session = this.requireSession(response.sessionId);
-            const scope = this.repos.l3WorldModels.getScope(session.userId, response.projectId);
-            if (scope?.workspaceUri && isLocalWorkspaceUri(scope.workspaceUri)) {
-                this.projectEnvironment.requestSessionScan(session);
-            }
-        }
-        return response;
+        return this.sessionTurns.openSession(this.withTimeZone(request));
     }
     closeSession(sessionId, request = {}) {
         return this.sessionTurns.closeSession(sessionId, this.withTimeZone(request));
-    }
-    l3WorldModelTraceHead(sessionId, request) {
-        this.assertMemorySearchEnabled();
-        const session = this.requireSession(sessionId);
-        this.assertL3WorldModelSessionScope(session, request.namespace);
-        return this.repos.l3WorldModels.traceHead(sessionId);
-    }
-    l3WorldModelBoundary(sessionId, request) {
-        this.assertMemoryAddEnabled();
-        const session = this.requireSession(sessionId);
-        this.assertL3WorldModelSessionScope(session, request.namespace);
-        if (!this.repos.l3WorldModels.inputTraceByL1MemoryId(sessionId, request.throughL1MemoryId)) {
-            throw new MemoryServiceError("conflict", "through L1 memory was not registered for this Session");
-        }
-        const result = this.repos.l3WorldModels.freezeBatches({
-            sessionId,
-            trigger: request.trigger,
-            throughL1MemoryId: request.throughL1MemoryId
-        });
-        if (!result.throughTraceSeq) {
-            throw new MemoryServiceError("conflict", "through L1 memory was not registered");
-        }
-        if (request.trigger === "token_compaction" &&
-            this.projectEnvironmentScanEnabled() &&
-            session.projectId) {
-            const scope = this.repos.l3WorldModels.getScope(session.userId, session.projectId);
-            if (scope?.workspaceUri && isLocalWorkspaceUri(scope.workspaceUri)) {
-                this.projectEnvironment.requestCompactionScan(session, result.throughTraceSeq);
-            }
-        }
-        return {
-            scheduled: result.scheduled,
-            throughL1MemoryId: request.throughL1MemoryId,
-            throughTraceSeq: result.throughTraceSeq,
-            batchIds: result.batchIds,
-            targetCount: result.targetCount,
-            serverTime: nowIso()
-        };
-    }
-    l3WorldModelContext(sessionId, request) {
-        this.assertMemorySearchEnabled();
-        const session = this.requireSession(sessionId);
-        this.assertL3WorldModelSessionScope(session, request.namespace);
-        if (session.status !== "open") {
-            throw new MemoryServiceError("conflict", "l3_world_model_session_not_open");
-        }
-        return this.l3WorldModelContextReadModel.load(session);
     }
     compactSession(sessionId, request = {}) {
         return this.sessionTurns.compactSession(sessionId, this.withTimeZone(request));
@@ -734,9 +643,6 @@ export class MemoryService {
     }
     getMemory(id, request = {}) {
         return this.episodeReadModel.getMemory(id, this.withTimeZone(request));
-    }
-    async worldModelQuery(input) {
-        return this.withModelTaskContext(() => this.retrieval.worldModelQuery(this.withTimeZone(input)));
     }
     listSkills(input = {}) {
         return this.skillReadModel.listSkills(this.withTimeZone(input));
@@ -880,7 +786,6 @@ export class MemoryService {
             meta: { reason: request.reason },
             createdAt: archived.updatedAt
         });
-        this.evolutionJobs.invalidateMemoryDependencies(memory, at);
         return {
             ok: true,
             id: archived.id,
@@ -894,82 +799,10 @@ export class MemoryService {
     }
     deleteMemory(id, request = {}) {
         this.assertMemoryAddEnabled();
-        const userMemory = this.repos.userMemories.get(id);
-        if (userMemory) {
-            const namespaceUserId = request.namespace?.userId;
-            if (namespaceUserId && namespaceUserId !== userMemory.userId) {
-                throw new MemoryServiceError("forbidden", "user memory belongs to a different user");
-            }
-            const deleted = this.repos.userMemories.softDelete(userMemory.id, nowIso());
-            if (!deleted)
-                throw new MemoryServiceError("not_found", `user memory not found: ${id}`);
-            const changeSeq = this.repos.runtime.appendChange({
-                memoryId: deleted.id,
-                kind: "user_memory",
-                op: "deleted",
-                entityId: deleted.id,
-                userId: deleted.userId,
-                changeType: "user_memory_delete",
-                before: {
-                    id: userMemory.id,
-                    sourceTurnId: userMemory.sourceTurnId,
-                    status: userMemory.status
-                },
-                after: { id: deleted.id, status: deleted.status, deletedAt: deleted.deletedAt },
-                source: "panel.delete",
-                createdAt: deleted.updatedAt
-            });
-            const audit = this.repos.runtime.insertAudit({
-                userId: deleted.userId,
-                actor: request.namespace ? { ...request.namespace } : {},
-                action: "delete",
-                targetKind: "user_memory",
-                targetId: deleted.id,
-                before: {
-                    id: userMemory.id,
-                    sourceTurnId: userMemory.sourceTurnId,
-                    status: userMemory.status
-                },
-                after: { id: deleted.id, status: deleted.status, deletedAt: deleted.deletedAt },
-                meta: { reason: request.reason },
-                createdAt: deleted.updatedAt
-            });
-            return {
-                ok: true,
-                id: deleted.id,
-                kind: "user_memory",
-                status: "deleted",
-                changeSeq,
-                syncCursor: this.encodeChangeCursor(changeSeq, request.namespace),
-                auditId: audit.id,
-                serverTime: nowIso()
-            };
-        }
         const memory = this.requireExistingMemory(id);
-        const claimsV2WorldModel = memory.properties.internal_info.schema_version === 2 &&
-            memory.memoryLayer === "L3";
-        const strictV2WorldModel = isStrictL3WorldModelV2Memory(memory);
-        if (claimsV2WorldModel && !strictV2WorldModel) {
-            throw new MemoryServiceError("conflict", "invalid L3 World Model v2 record");
-        }
-        if (strictV2WorldModel) {
-            const effectiveUserId = normalizeNamespace(request.namespace).userId;
-            const projectId = typeof memory.info.project_id === "string" ? memory.info.project_id : null;
-            if (effectiveUserId !== memory.userId) {
-                throw new MemoryServiceError("forbidden", "L3 World Model belongs to a different user");
-            }
-            if (request.namespace?.projectId && request.namespace.projectId !== projectId) {
-                throw new MemoryServiceError("forbidden", "L3 World Model belongs to a different project");
-            }
-        }
-        else {
-            this.assertMemoryInScope(memory, request.namespace);
-        }
-        const kind = kindFromMemory(memory);
+        this.assertMemoryInScope(memory, request.namespace);
         const at = nowIso();
-        const deleted = strictV2WorldModel
-            ? this.repos.l3WorldModels.deleteScopeMemory(memory.id, at)?.deleted
-            : this.repos.memories.softDelete(memory.id, at);
+        const deleted = this.repos.memories.softDelete(memory.id, at);
         if (!deleted) {
             throw new MemoryServiceError("not_found", `memory not found: ${id}`);
         }
@@ -999,7 +832,6 @@ export class MemoryService {
             meta: { reason: request.reason },
             createdAt: deleted.updatedAt
         });
-        this.evolutionJobs.invalidateMemoryDependencies(memory, at);
         return {
             ok: true,
             id: deleted.id,
@@ -1215,45 +1047,19 @@ export class MemoryService {
                 break;
             offset += memories.length;
         }
-        const userId = this.config.userId?.trim() || "local-user";
-        offset = 0;
-        for (;;) {
-            const userMemories = this.repos.userMemories.listForPanel({
-                userId,
-                status: "active",
-                limit: 250,
-                offset
-            });
-            for (const memory of userMemories) {
-                this.workerHandlers.enqueueJob({
-                    jobType: "user_memory_embedding",
-                    userId: memory.userId,
-                    targetMemoryId: memory.id,
-                    payload: { contentHash: stableHash(memory.content) },
-                    maxAttempts: 6,
-                    createdAt: at
-                });
-                enqueued += 1;
-            }
-            if (userMemories.length < 250)
-                break;
-            offset += userMemories.length;
-        }
         return { accepted: true, enqueued, serverTime: at };
     }
     embeddingMaintenanceStats() {
-        const userId = this.config.userId?.trim() || "local-user";
         const regular = this.repos.vectors.maintenanceDimensionCounts();
-        const user = this.repos.userMemories.embeddingDimensionCounts(userId);
         const dimensions = new Map();
-        for (const row of [...regular.dimensions, ...user.dimensions]) {
+        for (const row of regular.dimensions) {
             if (row.dimension > 0)
                 dimensions.set(row.dimension, (dimensions.get(row.dimension) ?? 0) + row.count);
         }
         const [dimension = 0] = [...dimensions.entries()]
             .sort((left, right) => right[1] - left[1] || right[0] - left[0])[0] ?? [];
         const stored = [...dimensions.values()].reduce((sum, count) => sum + count, 0);
-        const totalSlots = regular.totalSlots + user.totalSlots;
+        const totalSlots = regular.totalSlots;
         const ready = dimension > 0 ? dimensions.get(dimension) ?? 0 : 0;
         const missing = Math.max(0, totalSlots - stored);
         const dimMismatch = Math.max(0, stored - ready);
@@ -1281,117 +1087,6 @@ export class MemoryService {
     }
     runWorkerOnce(limit = 100, request = {}) {
         return this.workerRunner.runWorkerOnce(limit, request);
-    }
-    leaseExternalL3WorldModel(input = {}) {
-        const namespace = normalizeNamespace(input.namespace);
-        const userId = namespace.userId;
-        const projectId = externalProjectScope(input.projectId, namespace.projectId);
-        const leaseSeconds = Math.min(900, Math.max(30, Math.floor(input.leaseSeconds ?? 300)));
-        const job = this.repos.runtime.leaseNextExternalL3WorldModelJob(userId, projectId, leaseSeconds);
-        if (!job)
-            return { job: null, serverTime: nowIso() };
-        this.workerHandlers.appendJobChange(job, "leased");
-        let prepared;
-        try {
-            prepared = this.evolutionJobs.prepareExternalL3WorldModel(job);
-        }
-        catch (error) {
-            this.workerRunner.failLeasedWorkerJob(job, error);
-            throw error;
-        }
-        if (prepared.userId !== userId || prepared.projectId !== projectId) {
-            throw new MemoryServiceError("forbidden", "leased L3 job escaped requested scope");
-        }
-        return {
-            job: {
-                ...prepared,
-                leasedUntil: job.leasedUntil ?? null
-            },
-            serverTime: nowIso()
-        };
-    }
-    submitExternalL3WorldModel(jobId, input) {
-        const namespace = normalizeNamespace(input.namespace);
-        const userId = namespace.userId;
-        const projectId = externalProjectScope(input.projectId, namespace.projectId);
-        const job = this.repos.runtime.getJob(jobId);
-        if (!job || job.jobType !== "l3_world_model_update") {
-            throw new MemoryServiceError("not_found", "external L3 job not found");
-        }
-        if (job.userId !== userId) {
-            throw new MemoryServiceError("forbidden", "external L3 job belongs to another user");
-        }
-        if (!job.sessionId) {
-            throw new MemoryServiceError("conflict", "external L3 job has no session scope");
-        }
-        const session = this.requireSession(job.sessionId);
-        if (session.userId !== userId || (session.projectId ?? null) !== projectId) {
-            throw new MemoryServiceError("forbidden", "external L3 submission scope mismatch");
-        }
-        if (job.status === "succeeded") {
-            const batchId = typeof job.payload.batchId === "string" ? job.payload.batchId : undefined;
-            const targetField = externalL3TargetField(job.payload.targetField);
-            if (!batchId || !targetField) {
-                throw new MemoryServiceError("conflict", "completed external L3 job has invalid payload");
-            }
-            const target = this.repos.l3WorldModels.getTarget(batchId, targetField);
-            const batch = this.repos.l3WorldModels.getBatch(batchId);
-            if (!target || target.status !== "applied" || !batch) {
-                throw new MemoryServiceError("conflict", "completed external L3 job has no applied target");
-            }
-            const memory = this.repos.l3WorldModels.getMemory(batch.userId, batch.projectId);
-            return {
-                ok: true,
-                jobId: job.id,
-                projectId,
-                targetField,
-                noChange: target.noChange,
-                ...(memory ? { memoryId: memory.id } : {}),
-                serverTime: nowIso()
-            };
-        }
-        if (job.status !== "leased" || !job.leasedUntil || Date.parse(job.leasedUntil) <= Date.now()) {
-            throw new MemoryServiceError("conflict", "external L3 job lease is not active");
-        }
-        const expectedFieldHash = input.expectedFieldHash.trim();
-        if (!expectedFieldHash) {
-            throw new MemoryServiceError("invalid_argument", "expectedFieldHash is required");
-        }
-        let prepared;
-        let applied;
-        try {
-            prepared = this.evolutionJobs.prepareExternalL3WorldModel(job);
-            applied = this.evolutionJobs.applyExternalL3WorldModel(job, {
-                expectedFieldHash,
-                ...(input.expectedProfileHash?.trim()
-                    ? { expectedProfileHash: input.expectedProfileHash.trim() }
-                    : {}),
-                candidate: input.candidate
-            });
-        }
-        catch (error) {
-            if (error instanceof MemoryServiceError)
-                throw error;
-            const message = error instanceof Error ? error.message : String(error);
-            if (message === "stale_l3_base") {
-                this.workerRunner.failLeasedWorkerJob(job, error);
-                throw new MemoryServiceError("conflict", "external L3 base changed; lease a fresh job context");
-            }
-            if (error instanceof TypeError) {
-                throw new MemoryServiceError("invalid_argument", message);
-            }
-            throw error;
-        }
-        this.workerRunner.completeLeasedWorkerJob(job);
-        return {
-            ok: true,
-            jobId: job.id,
-            projectId,
-            targetField: prepared.targetField,
-            noChange: applied.noChange,
-            ...(applied.memory ? { memoryId: applied.memory.id } : {}),
-            serverTime: nowIso()
-        };
     }
     async queryVector(query) {
         return this.retrieval.queryVector(query);
@@ -1543,7 +1238,7 @@ export class MemoryService {
     async startTurnNoWrite(request) {
         const turnId = request.turnId ?? newId("turn");
         const contextHints = turnStartContextHints(request);
-        const defaultLayers = ["Skill", "L2", "L1", "L3"];
+        const defaultLayers = ["Skill", "L3", "L4", "L2", "L1"];
         const requestedLayers = request.layers === undefined
             ? defaultLayers
             : defaultLayers.filter((layer) => request.layers?.includes(layer));
@@ -1584,8 +1279,6 @@ export class MemoryService {
             sessionId: request.sessionId,
             episodeId,
             rawTurnId,
-            userMemoryId: "",
-            userMemoryIds: [],
             l1MemoryId: "",
             l1MemoryIds: [],
             closedEpisodeIds: [],
@@ -1659,9 +1352,6 @@ export class MemoryService {
         return memory;
     }
     isDeletedRecallMemory(id) {
-        const userMemory = this.repos.userMemories.getIncludingDeleted(id);
-        if (userMemory)
-            return userMemory.status === "deleted" || Boolean(userMemory.deletedAt);
         const memory = this.repos.memories.getIncludingDeleted(id);
         return Boolean(memory && (memory.status === "deleted" || memory.deletedAt));
     }
@@ -1689,23 +1379,6 @@ export class MemoryService {
     assertSessionInScope(session, namespace) {
         void session;
         void namespace;
-    }
-    assertL3WorldModelSessionScope(session, namespace) {
-        if (session.meta.l3_world_model_protocol_version !== 2) {
-            throw new MemoryServiceError("conflict", "l3_world_model_protocol_v2_required");
-        }
-        const normalized = normalizeNamespace(namespace);
-        const conflicts = [
-            normalized.userId !== session.userId,
-            normalized.source !== session.source,
-            normalized.profileId !== session.profileId,
-            (normalized.projectId ?? null) !== (session.projectId ?? null),
-            Boolean(namespace.workspaceId && namespace.workspaceId !== session.workspaceId),
-            Boolean(namespace.sessionKey && namespace.sessionKey !== session.hostSessionKey)
-        ];
-        if (conflicts.some(Boolean)) {
-            throw new MemoryServiceError("conflict", "l3_world_model_session_scope_conflict");
-        }
     }
     assertMemoryInScope(memory, namespace) {
         void memory;
@@ -1795,37 +1468,13 @@ function memoryIdPrefix(layer, kind) {
         return "span";
     if (layer === "L1" || kind === "trace")
         return "trace";
-    if (layer === "L2" || kind === "policy")
-        return "policy";
-    if (layer === "L3" || kind === "world_model")
-        return "world";
+    if (layer === "L2" || kind === "timeline")
+        return "timeline";
+    if (layer === "L3" || kind === "project_profile")
+        return "project_profile";
+    if (layer === "L4" || kind === "user_profile")
+        return "user_profile";
     return "skill";
-}
-function externalProjectScope(explicit, namespaceProjectId) {
-    const namespaceScope = namespaceProjectId?.trim() || null;
-    if (explicit === null) {
-        if (namespaceScope !== null) {
-            throw new MemoryServiceError("forbidden", "explicit global scope conflicts with namespace project");
-        }
-        return null;
-    }
-    if (explicit === undefined)
-        return namespaceScope;
-    const normalized = explicit.trim();
-    if (!normalized) {
-        throw new MemoryServiceError("invalid_argument", "projectId must be non-empty or null");
-    }
-    if (namespaceScope !== null && namespaceScope !== normalized) {
-        throw new MemoryServiceError("forbidden", "projectId conflicts with namespace project");
-    }
-    return normalized;
-}
-function externalL3TargetField(value) {
-    return value === "general_rules_and_safety_constraints" ||
-        value === "project_contract" ||
-        value === "domain_knowledge"
-        ? value
-        : undefined;
 }
 function normalizeRequestTags(tags) {
     const reserved = new Set(["trace", "turn", "memmy", "openclaw"]);

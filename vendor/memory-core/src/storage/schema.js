@@ -1,6 +1,6 @@
 import { memoryCaptureQaHash, normalizeMemoryCaptureSource } from "../utils/memory-capture-claim.js";
-export const SCHEMA_VERSION = 7;
-export const SCHEMA_MIGRATION_ID = "007_memory_capture_claims";
+export const SCHEMA_VERSION = 8;
+export const SCHEMA_MIGRATION_ID = "008_memory_layers_v2";
 const API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION = 2;
 const PROCESSING_TAGS = new Set([
     "摘要排队中",
@@ -35,7 +35,7 @@ const statements = [
     tags_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags_json)),
     info_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(info_json)),
     properties_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(properties_json)),
-    memory_layer TEXT NOT NULL CHECK (memory_layer IN ('L1', 'L2', 'L3', 'Skill')),
+    memory_layer TEXT NOT NULL CHECK (memory_layer IN ('L1', 'L2', 'L3', 'L4', 'Skill')),
     content_hash TEXT,
     version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
@@ -494,16 +494,12 @@ const statements = [
     ON evolution_jobs (status, created_at ASC)`,
     `CREATE INDEX IF NOT EXISTS idx_evolution_jobs_target
     ON evolution_jobs (target_memory_id, job_type)`,
-    `CREATE UNIQUE INDEX IF NOT EXISTS uq_evolution_jobs_l3_immutable_dedupe
-    ON evolution_jobs (dedupe_key)
-    WHERE dedupe_key IS NOT NULL
-      AND job_type IN ('l3_world_model_update', 'project_environment_profile')`,
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_evolution_jobs_scope_seq
     ON evolution_jobs (scope_key, scope_seq)
     WHERE scope_key IS NOT NULL`,
     `CREATE TABLE IF NOT EXISTS embedding_retry_queue (
     id TEXT PRIMARY KEY,
-    target_kind TEXT NOT NULL CHECK (target_kind IN ('trace', 'policy', 'world_model', 'skill')),
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('trace', 'timeline', 'project_profile', 'user_profile', 'skill')),
     target_id TEXT NOT NULL,
     vector_field TEXT NOT NULL CHECK (vector_field IN ('vec_summary', 'vec_action', 'vec')),
     source_text TEXT NOT NULL,
@@ -585,7 +581,7 @@ export function migrate(db) {
     const foreignKeys = Number(db.pragma("foreign_keys", { simple: true }) ?? 0);
     const hasMemories = tableExists(db, "memories");
     const version = currentSchemaVersion(db);
-    if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6) {
+    if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7) {
         throw new Error(`Unsupported memory database schema version ${version}; the database was left unchanged`);
     }
     if (version > SCHEMA_VERSION) {
@@ -601,6 +597,14 @@ export function migrate(db) {
             if (version > 0 && version < 6) {
                 addColumnIfMissing(db, "evolution_jobs", "scope_key", "TEXT");
                 addColumnIfMissing(db, "evolution_jobs", "scope_seq", "INTEGER");
+            }
+            if (hasMemories && version > 0 && version < 8) {
+                migrateMemoryLayerV8(db);
+                migrateEmbeddingRetryQueueV8(db);
+                archiveLegacyMemoryLayersV8(db, now);
+                archiveLegacyUserMemoriesV8(db, now);
+                deadLetterLegacyEvolutionJobsV8(db, now);
+                db.prepare("DROP INDEX IF EXISTS uq_evolution_jobs_l3_immutable_dedupe").run();
             }
             for (const statement of statements) {
                 db.prepare(statement).run();
@@ -637,6 +641,130 @@ export function migrate(db) {
     finally {
         db.pragma(`foreign_keys = ${foreignKeys ? "ON" : "OFF"}`);
     }
+}
+function migrateMemoryLayerV8(db) {
+    db.prepare(`CREATE TABLE memories_v8 (
+      id TEXT PRIMARY KEY,
+      timeline TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      conversation_id TEXT,
+      session_id TEXT,
+      agent_id TEXT,
+      app_id TEXT,
+      memory_type TEXT NOT NULL DEFAULT 'LongTermMemory',
+      status TEXT NOT NULL DEFAULT 'activated'
+        CHECK (status IN ('activated', 'resolving', 'archived', 'deleted')),
+      visibility TEXT NOT NULL DEFAULT 'private',
+      memory_key TEXT,
+      memory_value TEXT NOT NULL,
+      tags_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags_json)),
+      info_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(info_json)),
+      properties_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(properties_json)),
+      memory_layer TEXT NOT NULL CHECK (memory_layer IN ('L1', 'L2', 'L3', 'L4', 'Skill')),
+      content_hash TEXT,
+      version INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      deleted_at TEXT
+    )`).run();
+    db.prepare(`INSERT INTO memories_v8 (
+      id, timeline, user_id, conversation_id, session_id, agent_id, app_id,
+      memory_type, status, visibility, memory_key, memory_value, tags_json,
+      info_json, properties_json, memory_layer, content_hash, version,
+      created_at, updated_at, deleted_at
+    )
+    SELECT
+      id, timeline, user_id, conversation_id, session_id, agent_id, app_id,
+      memory_type, status, visibility, memory_key, memory_value, tags_json,
+      info_json, properties_json, memory_layer, content_hash, version,
+      created_at, updated_at, deleted_at
+    FROM memories`).run();
+    db.prepare("DROP TABLE memories").run();
+    db.prepare("ALTER TABLE memories_v8 RENAME TO memories").run();
+}
+function migrateEmbeddingRetryQueueV8(db) {
+    if (!tableExists(db, "embedding_retry_queue"))
+        return;
+    db.prepare(`CREATE TABLE embedding_retry_queue_v8 (
+      id TEXT PRIMARY KEY,
+      target_kind TEXT NOT NULL CHECK (target_kind IN ('trace', 'timeline', 'project_profile', 'user_profile', 'skill')),
+      target_id TEXT NOT NULL,
+      vector_field TEXT NOT NULL CHECK (vector_field IN ('vec_summary', 'vec_action', 'vec')),
+      source_text TEXT NOT NULL,
+      embed_role TEXT NOT NULL DEFAULT 'document' CHECK (embed_role IN ('document', 'query')),
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'in_progress', 'failed', 'succeeded')),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL DEFAULT 6,
+      next_attempt_at INTEGER NOT NULL,
+      claimed_by TEXT,
+      lease_until INTEGER,
+      last_error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE (target_kind, target_id, vector_field)
+    )`).run();
+    db.prepare(`INSERT INTO embedding_retry_queue_v8 (
+      id, target_kind, target_id, vector_field, source_text, embed_role,
+      status, attempts, max_attempts, next_attempt_at, claimed_by, lease_until,
+      last_error, created_at, updated_at
+    )
+    SELECT
+      id,
+      CASE target_kind
+        WHEN 'policy' THEN 'timeline'
+        WHEN 'world_model' THEN 'project_profile'
+        ELSE target_kind
+      END,
+      target_id, vector_field, source_text, embed_role,
+      status, attempts, max_attempts, next_attempt_at, claimed_by, lease_until,
+      last_error, created_at, updated_at
+    FROM embedding_retry_queue`).run();
+    db.prepare("DROP TABLE embedding_retry_queue").run();
+    db.prepare("ALTER TABLE embedding_retry_queue_v8 RENAME TO embedding_retry_queue").run();
+}
+function archiveLegacyMemoryLayersV8(db, now) {
+    db.prepare(`UPDATE memories
+     SET status = 'archived',
+         properties_json = json_set(
+           properties_json,
+           '$.status', 'archived',
+           '$.internal_info.legacy_memory_model', 'v1',
+           '$.internal_info.archive_reason', 'replaced_by_memory_layers_v2'
+         ),
+         updated_at = ?
+     WHERE memory_layer IN ('L2', 'L3')
+       AND status IN ('activated', 'resolving')`).run(now);
+}
+function archiveLegacyUserMemoriesV8(db, now) {
+    if (!tableExists(db, "user_memories"))
+        return;
+    db.prepare(`UPDATE user_memories
+     SET status = 'archived',
+         archived_at = COALESCE(archived_at, ?),
+         archive_reason = COALESCE(archive_reason, 'replaced_by_memory_layers_v2'),
+         updated_at = ?
+     WHERE status = 'active'`).run(now, now);
+}
+function deadLetterLegacyEvolutionJobsV8(db, now) {
+    if (!tableExists(db, "evolution_jobs"))
+        return;
+    db.prepare(`UPDATE evolution_jobs
+     SET status = 'dead_letter',
+         leased_until = NULL,
+         last_error = 'replaced_by_memory_layers_v2',
+         updated_at = ?
+     WHERE job_type IN (
+       'user_memory_embedding',
+       'negative_experience',
+       'l2_association',
+       'l2_induction',
+       'l3_abstraction',
+       'l3_world_model_update',
+       'project_environment_profile',
+       'skill_crystallization'
+     )
+       AND status IN ('queued', 'leased', 'failed')`).run(now);
 }
 function backfillMemoryCaptureClaims(db) {
     const rows = db.prepare(`SELECT raw_turns.user_id,

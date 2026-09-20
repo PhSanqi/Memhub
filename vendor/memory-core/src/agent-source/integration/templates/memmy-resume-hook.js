@@ -8,8 +8,6 @@ import { join } from "node:path";
 import {
   closeRuntimeSession,
   completeRuntimeTurn,
-  loadRuntimeL3,
-  notifyRuntimeBoundary,
   openRuntimeSession,
   startRuntimeTurn
 } from "./memmy-workspace-bridge.mjs";
@@ -29,9 +27,9 @@ const RESUME_CONTEXT_MAX_CHARS = 24000;
 async function main() {
   const input = await readStdin();
   const payload = parseJson(input) || {};
-  if (isL3LifecycleEvent(payload)) {
+  if (isLifecycleEvent(payload)) {
     try {
-      await handleL3LifecycleEvent(payload);
+      await handleLifecycleEvent(payload);
     } catch {
       writeLifecycleOutput(payload, "");
     }
@@ -148,47 +146,36 @@ function hookEventName(payload) {
   return normalizeText(payload.hook_event_name || payload.hookEventName).toLowerCase();
 }
 
-function isL3LifecycleEvent(payload) {
+function isLifecycleEvent(payload) {
   const event = hookEventName(payload);
   return event === "sessionstart" || event === "postcompact" || event === "precompact" || event === "sessionend";
 }
 
-async function openHookRuntimeSession(payload, transition) {
+async function openHookRuntimeSession(payload) {
   return openRuntimeSession({
     configUrl: CONFIG_URL,
     source: SOURCE,
     adapterId: "memmy-" + SOURCE + "-hook",
     sessionKey: memoryExternalSessionId(payload),
     workspaceRoot: workspacePath(payload) || null,
-    transition,
     pinnedOwner: true
   });
 }
 
-async function handleL3LifecycleEvent(payload) {
+async function handleLifecycleEvent(payload) {
   const event = hookEventName(payload);
-  const session = await openHookRuntimeSession(payload, event === "sessionstart" ? "allow_legacy_rollover" : "resume_only");
-  if (!session) {
+  if (event === "precompact" || event === "postcompact") {
     writeLifecycleOutput(payload, "");
     return;
   }
+  const session = await openHookRuntimeSession(payload);
+  if (!session) { writeLifecycleOutput(payload, ""); return; }
   if (event === "sessionend") {
     await closeRuntimeSession(session);
     writeLifecycleOutput(payload, "");
     return;
   }
-  if (event === "precompact") {
-    if (MODE === "cursor") await notifyRuntimeBoundary(session, "token_compaction_attempt");
-    writeLifecycleOutput(payload, "");
-    return;
-  }
-  if (event === "postcompact") {
-    await notifyRuntimeBoundary(session, "token_compaction");
-    writeLifecycleOutput(payload, "");
-    return;
-  }
-  const loaded = await loadRuntimeL3(session);
-  writeLifecycleOutput(payload, loaded.additionalContext);
+  writeLifecycleOutput(payload, "");
 }
 
 function writeLifecycleOutput(payload, context) {
@@ -239,7 +226,7 @@ async function captureCompletedTurn(payload) {
     return;
   }
 
-  const runtimeSession = await openHookRuntimeSession(payload, "resume_only");
+  const runtimeSession = await openHookRuntimeSession(payload);
   if (!runtimeSession) return;
   const sessionId = runtimeSession.sessionId;
   const turnId = normalizeText(pending && pending.turnId) || platformTurnId(payload) ||
@@ -261,7 +248,7 @@ async function startCapturedTurn(payload, prompt) {
   if (!query) {
     return null;
   }
-  const runtimeSession = await openHookRuntimeSession(payload, "resume_only");
+  const runtimeSession = await openHookRuntimeSession(payload);
   if (!runtimeSession) return null;
   const sessionId = runtimeSession.sessionId;
   const requestedTurnId = platformTurnId(payload) ||

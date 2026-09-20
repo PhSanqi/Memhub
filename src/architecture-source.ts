@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
-import { readdir, stat } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { readdir, readFile } from "node:fs/promises";
+import { basename, join, relative, resolve } from "node:path";
 import type { ContextItem } from "./context-capsule.js";
 
 export interface ProjectArchitectureSource {
@@ -18,213 +17,192 @@ export class NullProjectArchitectureSource implements ProjectArchitectureSource 
   async getProjectArchitecture(): Promise<ContextItem[]> { return []; }
 }
 
-export interface EmbeddedArchitectureSourceOptions {
+export interface FileProjectArchitectureSourceOptions {
   rootDir: string;
-  runtimeModule?: string;
   maxChars?: number;
 }
 
 /**
- * Memhub-owned architecture adapter. The small host-independent Normify engine
- * is vendored with Memhub so production does not require a separately
- * installed normify executable.
+ * Small compatibility reader for the architecture files that older Memhub
+ * releases stored under `normify-<project>`. It deliberately does not execute
+ * or depend on the legacy Normify engine; the files themselves remain the
+ * authoritative project architecture source until they are explicitly
+ * migrated by the user.
  */
-export class EmbeddedArchitectureSource implements ProjectArchitectureSource {
+export class FileProjectArchitectureSource implements ProjectArchitectureSource {
   private readonly rootDir: string;
-  private readonly runtimeModule: string;
   private readonly maxChars: number;
 
-  constructor(options: EmbeddedArchitectureSourceOptions) {
+  constructor(options: FileProjectArchitectureSourceOptions) {
     this.rootDir = resolve(options.rootDir);
-    this.runtimeModule = resolve(
-      options.runtimeModule ?? join(
-        dirname(fileURLToPath(import.meta.url)),
-        "..",
-        "vendor",
-        "normify",
-        "lib",
-        "generic.js"
-      )
-    );
     this.maxChars = Math.max(1_000, options.maxChars ?? 16_000);
   }
 
   async listProjects(accountId: string): Promise<string[]> {
-    const normalizedAccountId = requireNonEmpty(accountId, "accountId");
-    const accountRoot = normalizedAccountId === "local"
-      ? this.rootDir
-      : join(this.rootDir, ".normify", "accounts", accountHash(normalizedAccountId));
-    const projects = new Set<string>();
-    try {
-      const entries = await readdir(accountRoot, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isDirectory() && entry.name.startsWith("normify-") &&
-            await hasModules(join(accountRoot, entry.name))) {
-          projects.add(entry.name.slice("normify-".length));
-        }
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
-    }
-    for (const legacy of await discoverLegacyArchitectureDirs(this.rootDir)) {
-      projects.add(legacy.slug);
-    }
-    return [...projects].filter(Boolean).sort();
+    const dirs = await this.architectureDirs(requireNonEmpty(accountId, "accountId"));
+    return [...new Set(dirs.map((item) => item.projectId))].sort();
   }
 
-  async getProjectArchitecture(input: { accountId: string; projectId: string; query: string }): Promise<ContextItem[]> {
+  async getProjectArchitecture(input: {
+    accountId: string;
+    projectId: string;
+    query: string;
+  }): Promise<ContextItem[]> {
     const accountId = requireNonEmpty(input.accountId, "accountId");
     const projectId = requireNonEmpty(input.projectId, "projectId");
     const query = requireNonEmpty(input.query, "query");
-    const primary = await this.callBrief({
-      rootDir: this.rootDir,
-      accountId: accountId === "local" ? undefined : accountId,
-      projectId,
-      query
-    });
-    if (!isNoModulesResult(primary)) {
-      return architectureItems(primary, {
+    const candidate = (await this.architectureDirs(accountId))
+      .find((item) => sameProject(item.projectId, projectId));
+    if (!candidate) return [];
+
+    const files = await architectureMarkdownFiles(candidate.dir, projectId);
+    const queryTokens = tokens(query);
+    const rows = [] as Array<{ path: string; content: string; score: number }>;
+    for (const path of files) {
+      const content = (await readFile(path, "utf8")).trim();
+      if (!content) continue;
+      const haystack = `${basename(path)}\n${content}`.toLocaleLowerCase();
+      const score = queryTokens.reduce((sum, token) => sum + (haystack.includes(token) ? 1 : 0), 0) +
+        (basename(path) === "outline.md" ? 0.5 : 0);
+      rows.push({ path, content, score });
+    }
+    rows.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
+
+    let remaining = this.maxChars;
+    const items: ContextItem[] = [];
+    for (const row of rows) {
+      if (remaining <= 0) break;
+      const clipped = row.content.slice(0, remaining);
+      if (!clipped.trim()) continue;
+      const relativePath = relative(candidate.dir, row.path).replaceAll("\\", "/");
+      items.push({
+        id: `architecture:${projectId}:${createHash("sha256").update(relativePath).digest("hex").slice(0, 16)}`,
+        content: `# ${relativePath}\n\n${clipped}`,
+        authority: "authoritative",
+        scope: "project",
+        source: "project-architecture",
         projectId,
-        maxChars: this.maxChars,
-        rootDir: this.rootDir,
-        source: "account-scoped"
-      });
-    }
-
-    const legacy = (await discoverLegacyArchitectureDirs(this.rootDir))
-      .find((candidate) => sameProject(candidate.slug, projectId));
-    if (!legacy) return [];
-    const fallback = await this.callBrief({
-      rootDir: dirname(legacy.dir),
-      projectId,
-      query
-    });
-    if (isErrorResult(fallback)) return [];
-    return architectureItems(fallback, {
-      projectId,
-      maxChars: this.maxChars,
-      rootDir: dirname(legacy.dir),
-      source: "legacy-repo-local"
-    });
-  }
-
-  private async callBrief(input: {
-    rootDir: string;
-    accountId?: string;
-    projectId: string;
-    query: string;
-  }): Promise<unknown> {
-    const moduleUrl = pathToFileURL(this.runtimeModule).href;
-    const imported = await import(moduleUrl) as {
-      createNormifyRuntime(options: { rootDir: string; accountId?: string }): {
-        callTool(name: string, args: Record<string, unknown>): Promise<unknown>
-      }
-    };
-    const runtime = imported.createNormifyRuntime({
-      rootDir: input.rootDir,
-      ...(input.accountId ? { accountId: input.accountId } : {})
-    });
-    return runtime.callTool("normify_brief", {
-      project: input.projectId,
-      task: input.query,
-      depth: 2
-    });
-  }
-}
-
-interface LegacyArchitectureDir {
-  dir: string;
-  slug: string;
-}
-
-async function discoverLegacyArchitectureDirs(rootDir: string): Promise<LegacyArchitectureDir[]> {
-  const found = new Map<string, LegacyArchitectureDir>();
-  await walk(resolve(rootDir), 2);
-  return [...found.values()].sort((left, right) => left.dir.localeCompare(right.dir));
-
-  async function walk(directory: string, depth: number): Promise<void> {
-    let entries;
-    try {
-      entries = await readdir(directory, { withFileTypes: true });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return;
-      throw error;
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      if (entry.name === ".git" || entry.name === ".normify" || entry.name === "node_modules") continue;
-      const candidate = join(directory, entry.name);
-      if (entry.name.startsWith("normify-")) {
-        if (await hasModules(candidate)) {
-          const slug = entry.name.slice("normify-".length);
-          found.set(candidate, { dir: candidate, slug });
+        provenance: {
+          storage: candidate.scope,
+          path: relativePath,
+          legacyFormat: "normify-files"
         }
-        continue;
-      }
-      if (depth > 0) await walk(candidate, depth - 1);
+      });
+      remaining -= clipped.length;
     }
+    return items;
+  }
+
+  private async architectureDirs(accountId: string): Promise<Array<{
+    projectId: string;
+    dir: string;
+    scope: "account-scoped" | "legacy-repo-local";
+  }>> {
+    const results: Array<{
+      projectId: string;
+      dir: string;
+      scope: "account-scoped" | "legacy-repo-local";
+    }> = [];
+    const accountRoot = join(this.rootDir, ".normify", "accounts", accountHash(accountId));
+    for (const dir of await childArchitectureDirs(accountRoot)) {
+      results.push({ projectId: projectIdFromDir(dir), dir, scope: "account-scoped" });
+    }
+    for (const dir of await childArchitectureDirs(this.rootDir)) {
+      results.push({ projectId: projectIdFromDir(dir), dir, scope: "legacy-repo-local" });
+    }
+    for (const child of await childDirs(this.rootDir)) {
+      if (basename(child) === ".normify") continue;
+      for (const dir of await childArchitectureDirs(child)) {
+        results.push({ projectId: projectIdFromDir(dir), dir, scope: "legacy-repo-local" });
+      }
+    }
+    const unique = new Map<string, typeof results[number]>();
+    for (const item of results) {
+      const key = `${item.scope}\0${item.projectId}`;
+      if (!unique.has(key)) unique.set(key, item);
+    }
+    return [...unique.values()].sort((a, b) =>
+      (a.scope === b.scope ? 0 : a.scope === "account-scoped" ? -1 : 1) ||
+      a.projectId.localeCompare(b.projectId)
+    );
   }
 }
 
-async function hasModules(projectDir: string): Promise<boolean> {
+async function architectureMarkdownFiles(root: string, projectId: string): Promise<string[]> {
+  const files: string[] = [];
+  const outline = join(root, "outline.md");
+  if (await fileExists(outline)) files.push(outline);
+  const moduleRoots = [join(root, "modules", projectId), join(root, "modules")];
+  for (const moduleRoot of moduleRoots) {
+    for (const file of await markdownFiles(moduleRoot, 3)) {
+      if (!files.includes(file)) files.push(file);
+    }
+    if (files.length > (await fileExists(outline) ? 1 : 0)) break;
+  }
+  return files;
+}
+
+async function markdownFiles(root: string, depth: number): Promise<string[]> {
+  if (depth < 0) return [];
+  let entries;
   try {
-    return (await stat(join(projectDir, "modules"))).isDirectory();
+    entries = await readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    throw error;
+  }
+  const files: string[] = [];
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    const path = join(root, entry.name);
+    if (entry.isFile() && entry.name.endsWith(".md")) files.push(path);
+    else if (entry.isDirectory() && depth > 0) files.push(...await markdownFiles(path, depth - 1));
+  }
+  return files;
+}
+
+async function childArchitectureDirs(root: string): Promise<string[]> {
+  return (await childDirs(root)).filter((dir) => basename(dir).startsWith("normify-"));
+}
+
+async function childDirs(root: string): Promise<string[]> {
+  try {
+    return (await readdir(root, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(root, entry.name));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await readFile(path, "utf8");
+    return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false;
     throw error;
   }
 }
 
-function architectureItems(result: unknown, input: {
-  projectId: string;
-  maxChars: number;
-  rootDir: string;
-  source: "account-scoped" | "legacy-repo-local";
-}): ContextItem[] {
-  if (isErrorResult(result)) return [];
-  const raw = JSON.stringify(result);
-  const content = raw.length <= input.maxChars ? raw : `${raw.slice(0, input.maxChars)}\n…[truncated]`;
-  return [{
-    id: `memhub-architecture:${input.projectId}:brief`,
-    content,
-    authority: "authoritative",
-    scope: "project",
-    source: "memhub-architecture",
-    projectId: input.projectId,
-    provenance: {
-      adapter: "memhub-embedded-architecture-core",
-      tool: "normify_brief",
-      rootDir: input.rootDir,
-      architectureSource: input.source
-    }
-  }];
-}
-
-function isNoModulesResult(value: unknown): boolean {
-  if (!isErrorResult(value)) return false;
-  const error = (value as { error?: { code?: unknown } }).error;
-  return error?.code === "project/no-modules";
-}
-
-function isErrorResult(value: unknown): boolean {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value) &&
-    (value as { ok?: unknown }).ok === false);
+function projectIdFromDir(dir: string): string {
+  return basename(dir).slice("normify-".length);
 }
 
 function sameProject(left: string, right: string): boolean {
-  return normalizeProjectKey(left) === normalizeProjectKey(right);
+  return left.normalize("NFKC").toLocaleLowerCase() === right.normalize("NFKC").toLocaleLowerCase();
 }
 
-function normalizeProjectKey(value: string): string {
-  return value.normalize("NFKC").toLocaleLowerCase().replace(/[\p{P}\p{S}\s_]+/gu, "");
+function tokens(value: string): string[] {
+  return [...new Set(value.toLocaleLowerCase().split(/[^\p{L}\p{N}_-]+/u).filter((item) => item.length >= 2))];
+}
+
+function accountHash(accountId: string): string {
+  return createHash("sha256").update(accountId, "utf8").digest("hex");
 }
 
 function requireNonEmpty(value: string, field: string): string {
   const normalized = value.trim();
   if (!normalized) throw new TypeError(`${field} must be non-empty`);
   return normalized;
-}
-
-function accountHash(accountId: string): string {
-  return createHash("sha256").update(accountId, "utf8").digest("hex");
 }

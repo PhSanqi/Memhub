@@ -15,7 +15,7 @@ import { firstRealSummary, importStatusTags, isImportSummaryPlaceholder, memoryH
 import { IMPORT_DEFAULT_ALPHA, IMPORT_DEFAULT_PRIORITY, IMPORT_DEFAULT_VALUE } from "../import/memory-import-pipeline.js";
 import { namespaceForMemory } from "../namespace/namespace-scope.js";
 import { processingJobMatchesMemory } from "../worker/job-handlers.js";
-import { buildUserMemory, isDynamicCurrentFactQuery } from "../user-memory/user-memory.js";
+import { isDynamicCurrentFactQuery } from "../capture/capture-heuristics.js";
 import { embeddingTextForMemory, traceSummaryEmbeddingText, updateMemoryVectorField } from "./embedding-pipeline.js";
 export class EmbeddingJobProcessor {
     deps;
@@ -34,40 +34,6 @@ export class EmbeddingJobProcessor {
             if (!this.enqueueEmbeddingRetryAfterFailure(item, error))
                 throw error;
         }
-    }
-    async embedUserMemory(job) {
-        const memory = job.targetMemoryId
-            ? this.deps.repos.userMemories.get(job.targetMemoryId)
-            : undefined;
-        if (!memory)
-            throw new Error(`user memory embedding target not found: ${job.targetMemoryId ?? "unknown"}`);
-        const contentHash = typeof job.payload.contentHash === "string" ? job.payload.contentHash : undefined;
-        if (contentHash && contentHash !== stableHash(memory.content))
-            return;
-        const vector = await this.deps.embedder.embedOne(memory.content, "document");
-        const current = this.deps.repos.userMemories.get(memory.id);
-        if (!current || (contentHash && contentHash !== stableHash(current.content)))
-            return;
-        const at = this.deps.nowIso();
-        const saved = this.deps.repos.userMemories.updateEmbedding(current.id, vector, {
-            model: this.deps.embedder.config.model,
-            provider: this.deps.embedder.config.provider,
-            updatedAt: at
-        });
-        if (!saved)
-            return;
-        this.deps.repos.runtime.appendChange({
-            memoryId: saved.id,
-            kind: "user_memory",
-            op: "updated",
-            entityId: saved.id,
-            userId: saved.userId,
-            changeType: "user_memory_embedding_updated",
-            before: current,
-            after: saved,
-            source: "worker.user_memory_embedding",
-            createdAt: at
-        });
     }
     prepareEmbeddingJob(job) {
         const memory = job.targetMemoryId ? this.deps.repos.memories.get(job.targetMemoryId) : undefined;
@@ -239,12 +205,8 @@ export class EmbeddingJobProcessor {
         const summary = decision?.l1Summary ?? proposedSummary;
         let finalizedEpisodeId;
         this.deps.repos.transaction(() => {
-            let userMemoryCapture = userMemoryCaptureFromJob(job);
-            if (decision?.createUserMemory && job.payload.captureUserMemory === true) {
-                userMemoryCapture = this.captureUserMemoryFromDecision(current, currentTrace, decision, job, at);
-            }
             if (decision && !decision.createL1) {
-                this.recordTurnCaptureDiagnostics(currentTrace, current.id, decision, userMemoryCapture, job, at);
+                this.recordTurnCaptureDiagnostics(currentTrace, current.id, decision, at);
                 const rejected = this.deps.repos.memories.update(recordTurnMemoryDecision(current, decision, "rejected", at));
                 const deleted = this.deps.repos.memories.softDelete(rejected.id, at);
                 if (deleted)
@@ -266,7 +228,7 @@ export class EmbeddingJobProcessor {
             if (saved !== previous)
                 this.appendMemoryChange(saved, previous, "worker.trace_summary", at);
             if (decision) {
-                this.recordTurnCaptureDiagnostics(currentTrace, saved.id, decision, userMemoryCapture, job, at);
+                this.recordTurnCaptureDiagnostics(currentTrace, saved.id, decision, at);
             }
             this.scheduleEmbeddingAfterTextUpdate({
                 memory: saved,
@@ -294,107 +256,7 @@ export class EmbeddingJobProcessor {
             : undefined;
         return decision?.status === "rejected";
     }
-    captureUserMemoryFromDecision(sourceMemory, trace, decision, job, at) {
-        if (memoryHasImportPipeline(sourceMemory))
-            return undefined;
-        const content = decision.userMemoryAction === "correct_existing"
-            ? decision.correctedUserMemoryContent?.trim() ?? ""
-            : trace.userText.trim();
-        const sourceTurnId = trace.rawTurnId;
-        if (!content || !sourceTurnId || decision.userMemoryTypes.length === 0)
-            return undefined;
-        const sourceAt = Number.isFinite(trace.ts) ? new Date(trace.ts).toISOString() : at;
-        if (decision.userMemoryAction === "confirm_existing" && decision.matchedUserMemoryId) {
-            const confirmed = this.deps.repos.userMemories.confirmExisting({
-                id: decision.matchedUserMemoryId,
-                userId: sourceMemory.userId,
-                sourceTurnId,
-                memoryTypes: decision.userMemoryTypes,
-                updatedAt: sourceAt
-            });
-            if (!confirmed)
-                return undefined;
-            this.deps.repos.runtime.appendChange({
-                memoryId: confirmed.memory.id,
-                kind: "user_memory",
-                op: "updated",
-                entityId: confirmed.memory.id,
-                userId: confirmed.memory.userId,
-                changeType: "user_memory_confirmed",
-                before: confirmed.previous,
-                after: confirmed.memory,
-                source: "worker.turn_memory_decision",
-                createdAt: at
-            });
-            return { action: "confirmed", memoryId: confirmed.memory.id };
-        }
-        const correctionTarget = decision.userMemoryAction === "correct_existing" && decision.matchedUserMemoryId
-            ? this.deps.repos.userMemories.get(decision.matchedUserMemoryId)
-            : undefined;
-        if (decision.userMemoryAction === "correct_existing" &&
-            (!correctionTarget || correctionTarget.userId !== sourceMemory.userId || correctionTarget.status !== "active"))
-            return undefined;
-        const candidate = buildUserMemory({
-            id: `user_memory_${stableHash(`${sourceTurnId}:${content}`).slice(0, 20)}`,
-            sourceTurnId,
-            userId: sourceMemory.userId,
-            memoryTypes: decision.userMemoryTypes,
-            content,
-            createdAt: sourceAt,
-            ...(correctionTarget ? { replacesMemoryId: correctionTarget.id } : {})
-        });
-        const upsert = this.deps.repos.userMemories.upsertExact(candidate);
-        if (correctionTarget && upsert.memory.id === correctionTarget.id) {
-            throw new Error("user memory correction must change the target content");
-        }
-        this.deps.repos.runtime.appendChange({
-            memoryId: upsert.memory.id,
-            kind: "user_memory",
-            op: upsert.created ? "created" : "updated",
-            entityId: upsert.memory.id,
-            userId: upsert.memory.userId,
-            changeType: upsert.created ? "user_memory_created" : "user_memory_updated",
-            before: upsert.previous,
-            after: upsert.memory,
-            source: "worker.turn_memory_decision",
-            createdAt: at
-        });
-        if (correctionTarget) {
-            const archived = this.deps.repos.userMemories.archiveForCorrection(correctionTarget.id, upsert.memory.id, at);
-            if (archived) {
-                this.deps.repos.runtime.appendChange({
-                    memoryId: archived.id,
-                    kind: "user_memory",
-                    op: "archived",
-                    entityId: archived.id,
-                    userId: archived.userId,
-                    changeType: "user_memory_archived",
-                    before: correctionTarget,
-                    after: archived,
-                    source: "worker.turn_memory_decision",
-                    createdAt: at
-                });
-            }
-        }
-        if (upsert.created && this.deps.capture.embedAfterCapture) {
-            this.deps.enqueueJob({
-                jobType: "user_memory_embedding",
-                userId: upsert.memory.userId,
-                sessionId: sourceMemory.sessionId,
-                episodeId: job.episodeId,
-                targetMemoryId: upsert.memory.id,
-                payload: { contentHash: stableHash(upsert.memory.content) },
-                maxAttempts: 6,
-                createdAt: at
-            });
-        }
-        return {
-            action: correctionTarget ? "corrected" : upsert.created ? "created" : "updated",
-            memoryId: upsert.memory.id,
-            ...(correctionTarget ? { targetMemoryId: correctionTarget.id } : {})
-        };
-    }
-    recordTurnCaptureDiagnostics(trace, l1MemoryId, decision, userMemoryCapture, job, at) {
+    recordTurnCaptureDiagnostics(trace, l1MemoryId, decision, at) {
         if (!trace.rawTurnId)
             return;
         const rawTurn = this.deps.repos.runtime.getRawTurn(trace.rawTurnId);
@@ -411,11 +273,9 @@ export class EmbeddingJobProcessor {
             ...previousL1.filter((item) => item.memory_id !== l1MemoryId),
             {
                 memory_id: l1MemoryId,
-                written: decision.createL1,
-                policy_eligible: decision.policyEligible
+                written: decision.createL1
             }
         ];
-        const recordsUserMemory = job.payload.captureUserMemory === true || Boolean(userMemoryCapture);
         this.deps.repos.runtime.updateRawTurn({
             ...rawTurn,
             messagePayload: {
@@ -425,15 +285,7 @@ export class EmbeddingJobProcessor {
                     memory_capture: {
                         status: "completed",
                         decided_at: at,
-                        l1,
-                        ...(recordsUserMemory ? {
-                            user_memory: {
-                                written: Boolean(userMemoryCapture),
-                                action: userMemoryCapture?.action ?? "none",
-                                memory_id: userMemoryCapture?.memoryId,
-                                target_memory_id: userMemoryCapture?.targetMemoryId
-                            }
-                        } : isRecord(previous.user_memory) ? { user_memory: previous.user_memory } : {})
+                        l1
                     }
                 }
             }
@@ -508,7 +360,6 @@ function acceptTurnMemoryDecision(memory, decision, updatedAt) {
         status: "activated",
         info: {
             ...info,
-            policy_eligible: decision.policyEligible,
             ...(originalEvidenceStatus ? { evidence_status: originalEvidenceStatus } : {})
         },
         properties: {
@@ -516,12 +367,10 @@ function acceptTurnMemoryDecision(memory, decision, updatedAt) {
             status: "activated",
             info: {
                 ...propertyInfo,
-                policy_eligible: decision.policyEligible,
                 ...(originalEvidenceStatus ? { evidence_status: originalEvidenceStatus } : {})
             },
             internal_info: {
                 ...internalWithoutEvidence,
-                policy_eligible: decision.policyEligible,
                 ...(originalEvidenceStatus ? { evidence_status: originalEvidenceStatus } : {}),
                 capture_decision: recordTurnMemoryDecisionFields(pending, decision, "accepted", updatedAt)
             }
@@ -545,17 +394,20 @@ function recordTurnMemoryDecision(memory, decision, status, updatedAt) {
     };
 }
 function recordTurnMemoryDecisionFields(pending, decision, status, updatedAt) {
+    const {
+        policy_eligible: _policyEligible,
+        create_user_memory: _createUserMemory,
+        user_memory_types: _userMemoryTypes,
+        user_memory_evidence: _userMemoryEvidence,
+        user_memory_action: _userMemoryAction,
+        matched_user_memory_id: _matchedUserMemoryId,
+        corrected_user_memory_content: _correctedUserMemoryContent,
+        ...rest
+    } = pending;
     return {
-        ...pending,
+        ...rest,
         status,
         create_l1: decision.createL1,
-        policy_eligible: decision.policyEligible,
-        create_user_memory: decision.createUserMemory,
-        user_memory_types: decision.userMemoryTypes,
-        user_memory_evidence: decision.userMemoryEvidence,
-        user_memory_action: decision.userMemoryAction,
-        matched_user_memory_id: decision.matchedUserMemoryId,
-        corrected_user_memory_content: decision.correctedUserMemoryContent,
         l1_evidence: decision.l1Evidence.map((item) => ({
             quote: item.quote,
             source_role: item.sourceRole,
@@ -567,17 +419,10 @@ function recordTurnMemoryDecisionFields(pending, decision, status, updatedAt) {
 }
 function constrainTurnMemoryDecision(decision, memory, trace) {
     const text = trace.userText.trim();
-    const evidenceTypes = decision.userMemoryEvidence.map((item) => item.type);
-    const userMemoryTypes = uniq(evidenceTypes);
     const dynamicCurrent = isDynamicCurrentFactQuery(text);
     const verifiedToolObservation = hasVerifiedDurableToolObservation(memory, trace, dynamicCurrent);
-    const createUserMemory = !dynamicCurrent && userMemoryTypes.length > 0 &&
-        decision.createUserMemory && decision.userMemoryEvidence.length > 0;
     let createL1 = decision.createL1 && decision.l1Evidence.length > 0;
     const guards = [];
-    if (decision.createUserMemory && decision.userMemoryEvidence.length === 0) {
-        guards.push("user-memory-evidence-missing");
-    }
     if (decision.createL1 && decision.l1Evidence.length === 0) {
         guards.push("l1-evidence-missing");
     }
@@ -589,33 +434,12 @@ function constrainTurnMemoryDecision(decision, memory, trace) {
         createL1 = true;
         guards.push("verified-tool-evidence");
     }
-    const policyEligible = isPolicyEligibleCapture(decision, createL1, verifiedToolObservation);
     return {
         ...decision,
         createL1,
         l1Summary: createL1 ? decision.l1Summary.trim() || fallbackTraceSummary(trace) : "",
-        policyEligible,
-        createUserMemory,
-        userMemoryTypes: createUserMemory ? userMemoryTypes : [],
-        userMemoryAction: createUserMemory ? decision.userMemoryAction : "none",
-        matchedUserMemoryId: createUserMemory ? decision.matchedUserMemoryId : undefined,
         reason: clip([decision.reason, guards.length > 0 ? `guards=${guards.join(",")}` : ""].filter(Boolean).join("; "), 300)
     };
-}
-function isPolicyEligibleCapture(decision, createL1, verifiedToolObservation) {
-    if (!createL1 || !decision.policyEligible)
-        return false;
-    return decision.l1Evidence.some((evidence) => {
-        if (evidence.sourceRole === "user" &&
-            (evidence.kind === "user_preference" ||
-                evidence.kind === "user_directive" ||
-                evidence.kind === "decision" ||
-                evidence.kind === "correction"))
-            return true;
-        if (evidence.kind !== "task_outcome")
-            return false;
-        return evidence.sourceRole === "user" || evidence.sourceRole === "tool" || verifiedToolObservation;
-    });
 }
 function hasVerifiedDurableToolObservation(memory, trace, dynamicCurrent) {
     if (dynamicCurrent || trace.toolCalls.length === 0)
@@ -629,21 +453,6 @@ function hasVerifiedDurableToolObservation(memory, trace, dynamicCurrent) {
 }
 function uniq(values) {
     return [...new Set(values)];
-}
-function userMemoryCaptureFromJob(job) {
-    const memoryId = Array.isArray(job.payload.capturedUserMemoryIds)
-        ? job.payload.capturedUserMemoryIds.find((id) => typeof id === "string" && id.length > 0)
-        : undefined;
-    if (!memoryId)
-        return undefined;
-    const corrected = job.payload.capturedUserMemoryAction === "corrected";
-    return {
-        action: corrected ? "corrected" : "created",
-        memoryId,
-        ...(corrected && typeof job.payload.capturedUserMemoryTargetId === "string"
-            ? { targetMemoryId: job.payload.capturedUserMemoryTargetId }
-            : {})
-    };
 }
 function fallbackImportSummary(trace, memory) {
     const title = stringFromRecord(memory.info, "title");

@@ -1,16 +1,21 @@
 /** Memory runtime module. */
 import { z } from "zod";
-import { L3WorldModelFeaturesSchema, L3WorldModelFieldsSchema, L3WorldModelRequestEnvelopeSchema } from "./memory-l3-world-model.js";
-import { L3WorldModelProtocolVersionSchema, L3WorldModelTransitionSchema, WorkspaceIdentityFieldsSchema, WorkspaceHostIdSchema, WorkspaceUriSchema } from "./memory-workspace-identity.js";
 /** Schema for iso time. */
 export const IsoTimeSchema = z.string().datetime();
 /** Schema for cursor. */
 export const CursorSchema = z.string();
 /** Schema for memory kind. */
-export const MemoryKindSchema = z.enum(["user_memory", "trace", "span", "policy", "world_model", "skill"]);
+export const MemoryKindSchema = z.enum([
+    "trace",
+    "span",
+    "timeline",
+    "project_profile",
+    "user_profile",
+    "skill"
+]);
 /** Schema for memory layer. */
-export const MemoryLayerSchema = z.enum(["L1", "L2", "L3", "Skill"]);
-export const RecallMemoryLayerSchema = z.enum(["UserMemory", "L1", "L2", "L3", "Skill"]);
+export const MemoryLayerSchema = z.enum(["L1", "L2", "L3", "L4", "Skill"]);
+export const RecallMemoryLayerSchema = z.enum(["L1", "L2", "L3", "L4", "Skill"]);
 /** Schema for memory status. */
 export const MemoryStatusSchema = z.enum(["activated", "resolving", "archived", "deleted"]);
 /** Schema for job status. */
@@ -19,18 +24,11 @@ export const JobStatusSchema = z.enum(["queued", "leased", "succeeded", "failed"
 export const JobTypeSchema = z.enum([
     "episode_idle_close",
     "trace_summary",
-    "user_memory_embedding",
     "import_summary",
     "reflection",
     "embedding",
     "reward",
     "span_big_turn",
-    "l2_association",
-    "l2_induction",
-    "l3_abstraction",
-    "l3_world_model_update",
-    "project_environment_profile",
-    "skill_crystallization",
     "skill_trial_resolve"
 ]);
 const NonEmptyStringSchema = z.string().min(1);
@@ -65,7 +63,7 @@ export const RecallHitSchema = z.object({
     source: z.enum(["search", "episode", "rule", "skill"]),
     sourceTurnId: z.string().optional(),
     memberMemoryIds: z.array(NonEmptyStringSchema).optional(),
-    retrievalRoutes: z.array(z.enum(["user_memory", "l1", "agent_memory"])).optional(),
+    retrievalRoutes: z.array(z.enum(["l1", "agent_memory"])).optional(),
     sourceAgentId: z.string().optional(),
     sourceSkillId: z.string().optional(),
     sourceSkillVersion: z.string().optional(),
@@ -78,7 +76,7 @@ export const RecallHitSchema = z.object({
         content: z.string(),
         createdAt: IsoTimeSchema,
         updatedAt: IsoTimeSchema,
-        retrievalRoute: z.enum(["user_memory", "l1", "agent_memory"])
+        retrievalRoute: z.enum(["l1", "agent_memory"])
     })).optional()
 });
 const MemoryCaptureDiagnosticsSchema = z.object({
@@ -86,15 +84,8 @@ const MemoryCaptureDiagnosticsSchema = z.object({
     decided_at: IsoTimeSchema.optional(),
     l1: z.array(z.object({
         memory_id: NonEmptyStringSchema,
-        written: z.boolean(),
-        policy_eligible: z.boolean()
-    })).optional(),
-    user_memory: z.object({
-        written: z.boolean(),
-        action: z.enum(["none", "created", "updated", "confirmed", "corrected"]),
-        memory_id: NonEmptyStringSchema.optional(),
-        target_memory_id: NonEmptyStringSchema.optional()
-    }).optional()
+        written: z.boolean()
+    })).optional()
 });
 export const RecallEvidenceOutputSchema = z.object({
     recallEventId: NonEmptyStringSchema,
@@ -153,17 +144,7 @@ export const MemoryListItemSchema = z.object({
     updatedAt: IsoTimeSchema,
     version: z.number().int().nonnegative()
 });
-export const WorldModelScopeSchema = z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("general") }).strict(),
-    z.object({
-        kind: z.literal("project"),
-        projectLabel: z.string().nullable(),
-        workspaceDisplayPath: z.string().nullable()
-    }).strict()
-]);
-export const PanelMemoryListItemSchema = MemoryListItemSchema.extend({
-    worldModelScope: WorldModelScopeSchema.optional()
-});
+export const PanelMemoryListItemSchema = MemoryListItemSchema;
 /** Definition for memory detail item. */
 export const MemoryDetailItemSchema = MemoryListItemSchema.extend({
     body: z.string(),
@@ -256,7 +237,6 @@ export const MemoryHealthSnapshotSchema = z.object({
         memoryLayers: z.array(MemoryLayerSchema),
         supportsCli: z.boolean()
     }),
-    features: L3WorldModelFeaturesSchema.optional(),
     models: MemoryModelsStatusSchema,
     serverTime: IsoTimeSchema
 });
@@ -270,37 +250,10 @@ export const MemoryReloadConfigOutputSchema = z.object({
     models: MemoryModelsStatusSchema,
     reloadedAt: IsoTimeSchema
 });
-const LegacyOpenSessionInputSchema = RuntimeRequestFieldsSchema.extend({
+export const OpenSessionInputSchema = RuntimeRequestFieldsSchema.extend({
     sessionId: NonEmptyStringSchema.optional(),
     workspacePath: z.string().optional()
 }).strict();
-const V2OpenSessionInputSchema = L3WorldModelRequestEnvelopeSchema.safeExtend({
-    sessionId: NonEmptyStringSchema.optional(),
-    l3WorldModelProtocolVersion: L3WorldModelProtocolVersionSchema,
-    l3WorldModelTransition: L3WorldModelTransitionSchema,
-    workspaceUri: WorkspaceUriSchema.optional(),
-    workspaceHostId: WorkspaceHostIdSchema.optional(),
-    meta: UnknownRecordSchema.optional()
-}).strict().superRefine((value, context) => {
-    const identity = WorkspaceIdentityFieldsSchema.safeParse({
-        workspaceUri: value.workspaceUri,
-        workspaceHostId: value.workspaceHostId
-    });
-    if (!identity.success) {
-        for (const issue of identity.error.issues) {
-            context.addIssue({ ...issue, path: issue.path });
-        }
-    }
-    if (!value.sessionId && (value.namespace.projectId || value.namespace.workspaceId)) {
-        context.addIssue({
-            code: "custom",
-            path: ["namespace", value.namespace.projectId ? "projectId" : "workspaceId"],
-            message: "new v2 sessions must derive project scope from workspace identity"
-        });
-    }
-});
-/** Definition for open session input. */
-export const OpenSessionInputSchema = z.union([V2OpenSessionInputSchema, LegacyOpenSessionInputSchema]);
 /** Schema for open session output. */
 export const OpenSessionOutputSchema = z.object({
     sessionId: NonEmptyStringSchema,
@@ -355,11 +308,7 @@ export const CompleteTurnInputSchema = RuntimeRequestFieldsSchema.extend({
     artifacts: z.array(z.unknown()).optional(),
     sourceMemoryIds: z.array(NonEmptyStringSchema).optional(),
     usage: z.record(z.string(), z.unknown()).optional(),
-    status: z.enum(["succeeded", "failed"]).optional(),
-    userMemoryCorrection: z.object({
-        targetMemoryId: NonEmptyStringSchema,
-        revisedContent: NonEmptyStringSchema
-    }).optional()
+    status: z.enum(["succeeded", "failed"]).optional()
 });
 /** Schema for complete turn output. */
 export const CompleteTurnOutputSchema = z.object({
@@ -367,8 +316,6 @@ export const CompleteTurnOutputSchema = z.object({
     sessionId: NonEmptyStringSchema,
     episodeId: NonEmptyStringSchema,
     rawTurnId: NonEmptyStringSchema,
-    userMemoryId: z.string().optional(),
-    userMemoryIds: z.array(NonEmptyStringSchema).optional(),
     l1MemoryId: z.string(),
     l1MemoryIds: z.array(NonEmptyStringSchema),
     closedEpisodeIds: z.array(NonEmptyStringSchema),
@@ -435,16 +382,6 @@ export const AddMemoryOutputSchema = z.object({
     serverTime: IsoTimeSchema,
     duplicate: z.boolean().optional()
 });
-const LegacyWorldModelDetailSchema = z.object({
-    sourceMemoryIds: z.array(NonEmptyStringSchema),
-    confidence: z.number().optional(),
-    summary: z.string().optional()
-}).strict();
-const V2WorldModelDetailSchema = L3WorldModelFieldsSchema.safeExtend({
-    schemaVersion: z.literal(2),
-    sourceMemoryIds: z.array(NonEmptyStringSchema),
-    summary: z.string().optional()
-}).strict();
 /** Schema for get memory output. */
 export const GetMemoryOutputSchema = z.object({
     item: MemoryDetailItemSchema.extend({
@@ -455,25 +392,13 @@ export const GetMemoryOutputSchema = z.object({
             turnId: NonEmptyStringSchema
         })
             .optional(),
-        policy: z
-            .object({
-            utilityScore: z.number().optional(),
-            confidence: z.number().optional(),
-            evidenceMemoryIds: z.array(NonEmptyStringSchema),
-            repairHints: z.array(z.string()).optional()
-        })
-            .optional(),
-        worldModel: z
-            .union([V2WorldModelDetailSchema, LegacyWorldModelDetailSchema])
-            .optional(),
         skill: z
             .object({
             invocationGuide: z.string(),
             retrievalBlurb: z.string().optional(),
             triggerContext: z.string().optional(),
             procedure: z.array(z.string()).optional(),
-            sourcePolicyIds: z.array(NonEmptyStringSchema),
-            sourceWorldModelIds: z.array(NonEmptyStringSchema),
+            sourceMemoryIds: z.array(NonEmptyStringSchema),
             reliabilityScore: z.number().optional(),
             utilityScore: z.number().optional(),
             evidenceCount: z.number().int().nonnegative().optional()
@@ -484,13 +409,6 @@ export const GetMemoryOutputSchema = z.object({
         .object({
         rawTurn: RawTurnSummarySchema.optional(),
         episode: EpisodeRefSchema.optional(),
-        policyLinks: z
-            .array(z.object({
-            policyMemoryId: NonEmptyStringSchema,
-            traceMemoryId: NonEmptyStringSchema,
-            relation: NonEmptyStringSchema
-        }))
-            .optional(),
         skillTrials: z
             .array(z.object({
             trialId: NonEmptyStringSchema,
@@ -607,10 +525,10 @@ export const PanelJobsInputSchema = z.object({
 export const PanelOverviewOutputSchema = z.object({
     counts: z.object({
         memories: z.number().int().nonnegative(),
-        userMemories: z.number().int().nonnegative().default(0),
         skills: z.number().int().nonnegative(),
-        experiences: z.number().int().nonnegative(),
-        worldModels: z.number().int().nonnegative()
+        timelines: z.number().int().nonnegative(),
+        projectProfiles: z.number().int().nonnegative(),
+        userProfiles: z.number().int().nonnegative()
     }),
     dailyActivity: z.array(z.object({
         date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),

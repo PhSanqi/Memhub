@@ -1,30 +1,26 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   addAccount,
-  importNormifyAccounts,
   listAccounts,
   resolveCloudflareAccount,
   setAccountRole
 } from "../dist/auth.js";
-import { importNormifyCloudflarePin } from "../dist/cloudflare.js";
 import { JsonConversationProjectBindingStore } from "../dist/binding-store.js";
 import { buildContextCapsule } from "../dist/context-capsule.js";
 import { ContextRouter } from "../dist/context-router.js";
 import { assertLoopbackMemoryEndpoint } from "../dist/local-memory-client.js";
+import { MemoryRestContextSource } from "../dist/memory-source.js";
 import { resolveProjectScope } from "../dist/project-scope.js";
 import { createDevice, normalizeCaptureEvent } from "../dist/capture.js";
-import { EmbeddedArchitectureSource } from "../dist/architecture-source.js";
 import { EmbeddedMemoryCore } from "../dist/embedded-memory-core.js";
 import { JsonProjectRegistry, projectSimilarity } from "../dist/project-registry.js";
-import { createNormifyRuntime } from "../vendor/normify/lib/generic.js";
 
 const root = await mkdtemp(join(tmpdir(), "memhub-core-"));
 const state = join(root, "state");
-const normify = join(root, "normify");
 
 try {
   assert.equal(resolveProjectScope({}).recallScope, "global_only");
@@ -48,48 +44,111 @@ try {
   assert.doesNotThrow(() => assertLoopbackMemoryEndpoint("http://[::1]:18960"));
   assert.throws(() => assertLoopbackMemoryEndpoint("https://memory.example.test"), /non-loopback/);
 
+  const fallbackSearches = [];
+  const fallbackSource = new MemoryRestContextSource({
+    async search(request) {
+      fallbackSearches.push(request.layers ?? []);
+      const layers = request.layers ?? [];
+      if (layers.length === 1 && layers[0] === "L1") {
+        return {
+          debug: {
+            hits: [{
+              id: "l1-bootstrap",
+              kind: "trace",
+              memoryLayer: "L1",
+              status: "activated",
+              title: "Bootstrap current truth",
+              snippet: "Project history remains available before the first L2 artifact exists.",
+              score: 0.9,
+              tags: ["project:aide"],
+              source: "search"
+            }]
+          }
+        };
+      }
+      return { debug: { hits: [] } };
+    }
+  });
+  const fallbackRecall = await fallbackSource.recall({
+    accountId: "acct",
+    userId: "user",
+    query: "current truth",
+    projectId: "aide",
+    projectStorageIds: ["aide"],
+    limit: 8,
+    reusableSkillProjectIds: []
+  });
+  assert.equal(fallbackRecall.projectMemory.length, 1);
+  assert.equal(fallbackRecall.projectMemory[0].provenance.memoryLayer, "L1");
+  assert.ok(fallbackSearches.some((layers) => layers.length === 2 && layers.includes("L2") && layers.includes("L3")));
+  assert.ok(fallbackSearches.some((layers) => layers.length === 1 && layers[0] === "L1"));
+
+  const layeredSource = new MemoryRestContextSource({
+    async search(request) {
+      const layers = request.layers ?? [];
+      if (layers.includes("L2")) {
+        return {
+          debug: {
+            hits: [{
+              id: "l2-current",
+              kind: "summary",
+              memoryLayer: "L2",
+              status: "activated",
+              snippet: "Canonical project timeline.",
+              score: 0.95,
+              tags: ["project:aide"],
+              source: "search"
+            }]
+          }
+        };
+      }
+      if (layers.length === 1 && layers[0] === "L1") throw new Error("L1 fallback must not run when L2/L3 exists");
+      return { debug: { hits: [] } };
+    }
+  });
+  const layeredRecall = await layeredSource.recall({
+    accountId: "acct",
+    userId: "user",
+    query: "current truth",
+    projectId: "aide",
+    projectStorageIds: ["aide"],
+    limit: 8,
+    reusableSkillProjectIds: []
+  });
+  assert.equal(layeredRecall.projectMemory.length, 1);
+  assert.equal(layeredRecall.projectMemory[0].provenance.memoryLayer, "L2");
+
+  const distillWrites = [];
+  const distillSource = new MemoryRestContextSource({
+    async addMemory(request) {
+      distillWrites.push(request);
+      return { id: "canonical-l2" };
+    }
+  });
+  const distillBase = {
+    accountId: "acct",
+    userId: "user",
+    kind: "l2",
+    projectId: "aide",
+    title: "Project Timeline · aide",
+    sourceHarness: "test",
+    artifactId: "project-timeline:aide",
+    evidenceRefs: ["l1:turn-1"],
+    contractVersion: "memhub-distill-v2"
+  };
+  await distillSource.distill({ ...distillBase, content: "timeline v1" });
+  await distillSource.distill({ ...distillBase, content: "timeline v2" });
+  await distillSource.distill({ ...distillBase, content: "timeline v2" });
+  assert.equal(distillWrites[0].sourceArtifactId, "project-timeline:aide");
+  assert.notEqual(distillWrites[0].requestId, distillWrites[1].requestId);
+  assert.equal(distillWrites[1].requestId, distillWrites[2].requestId);
+
   const embeddedMemory = new EmbeddedMemoryCore({
     stateRoot: join(root, "embedded-memory"),
     configPath: join(root, "embedded-memory", "config.yaml"),
     dbPath: join(root, "embedded-memory", "memory.sqlite")
   });
   assert.equal(existsSync(embeddedMemory.entrypoint), true);
-  const embeddedArchitecture = new EmbeddedArchitectureSource({ rootDir: normify });
-  assert.equal(existsSync(embeddedArchitecture.runtimeModule), true);
-  assert.match(
-    embeddedArchitecture.runtimeModule.replaceAll("\\", "/"),
-    /\/vendor\/normify\/lib\/generic\.js$/
-  );
-
-  const legacyArchitectureRoot = join(normify, "AIDE");
-  const legacyRuntime = createNormifyRuntime({ rootDir: legacyArchitectureRoot });
-  const initializedLegacy = await legacyRuntime.callTool("normify_project_init", {
-    project: "aide",
-    root: {
-      id: "aide",
-      name: { zh: "AIDE", en: "AIDE" },
-      description: {
-        zh: "用于验证 repo-local Normify 架构兼容回退。",
-        en: "Repo-local Normify compatibility fallback fixture."
-      }
-    }
-  });
-  assert.equal(initializedLegacy.ok, true);
-  const legacyProjects = await embeddedArchitecture.listProjects("acct-without-account-tree");
-  assert.ok(legacyProjects.includes("aide"));
-  const legacyBrief = await embeddedArchitecture.getProjectArchitecture({
-    accountId: "acct-without-account-tree",
-    projectId: "aide",
-    query: "current architecture"
-  });
-  assert.equal(legacyBrief.length, 1);
-  assert.equal(legacyBrief[0].provenance.architectureSource, "legacy-repo-local");
-  assert.deepEqual(await embeddedArchitecture.getProjectArchitecture({
-    accountId: "acct-without-account-tree",
-    projectId: "missing",
-    query: "current architecture"
-  }), []);
-
   const calls = [];
   const memory = {
     async recall(input) {
@@ -103,19 +162,13 @@ try {
     },
     async remember() { return { ok: true }; }
   };
-  const architecture = {
-    async listProjects() { return ["aide", "memmy"]; },
-    async getProjectArchitecture({ projectId }) {
-      return [{ id: "arch", content: projectId, authority: "authoritative", scope: "project", source: "normify", projectId }];
-    }
-  };
-  const router = new ContextRouter(memory, architecture, new JsonConversationProjectBindingStore(join(root, "bindings.json")));
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续 aide", conversationId: "chat" })).resolvedProjectId, "aide");
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续", conversationId: "chat" })).resolvedProjectId, "aide");
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "转到 memmy", conversationId: "chat" })).resolvedProjectId, "memmy");
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续", conversationId: "chat" })).resolvedProjectId, "memmy");
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "回 aide", conversationId: "chat", semanticProjectIds: ["aide"] })).resolvedProjectId, "aide");
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "转到 memmy", conversationId: "chat", projectId: "memmy" })).resolvedProjectId, "memmy");
+  const router = new ContextRouter(memory, new JsonConversationProjectBindingStore(join(root, "bindings.json")));
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续 aide", conversationId: "chat", knownProjectIds: ["aide", "memmy"] })).resolvedProjectId, "aide");
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续", conversationId: "chat", knownProjectIds: ["aide", "memmy"] })).resolvedProjectId, "aide");
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "转到 memmy", conversationId: "chat", knownProjectIds: ["aide", "memmy"] })).resolvedProjectId, "memmy");
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续", conversationId: "chat", knownProjectIds: ["aide", "memmy"] })).resolvedProjectId, "memmy");
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "回 aide", conversationId: "chat", semanticProjectIds: ["aide"], knownProjectIds: ["aide", "memmy"] })).resolvedProjectId, "aide");
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "转到 memmy", conversationId: "chat", projectId: "memmy", knownProjectIds: ["aide", "memmy"] })).resolvedProjectId, "memmy");
   assert.deepEqual(calls, ["aide", "aide", "memmy", "memmy", "aide", "memmy"]);
 
   const projectRegistry = new JsonProjectRegistry(join(state, "project-registry.json"));
@@ -157,15 +210,8 @@ try {
     },
     async remember() { return { ok: true }; }
   };
-  const aliasArchitecture = {
-    async listProjects() { return ["oursmemory", "OursMemory"]; },
-    async getProjectArchitecture({ projectId }) {
-      return [{ id: "arch-alias", content: projectId, authority: "authoritative", scope: "project", source: "normify", projectId }];
-    }
-  };
   const aliasRouter = new ContextRouter(
     aliasMemory,
-    aliasArchitecture,
     new JsonConversationProjectBindingStore(join(root, "alias-bindings.json")),
     projectRegistry
   );
@@ -197,32 +243,11 @@ try {
     host: "test",
     conversation_id: "conv",
     timestamp: "2026-09-18T08:00:00.000Z"
-  }), /requires user_text, assistant_text, or tool_summary/);
+  }), /requires user_text, assistant_text, reasoning_summary, or tool_summary/);
   const device = await createDevice(state, owner.account_id, "owner-laptop");
   const deviceStoreText = await readFile(join(state, "devices.json"), "utf8");
   assert.equal(deviceStoreText.includes(device.token), false);
   assert.match(deviceStoreText, /"token_hash":\s*"[a-f0-9]{64}"/);
-
-  await mkdir(join(normify, ".normify"), { recursive: true });
-  await writeFile(join(normify, ".normify", "accounts.json"), JSON.stringify({
-    version: 1,
-    accounts: {
-      friend: {
-        account_id: "stable-normify-account",
-        created_at: "2026-01-01T00:00:00.000Z",
-        cloudflare: { email: "friend@example.com" }
-      }
-    }
-  }));
-  await writeFile(join(normify, ".normify", "cloudflare-access.json"), JSON.stringify({
-    version: 1,
-    issuer: "https://unit-test.cloudflareaccess.com",
-    audience: "unit-test-audience"
-  }));
-  assert.equal((await importNormifyAccounts(state, normify)).imported, 1);
-  assert.deepEqual(await importNormifyCloudflarePin(state, normify), { imported: true, present: true });
-  assert.deepEqual(await importNormifyCloudflarePin(state, normify), { imported: false, present: true });
-  assert.equal((await listAccounts(state)).find((item) => item.username === "friend")?.account_id, "stable-normify-account");
 
   console.log("memhub-core-e2e: ok");
 } finally {

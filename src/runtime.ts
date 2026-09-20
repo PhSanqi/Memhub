@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
-  EmbeddedArchitectureSource,
+  FileProjectArchitectureSource,
   NullProjectArchitectureSource,
   type ProjectArchitectureSource
 } from "./architecture-source.js";
@@ -16,9 +16,9 @@ export interface MemhubRuntimeOptions {
   memoryEndpoint?: string;
   memoryToken?: string;
   bindingsPath?: string;
-  normifyRoot?: string;
+  architectureRoot?: string;
+  disableArchitecture?: boolean;
   projectRegistryPath?: string;
-  disableNormify?: boolean;
   ownerAccountId?: string;
   ownerUserId?: string;
   source?: MemhubSourceContext;
@@ -58,11 +58,19 @@ export function createMemhubRuntime(options: MemhubRuntimeOptions = {}): MemhubR
 
   const memoryClient = new LocalMemoryRestClient({ endpoint: memoryEndpoint, token: memoryToken });
   const memory = new MemoryRestContextSource(memoryClient);
-  const architecture = options.disableNormify || process.env.MEMHUB_NORMIFY === "0"
+  const architectureDisabled = options.disableArchitecture ||
+    process.env.MEMHUB_ARCHITECTURE === "0" ||
+    process.env.MEMHUB_NORMIFY === "0";
+  const architectureRoot = resolve(
+    options.architectureRoot ??
+    process.env.MEMHUB_ARCHITECTURE_ROOT ??
+    process.env.MEMHUB_NORMIFY_ROOT ??
+    process.cwd()
+  );
+  const architecture = architectureDisabled
     ? new NullProjectArchitectureSource()
-    : new EmbeddedArchitectureSource({
-      rootDir: resolve(options.normifyRoot ?? process.env.MEMHUB_NORMIFY_ROOT ?? process.cwd()),
-      runtimeModule: process.env.MEMHUB_ARCHITECTURE_RUNTIME
+    : new FileProjectArchitectureSource({
+      rootDir: architectureRoot
     });
   const bindings = new JsonConversationProjectBindingStore(bindingsPath);
   const projects = new JsonProjectRegistry(resolve(

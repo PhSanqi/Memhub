@@ -6,8 +6,6 @@ import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import {
   completeRuntimeTurn,
-  loadRuntimeL3,
-  notifyRuntimeBoundary,
   openRuntimeSession,
   startRuntimeTurn
 } from "./memmy-workspace-bridge.mjs";
@@ -28,7 +26,6 @@ export function apply(ctx, config = {}) {
   const captureJobs = new Map();
   const latestQueries = new Map();
   const currentTurns = new Map();
-  const pendingL3 = new Map();
 
   ctx.systemPrompt.section({
     name: "memmy-memory",
@@ -53,11 +50,6 @@ export function apply(ctx, config = {}) {
     try {
       const runtimeSession = await ensureSession(null, memorySessionIds, payload.agent.session);
       const sessionId = runtimeSession.sessionId;
-      if (!runtimeSession.l3Initialized) {
-        const loaded = await loadRuntimeL3(runtimeSession);
-        runtimeSession.l3Initialized = true;
-        if (loaded.additionalContext) pendingL3.set(String(payload.agent.session.id), loaded.additionalContext);
-      }
       const started = await startRuntimeTurn(
         runtimeSession,
         "deepseek-turn-" + hashText([sessionId, query, String(payload.turn)].join("\u0000")),
@@ -71,12 +63,10 @@ export function apply(ctx, config = {}) {
         query
       });
       const markdown = injectedMarkdown(started);
-      const l3 = pendingL3.get(String(payload.agent.session.id)) || "";
-      pendingL3.delete(String(payload.agent.session.id));
-      if (!markdown && !l3) return decision;
+      if (!markdown) return decision;
       const memory = createUserMessage({
         source: { kind: "plugin", plugin: name, form: "recall" },
-        content: [{ type: "text", text: [l3, markdown ? renderMemoryPacket(markdown, "turn_start", query) : ""].filter(Boolean).join("\n\n") }]
+        content: [{ type: "text", text: renderMemoryPacket(markdown, "turn_start", query) }]
       });
       return { ...decision, messages: insertAfterUserMessage(decision.messages, memory) };
     } catch (error) {
@@ -88,10 +78,7 @@ export function apply(ctx, config = {}) {
   ctx.on("session/event", async (session, event) => {
     const sessionKey = String(session.id);
     if (event.type === "compaction/end" && !(event.data && event.data.error)) {
-      const runtimeSession = await ensureSession(null, memorySessionIds, session);
-      await notifyRuntimeBoundary(runtimeSession, "token_compaction");
-      const loaded = await loadRuntimeL3(runtimeSession);
-      if (loaded.additionalContext) pendingL3.set(sessionKey, loaded.additionalContext);
+      await ensureSession(null, memorySessionIds, session);
       return;
     }
     if (event.type === "turn/start") {
@@ -170,12 +157,12 @@ export function apply(ctx, config = {}) {
 function registerTools(ctx, memmyConfigPath, memorySessionIds, latestQueries) {
   ctx.tools.register(defineTool({
     name: "memmy_memory_search",
-    description: "Search Memmy for relevant facts, preferences, policies, world models, and skills.",
+    description: "Search Memmy memory across L1 conversation history, L2 project timelines, L3 project profiles, L4 user profile, and Skills.",
     parameters: {
       query: { type: "string", required: true, description: "Search query" },
       layers: {
         type: "array",
-        items: { type: "string", enum: ["L1", "L2", "L3", "Skill"] },
+        items: { type: "string", enum: ["L1", "L2", "L3", "L4", "Skill"] },
         description: "Optional memory layers"
       }
     },
@@ -206,31 +193,6 @@ function registerTools(ctx, memmyConfigPath, memorySessionIds, latestQueries) {
     }
   }));
 
-  ctx.tools.register(defineTool({
-    name: "memmy_memory_add",
-    description: "Store an important fact, preference, decision, or task insight in Memmy.",
-    parameters: {
-      content: { type: "string", required: true, description: "Memory content to store" },
-      title: { type: "string", description: "Optional short title" },
-      tags: { type: "array", items: { type: "string" }, description: "Optional tags" },
-      layer: { type: "string", enum: ["L1", "L2", "L3", "Skill"], description: "Memory layer" }
-    },
-    output: textOutput(),
-    async execute(args, exec) {
-      const client = await createClient(memmyConfigPath);
-      const sessionId = exec.agent
-        ? (await ensureSession(client, memorySessionIds, exec.agent.session)).sessionId
-        : undefined;
-      const result = await client.post("/api/v1/memory/add", {
-        content: sanitizeProtocolText(args.content),
-        title: args.title,
-        tags: args.tags,
-        layer: args.layer || "L1",
-        sessionId
-      }, exec.signal);
-      return "Stored Memmy memory " + cleanText(result.id) + ": " + cleanText(result.summary);
-    }
-  }));
 }
 
 function textOutput() {
@@ -290,8 +252,7 @@ async function ensureSession(client, cache, session) {
     adapterId: "memmy-deepseek-harness-plugin",
     profileId: session.header.agentPreset || "main",
     sessionKey: "deepseek-harness-" + externalId,
-    workspaceRoot: session.header.cwd || null,
-    transition: "allow_legacy_rollover"
+    workspaceRoot: session.header.cwd || null
   });
   if (!opened) throw new Error("Memmy did not return a sessionId");
   cache.set(externalId, opened);

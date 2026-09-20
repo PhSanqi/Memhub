@@ -1,147 +1,167 @@
 # Memhub
 
-**给 AI Agent 使用的共享长期记忆，支持本地部署和服务器部署。**
-
 [English](README.md)
 
-Memhub 为支持 MCP 的 AI Agent 提供一个可以跨对话、跨项目、跨设备延续的长期记忆空间。它适合希望 Agent 真正记住重要上下文，同时又不想把每一句聊天都永久塞进记忆的人。
+Memhub 是一个面向 AI Harness 的私有、项目感知型长期记忆与上下文中心。Codex、Claude Code、ChatGPT 类远程 MCP、CoWorker 等客户端可以共享同一套长期记忆，而不要求所有客户端使用同一种接入机制。
 
-## 主要功能
+当前发布线：**v0.2.0**。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
-- **跨对话长期记忆**：长期事实、决定、偏好和纠正可以在后续任务中重新召回。
-- **全局记忆 + 项目记忆**：账号级上下文和项目级上下文分开管理，避免不同项目互相污染。
-- **跨 Agent、跨设备继续工作**：多个支持 MCP 的客户端可以接入同一套记忆。
-- **自动保存对话历史**：支持的 Host 集成可以自动保留完整轮次。
-- **手动蒸馏历史**：把长期积累的历史整理成连续、干净的综合记忆，而不是每次重复读取旧对话。
-- **提炼可复用 Skill**：把可重复执行的方法和流程单独沉淀为技能。
-- **项目上下文**：在长期记忆之外同步召回项目级上下文。
-- **网页管理**：用户页和管理员页面可以查看项目、设备、记忆和生命周期数据。
-- **Local / Server 两种部署模式**：既可以只在一台电脑上运行，也可以把记忆放在中央服务器供多设备使用。
+## 当前记忆模型
 
-## 四个版本
+Memhub 对外只暴露四层记忆，加一条正交的 Skill 层：
 
-| 版本 | 适合场景 | 平台 |
-| --- | --- | --- |
-| Local | 单机使用，不需要 VPS 或公网入口 | Linux |
-| Local | 单台 Windows 工作站 | Windows |
-| Server | 多设备、多 Agent 共用中央记忆 | Linux |
-| Server | 在 Windows 主机上运行中央记忆 | Windows |
+- **L1 — 原始对话**：保存用户/助手原始 turn，以及有限、可审计的 reasoning/tool summary。Raw Capture 与 Episode 只作为内部处理机制存在。
+- **L2 — 项目时间线**：把同一项目的 L1 整理成前后连续、可读的项目发展过程，包含状态变化、决策、被替代历史和 Current Truth。
+- **L3 — 项目规则与经验**：从 L2 中提取长期稳定的项目规则、偏好、工作方式和经验。
+- **L4 — 用户画像**：从多个项目的 L3 交叉总结稳定的跨项目个人特征与工作习惯。
+- **Skill**：可复用的可执行流程。Skill 不是更深一层记忆，可以是项目级，也可以显式跨项目复用。
 
-每个 Memhub 版本都会发布对应的四个 GitHub Release。
+L2/L3 必须是项目级；L4 必须是账号级。普通项目业务记忆不会静默泄漏到另一个项目。
 
-## 环境要求
+## 架构
 
-- Node.js 20 或更高版本，推荐 Node.js 22。
-- npm。
-- Linux 版本需要可用的 user-level systemd。
-- Windows 版本使用 Windows Task Scheduler 保持后台运行。
+```text
+AI Harness / Plugin / Remote MCP
+              |
+              v
+        Memhub Bridge
+      队列 + 设备凭据
+              |
+              v
+        Memhub Server
+   +----------------------+
+   | Context Router       |
+   | L1 Turn Log          |
+   | Distillation Jobs    |
+   | Memory Core          |
+   | Project Registry     |
+   | Architecture Reader  |
+   +----------------------+
+```
 
-## 安装
+架构读取器现在是 Memhub 内部的小型只读兼容层：它可以读取已有 `normify-<project>` 目录里的权威 Markdown 架构，但不再运行或 vendor 旧 Normify 引擎。新的配置名使用 `architecture-root`；`--normify-root` 仅作为旧 systemd/service 配置的 deprecated alias 保留，确保升级重启不会因参数失配直接失败。
 
-先下载与你的平台和部署模式对应的 Release，并解压。
+Memhub 同一套代码维护 Local / Server 两种 Edition：
 
-### Linux Local
+```text
+editions/
+├── local/
+│   ├── linux/
+│   └── windows/
+└── server/
+    ├── linux/
+    └── windows/
+```
+
+Local Edition 在单机运行 MCP、capture、SQLite 和处理流程。Server Edition 把服务器作为记忆源，各设备通过本地 Bridge 上传 turn。
+
+详见 [Edition 设计](docs/EDITIONS.md)。
+
+## MCP 工具面
+
+当前高层 MCP 只保留六个工具：
+
+- `memmy_turn`：打开、checkpoint、commit、resume L1 原始对话日志。
+- `memmy_context`：解析当前项目，并召回 L4、当前项目 L2/L3、可复用 Skills、最近 L1 continuity 和只读项目架构。
+- `memhub_distill`：领取或提交 L2/L3/L4/Skill 蒸馏任务。真正的语义整理由当前已登录 Harness/模型完成；Memhub 负责 evidence、scope、provenance 和 canonical artifact 校验。
+- `memmy_project_list`：列出/匹配 canonical project。
+- `memmy_project_manage`：通过 plan → 明确授权管理项目 create/update/delete/merge。
+- `memmy_project`：list/current/bind/unbind 项目上下文，并读取项目架构。
+
+`memmy_project action=current` 在 Harness 能提供稳定 `conversation_id` 时读取持久 conversation binding；如果某个 transport 拿不到稳定会话 ID，Memhub 不会伪造 ID，而是返回 `binding_available=false`，当前请求继续以 `memmy_context.resolvedProjectId` 和本轮明确的 project/workspace 证据为准。
+
+完成 L2 后可以继续排 L3；当至少两个项目已有完成的 L3 后，才会形成 L4 任务。Memhub 后端不会偷偷调用大模型。
+
+## Capture 与管理界面
+
+Capture 是 Host 能力，不是 MCP 的隐式副作用。Plugin/Hook 可以把完整或部分 turn 写入本地 Bridge；Bridge 先持久化队列，再在网络可用时上传。
+
+Web 路由：
+
+- `/memhub`：公开介绍页；
+- `/memhub/user`：认证后的用户工作区；
+- `/memhub/admin`：认证后的管理员 Control Plane。
+
+管理界面的产品层级固定为 Overview、Projects、L1、L2、L3、L4、Skills、Processing。Raw Capture 和 Episode 不作为管理层展示，只在内部处理。
+
+当前轮明确的项目/workspace 证据优先于旧 conversation binding；项目不明确时只返回 global 范围，避免串项目。
+
+## 数据迁移与维护
+
+当前 SQLite schema migration 为 v8。v7 → v8 会：
+
+- 把 durable memory layer 约束切换为 L1/L2/L3/L4/Skill；
+- 保留旧记录，并把旧模型下的 L2/L3 标记为 Legacy/archived，而不是删除；
+- archive 旧 `user_memories`；
+- dead-letter 已退役 evolution jobs；
+- 把 embedding retry target 映射到新的 artifact 名称。
+
+生产切换使用：
 
 ```bash
-tar -xzf memhub-v0.1.0-linux-local.tar.gz
-cd memhub-v0.1.0-linux-local
-bash editions/local/linux/install.sh
+npm run core:preflight
+npm run core:verify -- --manifest <manifest>
+npm run core:preserved -- --manifest <manifest>
 ```
 
-安装完成后，把 AI 客户端的 MCP 地址配置为：
+`core:preflight` 会检查 vendored runtime 完整性，并生成在线 SQLite 回滚快照。`core:preserved` 专门用于允许 schema 变化的 cutover：schema/version 变化只作为审计信息；真正强制的是 SQLite integrity、durable table 不丢失，以及 baseline 中每一个 durable row identity 都仍存在。
 
-```text
-http://127.0.0.1:17861/mcp
-```
-
-### Windows Local
-
-解压 `memhub-v0.1.0-windows-local.zip`，在解压目录打开 PowerShell：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\editions\local\windows\install.ps1
-```
-
-然后把 AI 客户端的 MCP 地址配置为：
-
-```text
-http://127.0.0.1:17861/mcp
-```
-
-### Linux Server
-
-解压 `memhub-v0.1.0-linux-server.tar.gz` 后运行：
-
-```bash
-cd memhub-v0.1.0-linux-server
-MEMHUB_PUBLIC_HOST=memory.example.com bash editions/server/linux/install.sh
-```
-
-Server Edition 默认只监听本机回环地址。对公网开放前，请把 `/memhub/*` 放在带身份认证的反向代理后面。
-
-对外的 MCP 地址通常是：
-
-```text
-https://memory.example.com/memhub/mcp
-```
-
-### Windows Server
-
-解压 `memhub-v0.1.0-windows-server.zip` 后运行：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\editions\server\windows\install.ps1 -PublicHost memory.example.com
-```
-
-同样建议只通过带身份认证的反向代理公开 `/memhub/*`。
-
-## 使用
-
-把 MCP 地址连接到 AI 客户端以后，Memhub 会提供用于以下工作的工具：
-
-- 召回相关长期上下文；
-- 写入长期有效的记忆；
-- 读取和维护项目记忆；
-- 手动整理长期历史；
-- 从历史中形成可复用 Skill；
-- 管理长期记忆的演进。
-
-为了获得更连续的体验，建议让 Agent 在每一轮有实际任务的对话开始时先读取 Memhub，上下文使用前先清理无关或过时噪声；任务结束时只写回真正长期有效的事实、决定、偏好和纠正，而不是把每一句聊天都当成长期记忆。
-
-### 项目路由与长期内容维护
-
-项目解析按“当前轮”进行，而不是把整个 conversation 永久锁死到一个项目。当前轮明确的项目、workspace 或唯一项目证据可以覆盖旧 conversation binding；旧 binding 只在本轮没有项目证据时兜底。业务记忆和 authoritative architecture 仍严格属于 primary project，其他项目只能通过独立 capability 通道复用明确的 Skill artifact。
-
-四个发行版都默认关闭 AgentSource 历史自动扫描；即使手动导入旧 AgentSource 历史，导入 trace 也不会再自动升级成长期 `user_memories`。
-
-长期内容维护采用只读优先：
+长期内容治理保持 read-first：
 
 ```bash
 npm run memory:audit
 npm run memory:repair
-npm run normify:audit
-npm run normify:migrate
 ```
 
-`memory:repair` 在改动长期状态前会先生成 SQLite 备份和 JSON report。没有可用 evolution model 时，L3 / Project Environment 任务保持 queued，不再消耗重试次数进入 dead-letter。
+`memory:repair` 在 apply 前生成在线备份和报告。
 
-### 网页入口
+详见 [Core 迁移](docs/CORE_MIGRATION.md)、[架构](docs/ARCHITECTURE.md)、[记忆 Scope](docs/EVOLUTION_SCOPES.md) 和 [Control Plane / Distillation](docs/CONTROL_PLANE_AND_DISTILLATION.md)。
 
-使用 Server Edition 时：
+## 源码安装
 
-- `/memhub`：项目介绍主页；
-- `/memhub/user`：认证后的用户工作区；
-- `/memhub/admin`：管理员 Control Plane。
+要求 Node.js 20+。
 
-## 致谢
+Local Linux：
 
-感谢以下开源项目：
+```bash
+bash editions/local/linux/install.sh
+```
 
-- [Memmy](https://github.com/MemTensor/memmy-agent)，[@MemTensor](https://github.com/MemTensor) —— 面向 AI Agent 的共享长期记忆项目。
-- [DSH-Normify](https://github.com/yan-mc/dsh-normify)，[@yan-mc](https://github.com/yan-mc) —— 项目架构与 Agent 工作流工具。
+Local Windows：
 
-第三方及 vendored 组件原有的许可证与版权声明应继续保留。
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Memhub\editions\local\windows\install.ps1
+```
 
-## 许可证
+Server Linux：
 
-MIT，详见 [LICENSE](LICENSE)。
+```bash
+MEMHUB_USERNAME=owner bash editions/server/linux/install.sh
+```
+
+Server Windows：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Memhub\editions\server\windows\install.ps1 -Username owner
+```
+
+Server Edition 默认只监听 loopback，不会自动创建 Cloudflare 配置。公网入口应继续放在 Cloudflare Access 等认证反代后；Memhub 自身的 device/account 鉴权仍然保留。
+
+## Release 安装包
+
+每个 v0.2.x Release 都从同一个源码 commit 生成四个 Edition/平台安装包：
+
+- `memhub-vX.Y.Z-linux-local.tar.gz`
+- `memhub-vX.Y.Z-linux-server.tar.gz`
+- `memhub-vX.Y.Z-windows-local.zip`
+- `memhub-vX.Y.Z-windows-server.zip`
+
+`SHA256SUMS.txt` 与 `release-manifest.json` 会把四个包绑定到同一个 commit。维护者可以用 `npm run release:check` 检查发布输入，用 `npm run release:package` 一次生成四个平台包。
+
+## 当前状态与上游
+
+Memhub 仍处于持续开发阶段。内嵌 Memory Core 来自开源 Memmy lineage，并作为 Memhub runtime boundary 的一部分维护。详见 [上游说明](docs/UPSTREAM.md)。
+
+## License
+
+见 [LICENSE](LICENSE)。

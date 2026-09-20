@@ -83,18 +83,6 @@ export class LocalMemoryRestClient {
     return this.request(`/api/v1/sessions/${encodeURIComponent(sessionId)}/close`, request);
   }
 
-  l3Boundary(sessionId: string, request: Record<string, unknown>): Promise<unknown> {
-    return this.request(`/api/v1/sessions/${encodeURIComponent(sessionId)}/l3-world-model-boundary`, request);
-  }
-
-  leaseExternalL3(request: Record<string, unknown>): Promise<unknown> {
-    return this.request("/api/v1/evolution/l3/lease", request);
-  }
-
-  submitExternalL3(jobId: string, request: Record<string, unknown>): Promise<unknown> {
-    return this.request(`/api/v1/evolution/l3/${encodeURIComponent(jobId)}/submit`, request);
-  }
-
   private async request(path: string, body: Record<string, unknown>): Promise<unknown> {
     return this.requestRaw(path, "POST", body);
   }

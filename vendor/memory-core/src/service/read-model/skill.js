@@ -47,8 +47,7 @@ export class SkillReadModel {
             name: skill?.name ?? detail.title,
             invocationGuide: skill?.invocationGuide ?? detail.body,
             procedure: this.deps.procedureFromSkillMemory(memory),
-            sourcePolicyIds: skill?.sourcePolicyIds ?? [],
-            sourceWorldModelIds: skill?.sourceWorldModelIds ?? [],
+            sourceMemoryIds: detail.sourceMemoryIds,
             evidenceAnchorIds: skill?.evidenceAnchorIds ?? [],
             reliability: {
                 eta: skill?.eta ?? 0,

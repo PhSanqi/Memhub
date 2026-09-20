@@ -146,21 +146,7 @@ export class EpisodeReadModel {
             const episode = episodeId ? this.deps.repos.runtime.getEpisode(episodeId) : undefined;
             return {
                 rawTurn: rawTurn ? this.deps.rawTurnSummary(rawTurn) : undefined,
-                episode: episode ? episodeRef(episode) : undefined,
-                policyLinks: this.deps.repos.runtime.listTracePolicyLinks({
-                    userId: memory.userId,
-                    l1MemoryId: memory.id,
-                    limit: 50
-                }).map(policyLinkRef)
-            };
-        }
-        if (memory.memoryLayer === "L2") {
-            return {
-                policyLinks: this.deps.repos.runtime.listTracePolicyLinks({
-                    userId: memory.userId,
-                    l2MemoryId: memory.id,
-                    limit: 100
-                }).map(policyLinkRef)
+                episode: episode ? episodeRef(episode) : undefined
             };
         }
         if (memory.memoryLayer === "Skill") {

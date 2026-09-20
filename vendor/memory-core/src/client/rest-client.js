@@ -1,4 +1,3 @@
-import { L3WorldModelBoundaryResponseSchema, L3WorldModelTraceHeadResponseSchema, SessionL3WorldModelContextResponseSchema, l3WorldModelGetTransport } from "../contracts/index.js";
 import { resolveTimeZone } from "../utils/time.js";
 import { assertMemoryNetworkTarget } from "../privacy/network-policy.js";
 export class MemoryRestClient {
@@ -27,20 +26,6 @@ export class MemoryRestClient {
     }
     closeSession(sessionId, request = {}) {
         return this.request("POST", `/api/v1/sessions/${encodeURIComponent(sessionId)}/close`, request);
-    }
-    async l3WorldModelTraceHead(sessionId, envelope) {
-        const transport = l3WorldModelGetTransport(envelope);
-        const payload = await this.request("GET", `/api/v1/sessions/${encodeURIComponent(sessionId)}/l3-world-model-trace-head${queryString(transport.query)}`, undefined, transport.headers);
-        return L3WorldModelTraceHeadResponseSchema.parse(payload);
-    }
-    async l3WorldModelBoundary(sessionId, request) {
-        const payload = await this.request("POST", `/api/v1/sessions/${encodeURIComponent(sessionId)}/l3-world-model-boundary`, request);
-        return L3WorldModelBoundaryResponseSchema.parse(payload);
-    }
-    async l3WorldModelContext(sessionId, envelope) {
-        const transport = l3WorldModelGetTransport(envelope);
-        const payload = await this.request("GET", `/api/v1/l3-world-model/sessions/${encodeURIComponent(sessionId)}/context${queryString(transport.query)}`, undefined, transport.headers);
-        return SessionL3WorldModelContextResponseSchema.parse(payload);
     }
     startTurn(request) {
         return this.request("POST", "/api/v1/turns/start", request);

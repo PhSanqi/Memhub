@@ -1,6 +1,6 @@
 {
   "name": "memhub",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -19,11 +19,11 @@
     "core:preserved": "node scripts/core-migration.mjs preserved",
     "memory:audit": "node scripts/long-term-repair.mjs",
     "memory:repair": "node scripts/long-term-repair.mjs --apply",
-    "normify:audit": "node scripts/normify-migration.mjs",
-    "normify:migrate": "node scripts/normify-migration.mjs --apply"
+    "release:check": "node scripts/package-release.mjs --check",
+    "release:package": "node scripts/package-release.mjs"
   },
   "dependencies": {
-    "@huggingface/transformers": "^3.8.0",
+    "@huggingface/transformers": "^4.3.0",
     "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
     "better-sqlite3": "^12.6.3",
@@ -42,6 +42,7 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.0.0",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^25.9.1"
   }
 }

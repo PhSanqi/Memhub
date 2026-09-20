@@ -120,7 +120,6 @@ export const DEFAULT_MEMMY_CONFIG = {
             valueDelta: 0.5,
             minLowValueThreshold: 0.01,
             useLlm: true,
-            attachToPolicy: true,
             cooldownMs: 60_000,
             traceCharCap: 500,
             evidenceLimit: 4
@@ -734,7 +733,6 @@ function normalizeAlgorithm(input) {
             valueDelta: numberValue(feedback.valueDelta, DEFAULT_MEMMY_CONFIG.algorithm.feedback.valueDelta),
             minLowValueThreshold: numberValue(feedback.minLowValueThreshold, DEFAULT_MEMMY_CONFIG.algorithm.feedback.minLowValueThreshold),
             useLlm: booleanValue(feedback.useLlm, DEFAULT_MEMMY_CONFIG.algorithm.feedback.useLlm),
-            attachToPolicy: booleanValue(feedback.attachToPolicy, DEFAULT_MEMMY_CONFIG.algorithm.feedback.attachToPolicy),
             cooldownMs: numberValue(feedback.cooldownMs, DEFAULT_MEMMY_CONFIG.algorithm.feedback.cooldownMs),
             traceCharCap: numberValue(feedback.traceCharCap, DEFAULT_MEMMY_CONFIG.algorithm.feedback.traceCharCap),
             evidenceLimit: numberValue(feedback.evidenceLimit, DEFAULT_MEMMY_CONFIG.algorithm.feedback.evidenceLimit)
@@ -835,12 +833,9 @@ function memoryDomainName(value, fallback) {
 }
 function readOnlyInjectionProfile(value, fallback) {
     const profile = optionalString(value);
-    if (profile === "all" ||
-        profile === "experience" ||
-        profile === "skill" ||
-        profile === "skill_experience") {
-        return profile;
-    }
+    if (profile === "experience") return "timeline";
+    if (profile === "skill_experience") return "skill_timeline";
+    if (profile === "all" || profile === "timeline" || profile === "skill" || profile === "skill_timeline") return profile;
     return fallback;
 }
 function skillOutputLanguageMode(value, fallback) {

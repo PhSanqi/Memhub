@@ -28,6 +28,15 @@ export function memoryAddKey(request, layer, title) {
             request.sourceSkillVersion ?? request.sourceContentHash ?? stableHash(request.content)
         ]).slice(0, 20)}`;
     }
+    if (request.sourceArtifactId?.trim()) {
+        return `artifact:${stableHash([
+            request.namespace?.tenantId ?? "",
+            request.namespace?.userId ?? "",
+            request.namespace?.projectId ?? "global",
+            layer,
+            request.sourceArtifactId.trim()
+        ]).slice(0, 32)}`;
+    }
     if (isAgentSourceImportMemoryAdd(request) && request.adapterId && request.turnId)
         return `memory.add:${request.adapterId}:turn:${request.turnId}`;
     if (request.adapterId && request.requestId)
