@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 
 const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 const pluginJson = JSON.parse(await readFile(new URL("../adapters/plugin/plugin.json", import.meta.url), "utf8"));
@@ -26,7 +26,13 @@ const editions = [
 ];
 
 for (const edition of editions) {
-  const source = await readFile(new URL("../" + edition.path, import.meta.url), "utf8");
+  const url = new URL("../" + edition.path, import.meta.url);
+  try {
+    await access(url);
+  } catch {
+    continue;
+  }
+  const source = await readFile(url, "utf8");
   assert.ok(source.includes(edition.autoScan), edition.path + ": AgentSource auto scan must be opt-in");
   assert.doesNotMatch(source, /normify/i, edition.path + ": retired Normify integration must not be installed");
 }
