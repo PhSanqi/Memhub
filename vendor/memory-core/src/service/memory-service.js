@@ -1020,6 +1020,9 @@ export class MemoryService {
     panelTasks(input) {
         return this.panelReadModel.panelTasks(this.withTimeZone(input));
     }
+    panelRawTurns(input = {}) {
+        return this.panelReadModel.panelRawTurns(this.withTimeZone(input));
+    }
     panelChanges(input = {}) {
         return this.panelReadModel.panelChanges(input);
     }

@@ -3,13 +3,20 @@ import { IMPORT_FAILED_TAG, IMPORT_INDEXING_TAG, IMPORT_STATUS_TAGS, IMPORT_SUMM
 import { panelDateKey, panelRoundDecimal } from "./model-costs.js";
 export function panelListItemFromMemory(item, memory, processing) {
     const spanGoal = panelSpanGoalForMemory(memory);
+    const internalInfo = isRecord(memory.properties.internal_info)
+        ? memory.properties.internal_info
+        : {};
+    const rawTurnId = typeof internalInfo.raw_turn_id === "string" && internalInfo.raw_turn_id.trim()
+        ? internalInfo.raw_turn_id.trim()
+        : undefined;
     return {
         ...item,
         processing,
         metadata: {
             ...(item.metadata ?? {}),
             source: panelSourceForMemory(memory),
-            ...(spanGoal ? { spanGoal } : {})
+            ...(spanGoal ? { spanGoal } : {}),
+            ...(rawTurnId ? { rawTurnId } : {})
         },
         tags: panelTagsForMemory(memory, processing)
     };

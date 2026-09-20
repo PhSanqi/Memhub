@@ -63,6 +63,7 @@ import {
   readMemoryControlData,
   type MemoryControlKind
 } from "./memory-control-plane.js";
+import { queueLegacyLayerRebuild } from "./legacy-rebuild.js";
 import { recentL1Continuity, upsertL1Turn } from "./turn-log.js";
 
 const VERSION = "0.2.0";
@@ -88,13 +89,13 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   });
 
   server.registerTool("memmy_turn", {
-    description: "L1 原始对话日志。Harness/Chat 在收到用户消息后先 action=open；需要时 action=checkpoint 写入简短、可公开审计的 reasoning/tool summary；最终回答前 action=commit 写入 assistant final。失败或截断用 failed/truncated。action=resume 可读取同一 continuity 的最近 L1，用于跨 chat、失败或截断后的续接。不要写隐藏 chain-of-thought。",
+    description: "L1 原始对话日志。Harness/Chat 在收到用户消息后先 action=open；需要时 action=checkpoint 写入简短、可公开审计的 reasoning/tool summary；最终回答前 action=commit 写入 assistant final。失败或截断用 failed/truncated。Harness 若没有稳定 conversation_id，不要伪造：Memhub 会为该单轮生成 event-scoped 内部 storage key，并禁止写 conversation binding；跨轮 resume 只有在提供稳定 continuity_id 或 conversation_id 时才可用。不要写隐藏 chain-of-thought。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
         action: { type: "string", enum: ["open", "checkpoint", "commit", "failed", "truncated", "resume"] },
         event_id: { type: "string", description: "open 返回的稳定 L1 event id；后续 checkpoint/commit 推荐原样回传" },
-        conversation_id: { type: "string", description: "当前 transport 会话/线程 ID" },
+        conversation_id: { type: "string", description: "当前 transport 会话/线程稳定 ID；transport 无法提供时省略，不要伪造" },
         continuity_id: { type: "string", description: "逻辑连续对话 ID；跨 Chat 续接时保持不变。省略则退化为 conversation_id。" },
         turn_id: { type: "string", description: "Harness 原生 turn id；有稳定 turn id 时可替代 event_id 做幂等定位" },
         previous_event_id: { type: "string", description: "显式前序 L1 event id" },
@@ -105,14 +106,16 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         tool_summary: { type: "string", description: "关键工具动作与结果摘要" },
         limit: { type: "integer", minimum: 1, maximum: 50 }
       },
-      required: ["action", "conversation_id"],
+      required: ["action"],
       additionalProperties: false
     } as JsonSchemaType)
   }, async (args) => {
     const action = requiredString(args.action, "action");
-    const conversationId = requiredString(args.conversation_id, "conversation_id");
-    const continuityId = optionalString(args.continuity_id) ?? conversationId;
+    const transportConversationId = optionalString(args.conversation_id);
+    const requestedContinuityId = optionalString(args.continuity_id);
     if (action === "resume") {
+      const continuityId = requestedContinuityId ?? transportConversationId;
+      if (!continuityId) throw new TypeError("resume requires continuity_id or conversation_id");
       const turns = await recentL1Continuity({
         stateRoot,
         accountId: runtime.accountId,
@@ -149,6 +152,22 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     }
     if (action === "commit" && !assistantText) throw new TypeError("commit requires assistant_text");
 
+    const stableEventId = eventId ?? (
+      action === "open" && !turnId
+        ? `l1_${randomUUID().replaceAll("-", "")}`
+        : undefined
+    );
+    const syntheticConversationId = transportConversationId
+      ? undefined
+      : stableEventId
+        ? `memhub-unbound:${stableEventId}`
+        : turnId
+          ? `memhub-unbound-turn:${turnId}`
+          : undefined;
+    const conversationId = transportConversationId ?? syntheticConversationId;
+    if (!conversationId) throw new TypeError(`${action} requires conversation_id, event_id, or turn_id`);
+    const continuityId = requestedContinuityId ?? conversationId;
+
     const status =
       action === "commit" ? "complete" :
       action === "failed" ? "failed" :
@@ -160,8 +179,9 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       runtime,
       actorId: `mcp:${runtime.source.transport}`,
       actorName: runtime.source.platform,
+      bindConversation: Boolean(transportConversationId),
       turn: {
-        ...(eventId ? { event_id: eventId } : {}),
+        ...(stableEventId ? { event_id: stableEventId } : {}),
         host: runtime.source.platform,
         conversation_id: conversationId,
         continuity_id: continuityId,
@@ -177,11 +197,17 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
           platform: runtime.source.platform,
           transport: runtime.source.transport,
           principal: runtime.source.principalId,
-          connection: runtime.source.connectionId
+          connection: runtime.source.connectionId,
+          transport_conversation_id_available: Boolean(transportConversationId),
+          conversation_binding: Boolean(transportConversationId)
         }
       }
     });
-    return jsonResult(result);
+    return jsonResult({
+      ...result,
+      binding_available: Boolean(transportConversationId),
+      transport_conversation_id: transportConversationId ?? null
+    });
   });
 
   server.registerTool("memmy_context", {
@@ -286,7 +312,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   });
 
   server.registerTool("memhub_distill", {
-    description: "统一的 L2/L3/L4/Skill 蒸馏入口。L2=项目发展时间线，L3=项目内用户长期规则/经验/偏好，L4=跨项目用户画像，Skill=正交的可执行流程。语义整理由当前 Harness 模型完成；Memhub 负责证据边界、scope、版本、provenance 与提交。",
+    description: "统一的 L2/L3/L4/Skill 蒸馏入口。L2=项目发展时间线，并可同时产出 evidence-backed project_description；L3=项目内用户长期规则/经验/偏好，L4=跨项目用户画像，Skill=正交的可执行流程。语义整理由当前 Harness 模型完成；Memhub 负责证据边界、scope、版本、provenance 与提交。人工项目描述优先于蒸馏描述。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
@@ -301,6 +327,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         source_harness: { type: "string", description: "产生该沉淀的 Harness，例如 codex / claude-code" },
         artifact_id: { type: "string", description: "可覆盖默认 canonical artifact id；通常无需填写" },
         version: { type: "string", description: "Harness 侧产物版本；主要用于 Skill" }
+        ,project_description: { type: "string", description: "L2 可附带 1-3 句项目描述，概括目标、范围与当前重点；必须来自同一批证据。人工描述存在时不会被覆盖。" }
         ,evidence_refs: { type: "array", items: { type: "string" }, description: "支持该产物的 Memory/RawTurn/Episode 等稳定引用" }
         ,source_conversations: { type: "array", items: { type: "string" }, description: "产物来源对话 ID；与 distilled_by 分开保存" }
         ,confidence: { type: "number", minimum: 0, maximum: 1 }
@@ -388,6 +415,9 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     ]);
     const confidence = optionalNumber(args.confidence);
     const content = requiredString(args.content, "content");
+    const projectDescription = optionalString(args.project_description);
+    if (projectDescription && kind !== "l2") throw new TypeError("project_description is only valid for L2 distillation");
+    if (projectDescription && projectDescription.length > 1200) throw new TypeError("project_description must be at most 1200 characters");
     validateDistillationCandidate({
       kind,
       content,
@@ -458,6 +488,14 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
           authenticated_account: runtime.source.authenticatedAccount
         }
       });
+      if (kind === "l2" && projectId && projectDescription) {
+        await runtime.projects.updateDistilledDescription(
+          runtime.accountId,
+          projectId,
+          projectDescription,
+          evidenceRefs ?? []
+        );
+      }
     } catch (error) {
       if (jobId) {
         await failDistillationJob(
@@ -1387,6 +1425,28 @@ async function serveHttp(
             response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, config }));
             return;
           }
+          if (action === "queue-legacy-rebuild") {
+            if (!adminView) { response.writeHead(403).end(); return; }
+            const projectRef = optionalString(body.project);
+            let projectId: string | undefined;
+            if (projectRef) {
+              await knownProjectRecords(runtime);
+              projectId = await runtime.projects.resolve(runtime.accountId, projectRef) ?? undefined;
+              if (!projectId) {
+                response.writeHead(404, { "content-type": "application/json" })
+                  .end(JSON.stringify({ error: "project_not_found" }));
+                return;
+              }
+            }
+            const rebuild = await queueLegacyLayerRebuild({
+              stateRoot: options.stateRoot,
+              runtime,
+              ...(projectId ? { projectId } : {})
+            });
+            response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" })
+              .end(JSON.stringify({ ok: true, rebuild }));
+            return;
+          }
           if (action === "set-account-role") {
             if (!adminView) { response.writeHead(403).end(); return; }
             const accountRef = optionalString(body.id);
@@ -1795,7 +1855,7 @@ function renderConsole(input: {
   const projectSelect = `<label class="console-select"><span data-zh="项目" data-en="Project">项目</span><select id="project-select"><option value="" data-zh="全部项目" data-en="All projects">全部项目</option>${input.projects.map((project) => `<option value="${e(project.projectId)}">${e(project.name || project.projectId)}</option>`).join("")}</select></label>`;
   const accountButton = input.adminView ? '<button data-view="accounts">♙ <span data-zh="账号" data-en="Accounts">账号</span></button>' : "";
   const title = input.adminView ? "Memhub Control Plane" : "Memhub Workspace";
-  return `<!doctype html><html lang="zh-CN" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><title>${title}</title><style>${consoleCss()}${themeCss()}${webUiCss()}</style></head><body class="admin-body memory-console-body"><header class="site-header"><a class="site-brand" href="/memhub"><span class="site-mark">M</span><span>Memhub</span></a><nav>${nav}<span class="account-chip">${accountLabel}</span><div class="ui-controls"><button id="theme-toggle" class="ui-toggle" type="button">亮色</button><button id="lang" class="ui-toggle" type="button">EN</button></div>${logoutLink}</nav></header><main class="admin-main"><div class="admin-shell"><aside class="console-sidebar"><div class="brand"><span>MEMHUB</span><strong>${input.adminView ? "Control Plane" : "Workspace"}</strong></div><div class="nav-group"><small data-zh="工作区" data-en="Workspace">工作区</small><button data-view="overview"><b>◫</b><span data-zh="总览" data-en="Overview">总览</span></button><button data-view="projects"><b>▦</b><span data-zh="项目" data-en="Projects">项目</span></button></div><div class="nav-group"><small data-zh="记忆层" data-en="Memory layers">记忆层</small><button data-view="l1"><b>01</b><span data-zh="L1 原始对话" data-en="L1 Conversation Log">L1 原始对话</span></button><button data-view="l2"><b>02</b><span data-zh="L2 项目时间线" data-en="L2 Project Timeline">L2 项目时间线</span></button><button data-view="l3"><b>03</b><span data-zh="L3 项目规则" data-en="L3 Project Rules">L3 项目规则</span></button><button data-view="l4"><b>04</b><span data-zh="L4 用户画像" data-en="L4 User Profile">L4 用户画像</span></button></div><div class="nav-group"><small data-zh="运行" data-en="Operations">运行</small><button data-view="skills"><b>✦</b><span data-zh="Skills" data-en="Skills">Skills</span></button><button data-view="processing"><b>⌬</b><span data-zh="处理队列" data-en="Processing">处理队列</span></button>${accountButton}</div><div class="aside-foot"><span class="boundary-dot"></span>${e(authBoundary)}<br><small data-zh="身份边界" data-en="Identity boundary">身份边界</small></div></aside><div class="console"><div class="hero"><div><div class="hero-kicker"><small data-zh="MEMORY CONTROL PLANE" data-en="MEMORY CONTROL PLANE">MEMORY CONTROL PLANE</small><span>v2</span></div><h1>${input.adminView ? '<span data-zh="长期记忆控制台" data-en="Memory control plane">长期记忆控制台</span>' : '<span data-zh="我的长期记忆" data-en="My long-term memory">我的长期记忆</span>'}</h1><p data-zh="把原始对话、项目发展、长期规则和跨项目画像放在同一条可追溯链路里。" data-en="One traceable chain from source conversations to project history, durable rules, and cross-project profile.">把原始对话、项目发展、长期规则和跨项目画像放在同一条可追溯链路里。</p></div><div class="hero-actions">${accountSelect}${projectSelect}</div></div><div id="memory-flow" class="memory-flow" aria-label="Memory lifecycle"><button type="button" data-view-target="l1"><span>01</span><div><b>L1</b><small data-zh="原始对话" data-en="Source turns">原始对话</small></div><em id="flow-count-l1">—</em></button><i>→</i><button type="button" data-view-target="l2"><span>02</span><div><b>L2</b><small data-zh="项目时间线" data-en="Project timeline">项目时间线</small></div><em id="flow-count-l2">—</em></button><i>→</i><button type="button" data-view-target="l3"><span>03</span><div><b>L3</b><small data-zh="规则与经验" data-en="Rules & experience">规则与经验</small></div><em id="flow-count-l3">—</em></button><i>→</i><button type="button" data-view-target="l4"><span>04</span><div><b>L4</b><small data-zh="用户画像" data-en="User profile">用户画像</small></div><em id="flow-count-l4">—</em></button></div><div id="data-panel" class="panel"><div class="panel-head"><div><div class="panel-eyebrow" id="view-eyebrow">OVERVIEW</div><h2 id="view-title">总览</h2><p id="view-desc" class="muted" aria-live="polite"></p></div><div class="admin-toolbar"><input id="filter" type="search" aria-label="Search current view" placeholder="搜索"><button id="primary-action" class="primary-action hidden" type="button">＋</button><button id="refresh" class="soft" type="button">↻ 刷新</button></div></div><div id="cards" class="stats"></div><div id="items" class="items" aria-live="polite"></div></div></div></div></main><div id="drawer" class="drawer hidden" role="dialog" aria-modal="true" aria-hidden="true"><button class="drawer-close" type="button" aria-label="Close detail" onclick="closeDrawer()">×</button><div id="drawer-body"></div></div><div id="toast" class="toast hidden" role="status" aria-live="polite"></div><script>${consoleScript(input.adminView)}</script></body></html>`;
+  return `<!doctype html><html lang="zh-CN" data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>${title}</title><style>${consoleCss()}${themeCss()}${webUiCss()}</style></head><body class="admin-body memory-console-body"><header class="site-header"><a class="site-brand" href="/memhub"><span class="site-mark">M</span><span>Memhub</span></a><nav>${nav}<span class="account-chip">${accountLabel}</span><div class="ui-controls"><button id="theme-toggle" class="ui-toggle" type="button">亮色</button><button id="lang" class="ui-toggle" type="button">EN</button></div>${logoutLink}</nav></header><main class="admin-main"><div class="admin-shell"><aside class="console-sidebar"><div class="brand"><span>MEMHUB</span><strong>${input.adminView ? "Control Plane" : "Workspace"}</strong></div><div class="nav-group"><small data-zh="工作区" data-en="Workspace">工作区</small><button data-view="overview"><b>◫</b><span data-zh="总览" data-en="Overview">总览</span></button><button data-view="projects"><b>▦</b><span data-zh="项目" data-en="Projects">项目</span></button></div><div class="nav-group"><small data-zh="记忆层" data-en="Memory layers">记忆层</small><button data-view="l1"><b>01</b><span data-zh="L1 原始对话" data-en="L1 Conversation Log">L1 原始对话</span></button><button data-view="l2"><b>02</b><span data-zh="L2 项目时间线" data-en="L2 Project Timeline">L2 项目时间线</span></button><button data-view="l3"><b>03</b><span data-zh="L3 项目规则" data-en="L3 Project Rules">L3 项目规则</span></button><button data-view="l4"><b>04</b><span data-zh="L4 用户画像" data-en="L4 User Profile">L4 用户画像</span></button></div><div class="nav-group"><small data-zh="运行" data-en="Operations">运行</small><button data-view="skills"><b>✦</b><span data-zh="Skills" data-en="Skills">Skills</span></button><button data-view="processing"><b>⌬</b><span data-zh="处理队列" data-en="Processing">处理队列</span></button>${accountButton}</div><div class="aside-foot"><span class="boundary-dot"></span>${e(authBoundary)}<br><small data-zh="身份边界" data-en="Identity boundary">身份边界</small></div></aside><div class="console"><div class="hero"><div><div class="hero-kicker"><small data-zh="MEMORY CONTROL PLANE" data-en="MEMORY CONTROL PLANE">MEMORY CONTROL PLANE</small><span>v2</span></div><h1>${input.adminView ? '<span data-zh="长期记忆控制台" data-en="Memory control plane">长期记忆控制台</span>' : '<span data-zh="我的长期记忆" data-en="My long-term memory">我的长期记忆</span>'}</h1><p data-zh="把原始对话、项目发展、长期规则和跨项目画像放在同一条可追溯链路里。" data-en="One traceable chain from source conversations to project history, durable rules, and cross-project profile.">把原始对话、项目发展、长期规则和跨项目画像放在同一条可追溯链路里。</p></div><div class="hero-actions">${accountSelect}${projectSelect}</div></div><div id="memory-flow" class="memory-flow" aria-label="Memory lifecycle"><button type="button" data-view-target="l1"><span>01</span><div><b>L1</b><small data-zh="原始对话" data-en="Source turns">原始对话</small></div><em id="flow-count-l1">—</em></button><i>→</i><button type="button" data-view-target="l2"><span>02</span><div><b>L2</b><small data-zh="项目时间线" data-en="Project timeline">项目时间线</small></div><em id="flow-count-l2">—</em></button><i>→</i><button type="button" data-view-target="l3"><span>03</span><div><b>L3</b><small data-zh="规则与经验" data-en="Rules & experience">规则与经验</small></div><em id="flow-count-l3">—</em></button><i>→</i><button type="button" data-view-target="l4"><span>04</span><div><b>L4</b><small data-zh="用户画像" data-en="User profile">用户画像</small></div><em id="flow-count-l4">—</em></button></div><div id="data-panel" class="panel"><div class="panel-head"><div><div class="panel-eyebrow" id="view-eyebrow">OVERVIEW</div><h2 id="view-title">总览</h2><p id="view-desc" class="muted" aria-live="polite"></p></div><div class="admin-toolbar"><input id="filter" type="search" aria-label="Search current view" placeholder="搜索"><button id="primary-action" class="primary-action hidden" type="button">＋</button><button id="refresh" class="soft" type="button">↻ 刷新</button></div></div><div id="cards" class="stats"></div><div id="items" class="items" aria-live="polite"></div></div></div></div></main><div id="drawer" class="drawer hidden" role="dialog" aria-modal="true" aria-hidden="true"><button class="drawer-close" type="button" aria-label="Close detail" onclick="closeDrawer()">×</button><div id="drawer-body"></div></div><div id="toast" class="toast hidden" role="status" aria-live="polite"></div><script>${consoleScript(input.adminView)}</script></body></html>`;
 }
 
 
@@ -1989,13 +2049,14 @@ const titles={overview:['总览','Overview'],projects:['项目','Projects'],l1:[
 const descriptions={overview:['从原始对话到跨项目画像的完整状态。','Status across the full path from source turns to cross-project profile.'],projects:['项目是 L2/L3 的边界，也是记忆路由的主上下文。','Projects define L2/L3 boundaries and primary memory routing context.'],l1:['保留原始连续对话；Episode 只作为内部接续机制。','Source conversation evidence. Episodes remain an internal stitching mechanism.'],l2:['按项目整理的发展时间线，保留决策、状态变化与被替代历史。','Project chronology with decisions, state changes, and superseded history.'],l3:['从项目时间线提炼出的长期规则、偏好、经验与工作方式。','Durable project rules, preferences, experience, and working habits distilled from L2.'],l4:['跨多个项目 L3 总结出的稳定用户画像。','Stable cross-project profile derived from multiple project L3 artifacts.'],skills:['可复用的执行能力，与 L1-L4 记忆层正交。','Reusable executable procedures, orthogonal to the L1-L4 memory hierarchy.'],processing:['查看蒸馏队列，并在管理员视图中配置自动蒸馏策略。','Inspect distillation jobs and configure automatic distillation in Admin.'],accounts:['账号角色与当前治理边界。','Account roles and governance boundary.']};
 const eyebrows={overview:'SYSTEM',projects:'ROUTING',l1:'SOURCE',l2:'PROJECT MEMORY',l3:'DURABLE RULES',l4:'CROSS-PROJECT',skills:'CAPABILITIES',processing:'PIPELINE',accounts:'ACCESS'};
 let lang=localStorage.memhubLang||((navigator.language||'').toLowerCase().startsWith('zh')?'zh':'en');
-let theme=localStorage.memhubTheme||'dark',current='overview',payload=null,controller=null,requestSeq=0,overviewCounts={};
+let theme=localStorage.memhubTheme||'light',current='overview',payload=null,controller=null,requestSeq=0,overviewCounts={};
 const filterInput=document.getElementById('filter'),projectSelect=document.getElementById('project-select'),accountSelect=document.getElementById('account-select'),primaryAction=document.getElementById('primary-action');
 function esc(v){return String(v??'').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]))}
+function fmtTime(v){if(!v)return'';const d=new Date(v);if(Number.isNaN(d.getTime()))return String(v);return new Intl.DateTimeFormat(lang==='zh'?'zh-CN':'en-US',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(d)}
 function tr(){document.documentElement.lang=lang==='zh'?'zh-CN':'en';document.documentElement.dataset.theme=theme;document.querySelectorAll('[data-zh][data-en]').forEach(x=>x.textContent=x.dataset[lang]||x.textContent);document.getElementById('lang').textContent=lang==='zh'?'EN':'中文';document.getElementById('theme-toggle').textContent=theme==='dark'?(lang==='zh'?'亮色':'Light'):(lang==='zh'?'暗色':'Dark');filterInput.placeholder=lang==='zh'?'搜索当前视图':'Search current view';document.getElementById('refresh').textContent=lang==='zh'?'↻ 刷新':'↻ Refresh';updateToolbar();renderCurrent()}
 function query(kind){const q=new URLSearchParams({kind});if(ADMIN&&accountSelect?.value)q.set('account_id',accountSelect.value);if(projectSelect?.value)q.set('project',projectSelect.value);return API+'?'+q.toString()}
 function values(data){if(!data||typeof data!=='object')return[];for(const key of ['items','tasks','memories','skills','records'])if(Array.isArray(data[key]))return data[key];return[]}
-function textOf(x){if(current==='l1')return [x.user_text,x.assistant_text,x.reasoning_summary,x.tool_summary].filter(Boolean).join('\\n→ ');if(current==='processing')return (x.target||'').toUpperCase()+' · '+(x.project_id||'account')+'\\n'+(x.evidence_refs||[]).length+' evidence';return x.summary||x.snippet||x.content||x.description||x.title||x.text||JSON.stringify(x)}
+function textOf(x){if(current==='l1'){if(x.source_kind==='memory-core')return[x.title,x.summary].filter(Boolean).join('\\n');if(x.source_kind==='raw-turn')return[x.userText,x.assistantText,x.reasoningSummary].filter(Boolean).join('\\n→ ');return[x.user_text,x.assistant_text,x.reasoning_summary,x.tool_summary].filter(Boolean).join('\\n→ ')}if(current==='processing')return (x.target||'').toUpperCase()+' · '+(x.project_id||'account')+'\\n'+(x.evidence_refs||[]).length+' evidence';return x.summary||x.snippet||x.content||x.description||x.title||x.text||JSON.stringify(x)}
 function itemId(x){return x.id||x.event_id||x.job_id||x.memoryId||x.skillId||x.project_id||x.account_id||''}
 function statusOf(x){return x.status||x.capture_status||x.state||''}
 function renderOverview(){const c=payload?.counts||{};const specs=[['projects','▦','项目','Projects',c.projects],['l1','01','L1 原始对话','L1 Conversation Log',c.L1],['l2','02','L2 项目时间线','L2 Project Timeline',c.L2],['l3','03','L3 项目规则与经验','L3 Project Rules & Experience',c.L3],['l4','04','L4 用户画像','L4 User Profile',c.L4],['skills','✦','Skills','Skills',c.Skill],['processing','⌬','处理队列','Processing',(payload?.processing?.pending||0)+(payload?.processing?.leased||0)]];const box=document.getElementById('items');box.className='items overview-grid';box.innerHTML=specs.map(s=>'<button type="button" class="overview-card" data-view-target="'+s[0]+'"><span>'+s[1]+'</span><div><b>'+(lang==='zh'?s[2]:s[3])+'</b><small>'+esc(s[4]??0)+' '+(lang==='zh'?'条':'items')+'</small></div><i>→</i></button>').join('');box.querySelectorAll('[data-view-target]').forEach(b=>b.onclick=()=>load(b.dataset.viewTarget))}
@@ -2004,9 +2065,9 @@ function renderFlow(){const map={l1:'L1',l2:'L2',l3:'L3',l4:'L4'};Object.entries
 function renderStats(data,items){const c=data?.counts||{};if(current==='overview'){const order=['projects','L1','L2','L3','L4','Skill'];document.getElementById('cards').innerHTML=order.map(k=>'<article><b>'+esc(c[k]??0)+'</b><span>'+esc(k)+'</span></article>').join('');return}const total=data?.total??items.length;const active=items.filter(x=>['pending','leased','open','partial','activated','active'].includes(statusOf(x))).length;const failed=items.filter(x=>statusOf(x)==='failed'||statusOf(x)==='truncated').length;document.getElementById('cards').innerHTML='<article><b>'+esc(total)+'</b><span>'+(lang==='zh'?'总计':'Total')+'</span></article><article><b>'+active+'</b><span>'+(lang==='zh'?'活跃 / 处理中':'Active / running')+'</span></article><article><b>'+failed+'</b><span>'+(lang==='zh'?'异常':'Exceptions')+'</span></article>'}
 function emptyState(){const zh={l2:['还没有新的 L2 时间线','完成 L1 蒸馏后，项目的发展过程会在这里形成可读时间线。'],l3:['还没有新的 L3 项目规则','L2 稳定后，这里会沉淀长期规则、偏好、经验与工作方式。'],l4:['还没有新的 L4 用户画像','至少多个项目形成 L3 后，才会生成跨项目稳定画像。'],skills:['还没有可复用 Skill','Skill 独立于 L1-L4，可由稳定流程和经验演化而来。'],processing:['当前没有蒸馏任务','新的 L1 证据达到阈值或空闲条件后会进入队列。']}[current]||['暂无数据','当前视图没有匹配内容。'];const en={l2:['No L2 timeline yet','Project chronology appears here after valid L1 distillation.'],l3:['No L3 project rules yet','Durable rules, preferences, experience, and working habits appear after L2 stabilizes.'],l4:['No L4 user profile yet','Cross-project traits require supported L3 evidence from multiple projects.'],skills:['No reusable Skills yet','Skills evolve independently from stable procedures and experience.'],processing:['No distillation jobs','New jobs appear when L1 evidence reaches the configured threshold or idle condition.']}[current]||['No data','There is no content matching this view.'];const copy=lang==='zh'?zh:en;return '<div class="empty-state"><span>'+esc(eyebrows[current]||'EMPTY')+'</span><h3>'+esc(copy[0])+'</h3><p>'+esc(copy[1])+'</p>'+(current!=='processing'?'<button class="soft" type="button" onclick="load(\\\'processing\\\')">'+(lang==='zh'?'查看处理队列':'Open processing')+'</button>':'')+'</div>'}
 function renderProjects(items){const box=document.getElementById('items');box.className='items project-grid';window.visibleItems=items;box.innerHTML=items.length?items.map((x,i)=>'<button type="button" class="project-card" onclick="openItem('+i+')"><div class="project-card-top"><span class="project-slug">'+esc(x.project_id||x.id)+'</span><span class="state-dot '+esc(statusOf(x))+'">'+esc(statusOf(x)||'active')+'</span></div><h3>'+esc(x.title||x.name||x.project_id)+'</h3><p>'+esc(x.description||(lang==='zh'?'暂无项目描述':'No project description'))+'</p><div class="project-card-foot"><span>'+(Array.isArray(x.aliases)&&x.aliases.length?esc(x.aliases.slice(0,3).join(' · ')):(lang==='zh'?'无别名':'No aliases'))+'</span><time>'+esc((x.updated_at||'').slice(0,10))+'</time></div></button>').join(''):emptyState()}
-function renderL1(items){const box=document.getElementById('items');box.className='items turn-list';window.visibleItems=items;box.innerHTML=items.length?items.map((x,i)=>'<button type="button" class="turn-row" onclick="openItem('+i+')"><div class="turn-meta"><span>L1</span><b>'+esc(statusOf(x)||'complete')+'</b><time>'+esc((x.timestamp||x.updated_at||'').replace('T',' ').slice(0,16))+'</time></div><div class="turn-copy"><p><strong>U</strong>'+esc(x.user_text||'—')+'</p><p><strong>A</strong>'+esc(x.assistant_text||'—')+'</p></div><div class="turn-project">'+esc(x.project_hint||x.project_id||'—')+'</div></button>').join(''):emptyState()}
+function renderL1(items){const box=document.getElementById('items');box.className='items turn-list';window.visibleItems=items;box.innerHTML=items.length?items.map((x,i)=>{const core=x.source_kind==='memory-core',raw=x.source_kind==='raw-turn';const copy=core?'<p><strong>M</strong>'+esc(x.title||x.summary||'—')+'</p><p><strong>↳</strong>'+esc(x.summary||'—')+'</p>':raw?'<p><strong>U</strong>'+esc(x.userText||'—')+'</p><p><strong>A</strong>'+esc(x.assistantText||'—')+'</p>':'<p><strong>U</strong>'+esc(x.user_text||'—')+'</p><p><strong>A</strong>'+esc(x.assistant_text||'—')+'</p>';const label=core?'L1 · MEMORY':raw?'L1 · RAW TURN':'L1 · TURN';const project=x.project_unresolved?('unresolved · '+(x.raw_project_id||'workspace')):(x.project_hint||x.project_id||x.projectId||'—');return '<button type="button" class="turn-row" onclick="openItem('+i+')"><div class="turn-meta"><span>'+label+'</span><b>'+esc(statusOf(x)||'complete')+'</b><time>'+esc(fmtTime(x.timestamp||x.updated_at||x.updatedAt||x.createdAt))+'</time></div><div class="turn-copy">'+copy+'</div><div class="turn-project">'+esc(project)+'</div></button>'}).join(''):emptyState()}
 function renderMemoryRows(items){const box=document.getElementById('items');box.className='items memory-list';window.visibleItems=items;box.innerHTML=items.length?items.map((x,i)=>'<button type="button" class="memory-row" onclick="openItem('+i+')"><span class="layer-token">'+esc(current.toUpperCase())+'</span><div><div class="memory-row-head"><h3>'+esc(x.title||x.name||itemId(x)||'(untitled)')+'</h3><span>'+esc(statusOf(x))+'</span></div><p>'+esc(textOf(x))+'</p><small>'+esc(x.project_id||x.projectId||x.updatedAt||x.updated_at||'')+'</small></div><i>→</i></button>').join(''):emptyState()}
-function renderProcessing(items){const box=document.getElementById('items');box.className='items processing-view';const cfg=payload?.config||{};const config='<section class="policy-card"><div><span>POLICY</span><h3>'+(lang==='zh'?'自动蒸馏':'Automatic distillation')+'</h3><p>'+(lang==='zh'?'按完成对话数量或空闲时间触发 L1→L2 整理。':'Trigger L1→L2 work by completed-turn threshold or idle time.')+'</p></div><div class="policy-controls"><label class="toggle-field"><input id="cfg-auto" type="checkbox" '+(cfg.auto_enabled?'checked':'')+' '+(ADMIN?'':'disabled')+'><span>'+(lang==='zh'?'自动':'Auto')+'</span></label><label><span>'+(lang==='zh'?'对话阈值':'Turn threshold')+'</span><input id="cfg-threshold" type="number" min="1" max="1000" value="'+esc(cfg.turn_threshold??8)+'" '+(ADMIN?'':'disabled')+'></label><label><span>'+(lang==='zh'?'空闲分钟':'Idle minutes')+'</span><input id="cfg-idle" type="number" min="1" max="10080" value="'+esc(cfg.idle_minutes??30)+'" '+(ADMIN?'':'disabled')+'></label>'+(ADMIN?'<button class="soft policy-save" type="button" onclick="saveDistillationConfig()">'+(lang==='zh'?'保存策略':'Save policy')+'</button>':'')+'</div></section>';window.visibleItems=items;const jobs=items.length?'<div class="job-list">'+items.map((x,i)=>'<button type="button" class="job-row" onclick="openItem('+i+')"><span class="job-state '+esc(statusOf(x))+'">'+esc(statusOf(x))+'</span><div><b>'+esc((x.target||'').toUpperCase())+' · '+esc(x.project_id||'account')+'</b><small>'+esc(x.reason||'manual')+' · '+esc((x.evidence_refs||[]).length)+' evidence</small></div><time>'+esc((x.updated_at||x.created_at||'').replace('T',' ').slice(0,16))+'</time></button>').join('')+'</div>':emptyState();box.innerHTML=config+jobs}
+function renderProcessing(items){const box=document.getElementById('items');box.className='items processing-view';const cfg=payload?.config||{};const config='<section class="policy-card"><div><span>POLICY</span><h3>'+(lang==='zh'?'自动蒸馏':'Automatic distillation')+'</h3><p>'+(lang==='zh'?'按完成对话数量或空闲时间触发 L1→L2 整理。':'Trigger L1→L2 work by completed-turn threshold or idle time.')+'</p></div><div class="policy-controls"><label class="toggle-field"><input id="cfg-auto" type="checkbox" '+(cfg.auto_enabled?'checked':'')+' '+(ADMIN?'':'disabled')+'><span>'+(lang==='zh'?'自动':'Auto')+'</span></label><label><span>'+(lang==='zh'?'对话阈值':'Turn threshold')+'</span><input id="cfg-threshold" type="number" min="1" max="1000" value="'+esc(cfg.turn_threshold??8)+'" '+(ADMIN?'':'disabled')+'></label><label><span>'+(lang==='zh'?'空闲分钟':'Idle minutes')+'</span><input id="cfg-idle" type="number" min="1" max="10080" value="'+esc(cfg.idle_minutes??30)+'" '+(ADMIN?'':'disabled')+'></label>'+(ADMIN?'<button class="soft policy-save" type="button" onclick="saveDistillationConfig()">'+(lang==='zh'?'保存策略':'Save policy')+'</button>':'')+'</div></section>';window.visibleItems=items;const jobs=items.length?'<div class="job-list">'+items.map((x,i)=>'<button type="button" class="job-row" onclick="openItem('+i+')"><span class="job-state '+esc(statusOf(x))+'">'+esc(statusOf(x))+'</span><div><b>'+esc((x.target||'').toUpperCase())+' · '+esc(x.project_id||'account')+'</b><small>'+esc(x.reason||'manual')+' · '+esc((x.evidence_refs||[]).length)+' evidence</small></div><time>'+esc(fmtTime(x.updated_at||x.created_at))+'</time></button>').join('')+'</div>':emptyState();box.innerHTML=config+jobs}
 function renderRows(){const q=filterInput.value.toLowerCase();const all=values(payload);const items=all.filter(x=>JSON.stringify(x).toLowerCase().includes(q));if(current==='projects')return renderProjects(items);if(current==='l1')return renderL1(items);if(current==='processing')return renderProcessing(items);return renderMemoryRows(items)}
 function renderCurrent(){const t=titles[current]||[current,current],d=descriptions[current]||['',''];document.getElementById('view-title').textContent=lang==='zh'?t[0]:t[1];document.getElementById('view-desc').textContent=lang==='zh'?d[0]:d[1];document.getElementById('view-eyebrow').textContent=eyebrows[current]||'MEMORY';updateToolbar();renderFlow();if(!payload)return;const items=values(payload);renderStats(payload,items);if(current==='overview')renderOverview();else renderRows()}
 function syncProjectSelect(items){const selected=projectSelect.value;projectSelect.innerHTML='<option value="">'+(lang==='zh'?'全部项目':'All projects')+'</option>'+items.map(x=>'<option value="'+esc(x.project_id||x.id)+'">'+esc(x.title||x.name||x.project_id||x.id)+'</option>').join('');if([...projectSelect.options].some(o=>o.value===selected))projectSelect.value=selected}
@@ -2080,12 +2141,12 @@ async function validateDistillationEvidenceChain(input: {
       throw new Error(`${input.kind.toUpperCase()} job evidence must come from ${expectedLayer}`);
     }
     if (input.kind === "l2") {
-      if (!input.projectId || input.job.evidence.some((item) =>
-        item.kind !== "turn" ||
-        item.project_id !== input.projectId ||
-        !item.user_text?.trim() ||
-        !item.assistant_text?.trim()
-      )) throw new Error("L2 job requires complete project-scoped L1 turns");
+      if (!input.projectId || input.job.evidence.some((item) => {
+        if (item.project_id !== input.projectId || item.layer !== "L1") return true;
+        if (item.kind === "turn") return !item.user_text?.trim() || !item.assistant_text?.trim();
+        if (item.kind === "memory") return !item.content?.trim();
+        return true;
+      })) throw new Error("L2 job requires project-scoped L1 turn or Memory evidence");
       return;
     }
     if (input.kind === "l3") {
@@ -2219,6 +2280,10 @@ function projectForModel(project: ProjectDescriptor): Record<string, unknown> {
     project: project.projectId,
     name: project.name,
     description: project.description,
+    descriptionSource: project.descriptionSource ?? (project.description ? "legacy" : "empty"),
+    ...(project.distilledDescription ? { distilledDescription: project.distilledDescription } : {}),
+    ...(project.descriptionEvidenceRefs ? { descriptionEvidenceRefs: project.descriptionEvidenceRefs } : {}),
+    ...(project.descriptionUpdatedAt ? { descriptionUpdatedAt: project.descriptionUpdatedAt } : {}),
     aliases: project.aliases,
     state: project.state,
     ...(project.mergedInto ? { mergedInto: project.mergedInto } : {}),

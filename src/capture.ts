@@ -59,6 +59,8 @@ export interface CaptureIndexStats {
   total: number;
   complete: number;
   incomplete: number;
+  ingested: number;
+  not_ingested: number;
 }
 
 export interface IdleCaptureGroup {
@@ -258,13 +260,23 @@ export async function captureIndexStats(
       const row = db.prepare(`SELECT
           COUNT(*) AS total,
           SUM(CASE WHEN capture_status='complete' THEN 1 ELSE 0 END) AS complete,
-          SUM(CASE WHEN capture_status<>'complete' THEN 1 ELSE 0 END) AS incomplete
+          SUM(CASE WHEN capture_status<>'complete' THEN 1 ELSE 0 END) AS incomplete,
+          SUM(CASE WHEN ingested=1 THEN 1 ELSE 0 END) AS ingested,
+          SUM(CASE WHEN ingested=0 THEN 1 ELSE 0 END) AS not_ingested
         FROM capture_index${where.length ? ` WHERE ${where.join(" AND ")}` : ""}`)
-        .get(...params) as { total?: number; complete?: number | null; incomplete?: number | null } | undefined;
+        .get(...params) as {
+          total?: number;
+          complete?: number | null;
+          incomplete?: number | null;
+          ingested?: number | null;
+          not_ingested?: number | null;
+        } | undefined;
       return {
         total: Number(row?.total ?? 0),
         complete: Number(row?.complete ?? 0),
-        incomplete: Number(row?.incomplete ?? 0)
+        incomplete: Number(row?.incomplete ?? 0),
+        ingested: Number(row?.ingested ?? 0),
+        not_ingested: Number(row?.not_ingested ?? 0)
       };
     });
   });
