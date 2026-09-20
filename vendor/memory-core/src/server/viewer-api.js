@@ -14,6 +14,7 @@ export const VIEWER_API_ROUTES = [
     "GET /api/v1/l2",
     "GET /api/v1/l3",
     "GET /api/v1/l4",
+    "GET /api/v1/raw-turns",
     "GET /api/v1/episodes",
     "GET /api/v1/skills",
     "POST /api/v1/traces/delete",
@@ -116,6 +117,18 @@ export async function routeViewerRequest(context, method, url, body) {
                 q: query(url, "q"),
                 sourceAgent: query(url, "sourceAgent"),
                 page: numberQuery(url, "page")
+            })
+        };
+    }
+    if (method === "GET" && path === "/api/v1/raw-turns") {
+        return {
+            body: context.service.panelRawTurns({
+                ...envelope,
+                userId: query(url, "userId") ?? viewerUserId(context),
+                ...(query(url, "projectId") ? { projectIds: [query(url, "projectId")] } : {}),
+                ...(query(url, "sessionSource") ? { sessionSource: query(url, "sessionSource") } : {}),
+                page: numberQuery(url, "page"),
+                limit: numberQuery(url, "limit")
             })
         };
     }

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
 import type { ContextItem } from "./context-capsule.js";
 
@@ -51,41 +51,56 @@ export class FileProjectArchitectureSource implements ProjectArchitectureSource 
     const accountId = requireNonEmpty(input.accountId, "accountId");
     const projectId = requireNonEmpty(input.projectId, "projectId");
     const query = requireNonEmpty(input.query, "query");
-    const candidate = (await this.architectureDirs(accountId))
-      .find((item) => sameProject(item.projectId, projectId));
-    if (!candidate) return [];
+    const candidates = (await this.architectureDirs(accountId))
+      .filter((item) => sameProject(item.projectId, projectId));
+    if (candidates.length === 0) return [];
 
-    const files = await architectureMarkdownFiles(candidate.dir, projectId);
     const queryTokens = tokens(query);
-    const rows = [] as Array<{ path: string; content: string; score: number }>;
-    for (const path of files) {
-      const content = (await readFile(path, "utf8")).trim();
-      if (!content) continue;
-      const haystack = `${basename(path)}\n${content}`.toLocaleLowerCase();
-      const score = queryTokens.reduce((sum, token) => sum + (haystack.includes(token) ? 1 : 0), 0) +
-        (basename(path) === "outline.md" ? 0.5 : 0);
-      rows.push({ path, content, score });
+    const rows = [] as Array<{
+      path: string;
+      root: string;
+      content: string;
+      score: number;
+      scope: ArchitectureDir["scope"];
+      format: ArchitectureDir["format"];
+    }>;
+    for (const candidate of candidates) {
+      const files = await architectureMarkdownFiles(candidate, projectId);
+      for (const path of files) {
+        const content = (await readFile(path, "utf8")).trim();
+        if (!content) continue;
+        const haystack = `${basename(path)}\n${content}`.toLocaleLowerCase();
+        const score = queryTokens.reduce((sum, token) => sum + (haystack.includes(token) ? 1 : 0), 0) +
+          (basename(path).toLocaleLowerCase() === "architecture.md" ? 0.75 : 0) +
+          (basename(path) === "outline.md" ? 0.5 : 0) +
+          (candidate.format === "project-docs" ? 0.25 : 0);
+        rows.push({ path, root: candidate.dir, content, score, scope: candidate.scope, format: candidate.format });
+      }
     }
-    rows.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
+    const uniqueRows = new Map<string, typeof rows[number]>();
+    for (const row of rows) if (!uniqueRows.has(resolve(row.path))) uniqueRows.set(resolve(row.path), row);
+    const rankedRows = [...uniqueRows.values()]
+      .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
 
     let remaining = this.maxChars;
     const items: ContextItem[] = [];
-    for (const row of rows) {
+    for (const row of rankedRows) {
       if (remaining <= 0) break;
       const clipped = row.content.slice(0, remaining);
       if (!clipped.trim()) continue;
-      const relativePath = relative(candidate.dir, row.path).replaceAll("\\", "/");
+      const relativePath = relative(row.root, row.path).replaceAll("\\", "/");
       items.push({
-        id: `architecture:${projectId}:${createHash("sha256").update(relativePath).digest("hex").slice(0, 16)}`,
+        id: `architecture:${projectId}:${createHash("sha256").update(`${row.format}\0${row.root}\0${relativePath}`).digest("hex").slice(0, 16)}`,
         content: `# ${relativePath}\n\n${clipped}`,
         authority: "authoritative",
         scope: "project",
         source: "project-architecture",
         projectId,
         provenance: {
-          storage: candidate.scope,
+          storage: row.scope,
           path: relativePath,
-          legacyFormat: "normify-files"
+          format: row.format,
+          ...(row.format === "normify-files" ? { legacyFormat: "normify-files" } : {})
         }
       });
       remaining -= clipped.length;
@@ -93,27 +108,25 @@ export class FileProjectArchitectureSource implements ProjectArchitectureSource 
     return items;
   }
 
-  private async architectureDirs(accountId: string): Promise<Array<{
-    projectId: string;
-    dir: string;
-    scope: "account-scoped" | "legacy-repo-local";
-  }>> {
-    const results: Array<{
-      projectId: string;
-      dir: string;
-      scope: "account-scoped" | "legacy-repo-local";
-    }> = [];
+  private async architectureDirs(accountId: string): Promise<ArchitectureDir[]> {
+    const results: ArchitectureDir[] = [];
     const accountRoot = join(this.rootDir, ".normify", "accounts", accountHash(accountId));
     for (const dir of await childArchitectureDirs(accountRoot)) {
-      results.push({ projectId: projectIdFromDir(dir), dir, scope: "account-scoped" });
+      results.push({ projectId: projectIdFromDir(dir), dir, scope: "account-scoped", format: "normify-files" });
     }
     for (const dir of await childArchitectureDirs(this.rootDir)) {
-      results.push({ projectId: projectIdFromDir(dir), dir, scope: "legacy-repo-local" });
+      results.push({ projectId: projectIdFromDir(dir), dir, scope: "legacy-repo-local", format: "normify-files" });
+    }
+    if (await hasProjectArchitectureDocs(this.rootDir)) {
+      results.push({ projectId: basename(this.rootDir), dir: this.rootDir, scope: "project-repo", format: "project-docs" });
     }
     for (const child of await childDirs(this.rootDir)) {
       if (basename(child) === ".normify") continue;
       for (const dir of await childArchitectureDirs(child)) {
-        results.push({ projectId: projectIdFromDir(dir), dir, scope: "legacy-repo-local" });
+        results.push({ projectId: projectIdFromDir(dir), dir, scope: "legacy-repo-local", format: "normify-files" });
+      }
+      if (await isProjectRepositoryRoot(child) && await hasProjectArchitectureDocs(child)) {
+        results.push({ projectId: basename(child), dir: child, scope: "project-repo", format: "project-docs" });
       }
     }
     const unique = new Map<string, typeof results[number]>();
@@ -128,7 +141,16 @@ export class FileProjectArchitectureSource implements ProjectArchitectureSource 
   }
 }
 
-async function architectureMarkdownFiles(root: string, projectId: string): Promise<string[]> {
+interface ArchitectureDir {
+  projectId: string;
+  dir: string;
+  scope: "account-scoped" | "legacy-repo-local" | "project-repo";
+  format: "normify-files" | "project-docs";
+}
+
+async function architectureMarkdownFiles(candidate: ArchitectureDir, projectId: string): Promise<string[]> {
+  if (candidate.format === "project-docs") return projectArchitectureMarkdownFiles(candidate.dir);
+  const root = candidate.dir;
   const files: string[] = [];
   const outline = join(root, "outline.md");
   if (await fileExists(outline)) files.push(outline);
@@ -140,6 +162,37 @@ async function architectureMarkdownFiles(root: string, projectId: string): Promi
     if (files.length > (await fileExists(outline) ? 1 : 0)) break;
   }
   return files;
+}
+
+async function projectArchitectureMarkdownFiles(root: string): Promise<string[]> {
+  const files: string[] = [];
+  for (const path of [
+    join(root, "ARCHITECTURE.md"),
+    join(root, "docs", "ARCHITECTURE.md"),
+    join(root, "docs", "architecture.md")
+  ]) {
+    if (await fileExists(path) && !files.includes(path)) files.push(path);
+  }
+  for (const file of await markdownFiles(join(root, "docs", "architecture"), 2)) {
+    if (!files.includes(file)) files.push(file);
+  }
+  return files;
+}
+
+async function hasProjectArchitectureDocs(root: string): Promise<boolean> {
+  return (await projectArchitectureMarkdownFiles(root)).length > 0;
+}
+
+async function isProjectRepositoryRoot(root: string): Promise<boolean> {
+  for (const marker of [".git", "package.json", "pyproject.toml", "Cargo.toml", "go.mod"]) {
+    try {
+      const info = await stat(join(root, marker));
+      if (marker === ".git" ? info.isDirectory() || info.isFile() : info.isFile()) return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+    }
+  }
+  return false;
 }
 
 async function markdownFiles(root: string, depth: number): Promise<string[]> {

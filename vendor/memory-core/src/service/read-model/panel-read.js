@@ -294,6 +294,50 @@ export class PanelReadModel {
             serverTime: this.now()
         };
     }
+    panelRawTurns(input = {}) {
+        const pageSize = normalizePanelItemsLimit(input.limit);
+        const projectIds = Array.isArray(input.projectIds)
+            ? input.projectIds.filter((value) => typeof value === "string" && value.trim())
+            : [];
+        const rawTurnStats = this.deps.repos.runtime.rawTurnStats({
+            userId: input.userId,
+            ...(projectIds.length ? { projectIds } : {}),
+            ...(input.sessionSource ? { sessionSource: input.sessionSource } : {})
+        });
+        const total = rawTurnStats.total;
+        const totalPages = Math.max(1, Math.ceil(total / pageSize));
+        const page = Math.min(normalizePageNumber(input.page), totalPages);
+        const offset = (page - 1) * pageSize;
+        const turns = this.deps.repos.runtime.listRawTurns({
+            userId: input.userId,
+            ...(projectIds.length ? { projectIds } : {}),
+            ...(input.sessionSource ? { sessionSource: input.sessionSource } : {})
+        }, pageSize, offset);
+        return {
+            items: turns.map((turn) => ({
+                rawTurnId: turn.id,
+                sessionId: turn.sessionId,
+                episodeId: turn.episodeId,
+                turnId: turn.turnId,
+                conversationId: turn.conversationId,
+                projectId: turn.projectId,
+                sessionSource: turn.sessionSource,
+                userText: turn.redactedAt || turn.deletedAt ? undefined : turn.userText,
+                assistantText: turn.redactedAt || turn.deletedAt ? undefined : turn.assistantText,
+                reasoningSummary: turn.redactedAt || turn.deletedAt ? undefined : turn.reasoningSummary,
+                status: turn.status,
+                createdAt: turn.createdAt
+            })),
+            page,
+            pageSize,
+            total,
+            totalPages,
+            hasNext: page < totalPages,
+            hasPrev: page > 1,
+            stats: rawTurnStats,
+            serverTime: this.now()
+        };
+    }
     panelChanges(input = {}) {
         const limit = input.limit ?? 50;
         const cursorSeq = this.deps.decodeChangeCursor(input.cursor);
