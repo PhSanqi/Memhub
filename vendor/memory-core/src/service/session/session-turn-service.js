@@ -1,6 +1,6 @@
-import { captureTurnSteps, classifyIntent, classifyTurnFeedback, classifyTurnRelation, classifyTurnRelationWithLlm, policyMetaFromMemory, retrievalLayersForMode, retrievePluginMemories, signatureFromTraceParts, traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
+import { captureTurnSteps, classifyIntent, classifyTurnFeedback, classifyTurnRelation, classifyTurnRelationWithLlm, retrievalLayersForMode, retrievePluginMemories, signatureFromTraceParts, traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import {} from "../../config/index.js";
-import { jobToRef, L3WorldModelScopeWorkspaceConflictError, Repositories } from "../../storage/repositories.js";
+import { jobToRef, Repositories } from "../../storage/repositories.js";
 import { MemoryServiceError } from "../../utils/error.js";
 import { newId, stableHash, stableStringify } from "../../utils/id.js";
 import { isRecord } from "../../utils/json.js";
@@ -8,9 +8,9 @@ import { memoryCaptureQaHash, normalizeMemoryCaptureSource } from "../../utils/m
 import { isMemmyRecallToolName } from "../../utils/memmy-context-tags.js";
 import { clip } from "../../utils/text.js";
 import { nowIso } from "../../utils/time.js";
-import { buildUserMemory, classifyUserMemory, isDynamicCurrentFactQuery, isPureUserMemoryStatement, isQuestionLike, isTaskLinkedUserFeedback, isUserMemoryQuestion } from "../user-memory/user-memory.js";
+import { isDynamicCurrentFactQuery, isPersonalFactQuestion, isPurePersonalFactStatement, isQuestionLike, isTaskLinkedUserFeedback } from "../capture/capture-heuristics.js";
 import { recordApiLog } from "../model-audit/model-call-audit.js";
-import { namespaceForRawTurn, namespaceForSession, normalizeNamespace, resolveV2WorkspaceIdentityForOpenRequest, sessionScopeForOpenRequest } from "../namespace/namespace-scope.js";
+import { namespaceForRawTurn, namespaceForSession, normalizeNamespace, sessionScopeForOpenRequest } from "../namespace/namespace-scope.js";
 import { detailSummaryForMemory, detailTitleForMemory, firstDetailDisplayString } from "../read-model/memory.js";
 import { buildRepairSuggestionQuery, buildSearchQuery, completeObservedRawTurn, normalizeCompleteTurnArtifacts, normalizeCompleteTurnSourceMemoryIds, normalizeCompleteTurnToolCalls, normalizeCompleteTurnToolResults, rawTurnIdForSessionTurn, sanitizeTurnCompleteRequest, sanitizeTurnStartRequest, turnStartContextHints } from "../turn/turn-normalization.js";
 export function toolObservationEvent(input) {
@@ -183,7 +183,7 @@ function rawTurnIsExcludedFromL1(rawTurn) {
         : classifyIntent(rawTurn.userText ?? "").kind;
     if (kind === "chitchat" || kind === "meta" || kind === "memory_probe")
         return true;
-    if (isUserMemoryQuestion(rawTurn.userText ?? ""))
+    if (isPersonalFactQuestion(rawTurn.userText ?? ""))
         return true;
     if (isDynamicCurrentFactQuery(rawTurn.userText ?? ""))
         return true;
@@ -193,7 +193,7 @@ function rawTurnIsExcludedFromL1(rawTurn) {
     if (!taskLinkedFeedback &&
         hasOnlyRecalledMemoryEvidence)
         return true;
-    if (isPureUserMemoryStatement(rawTurn.userText ?? "") &&
+    if (isPurePersonalFactStatement(rawTurn.userText ?? "") &&
         rawTurn.toolCalls.length === 0 &&
         rawTurn.toolResults.length === 0 &&
         rawTurn.sourceMemoryIds.length === 0)
@@ -217,22 +217,19 @@ function l1ObservationMetadata(rawTurn, session, at) {
             source_role: "tool",
             evidence_status: "verified",
             observed_at: at,
-            scope_key: scopeKey,
-            policy_eligible: false
+            scope_key: scopeKey
         };
         return {
             memoryKey: `trace:environment:${scopeKey}:device.total_memory`,
             info: {
                 scope_key: scopeKey,
                 observed_at: at,
-                evidence_status: "verified",
-                policy_eligible: false
+                evidence_status: "verified"
             },
             internal: {
                 scope_key: scopeKey,
                 observed_at: at,
                 evidence_status: "verified",
-                policy_eligible: false,
                 claims: [claim]
             }
         };
@@ -249,11 +246,10 @@ function l1ObservationMetadata(rawTurn, session, at) {
     }
     if (isQuestionLike(text) && !isTaskLinkedUserFeedback(text)) {
         return {
-            info: { observed_at: at, evidence_status: "provisional", policy_eligible: false },
+            info: { observed_at: at, evidence_status: "provisional" },
             internal: {
                 observed_at: at,
                 evidence_status: "provisional",
-                policy_eligible: false,
                 claims: [{ source_role: "agent", evidence_status: "provisional", observed_at: at }]
             }
         };
@@ -349,18 +345,6 @@ export class SessionTurnService {
         }
         const namespace = normalizeNamespace(request.namespace);
         const at = nowIso();
-        if (request.l3WorldModelProtocolVersion === undefined && (request.l3WorldModelTransition !== undefined ||
-            request.workspaceUri !== undefined ||
-            request.workspaceHostId !== undefined)) {
-            throw new MemoryServiceError("invalid_argument", "L3 World Model v2 fields require protocol version 2");
-        }
-        if (request.l3WorldModelProtocolVersion === 2) {
-            const body = this.openV2Session(request, namespace, at);
-            if (idempotencyKey) {
-                this.deps.repos.runtime.saveIdempotency(idempotencyKey, requestHash, body, at);
-            }
-            return body;
-        }
         if (request.sessionId) {
             const existingSession = this.deps.repos.runtime.getSession(request.sessionId);
             if (existingSession) {
@@ -471,185 +455,6 @@ export class SessionTurnService {
         }
         return body;
     }
-    openV2Session(request, namespace, at) {
-        if (!request.l3WorldModelTransition) {
-            throw new MemoryServiceError("invalid_argument", "l3WorldModelTransition is required for protocol v2");
-        }
-        if (!namespace.sessionKey) {
-            throw new MemoryServiceError("invalid_argument", "namespace.sessionKey is required for protocol v2");
-        }
-        let workspace;
-        try {
-            workspace = resolveV2WorkspaceIdentityForOpenRequest(request, namespace);
-        }
-        catch (error) {
-            throw new MemoryServiceError("invalid_argument", error instanceof Error ? error.message : "invalid workspace identity");
-        }
-        return this.deps.repos.transaction(() => {
-            const source = request.source ?? namespace.source;
-            const profileId = request.profileId ?? namespace.profileId;
-            let existing = request.sessionId
-                ? this.deps.repos.runtime.getSession(request.sessionId)
-                : this.deps.repos.runtime.findOpenSessionByHostKey({
-                    userId: namespace.userId,
-                    source,
-                    profileId,
-                    hostSessionKey: namespace.sessionKey
-                });
-            if (request.sessionId && !existing) {
-                throw new MemoryServiceError("conflict", "l3_world_model_v2_session_not_open");
-            }
-            if (existing) {
-                if (existing.status !== "open") {
-                    throw new MemoryServiceError("conflict", "l3_world_model_v2_session_not_open");
-                }
-                const protocol = existing.meta.l3_world_model_protocol_version;
-                if (protocol === 2) {
-                    this.assertV2SessionIdentity(existing, request, namespace, workspace);
-                    this.bindV2SessionWorkspace(existing, optionalMetaString(existing.meta, "workspace_uri"), at);
-                    const touched = this.deps.repos.runtime.updateSessionScope(existing.id, {}, at) ?? existing;
-                    return this.v2SessionOpenBody(touched, true);
-                }
-                if (request.sessionId || request.l3WorldModelTransition !== "allow_legacy_rollover") {
-                    throw new MemoryServiceError("conflict", "l3_world_model_v2_session_not_open");
-                }
-                this.closeLegacySessionForV2Rollover(existing, at);
-                existing = undefined;
-            }
-            const explicitProjectId = request.projectId ?? request.namespace?.projectId;
-            const explicitWorkspaceId = request.workspaceId ?? request.namespace?.workspaceId;
-            if (explicitProjectId || explicitWorkspaceId) {
-                throw new MemoryServiceError("invalid_argument", "protocol v2 derives projectId and workspaceId from workspace identity");
-            }
-            const session = {
-                id: newId("session"),
-                userId: namespace.userId,
-                source,
-                profileId,
-                profileLabel: namespace.profileLabel,
-                projectId: workspace.projectId ?? undefined,
-                workspaceId: workspace.workspaceId ?? undefined,
-                workspacePath: request.workspacePath ?? namespace.workspacePath,
-                hostSessionKey: namespace.sessionKey,
-                conversationId: this.deps.stringFromMeta(request.meta, "conversationId"),
-                status: "open",
-                meta: v2SessionMeta(request, workspace, request.timeZone),
-                openedAt: at,
-                lastSeenAt: at,
-                updatedAt: at
-            };
-            this.deps.repos.runtime.createSession(session);
-            this.bindV2SessionWorkspace(session, workspace.workspaceUri, at);
-            const scopedNamespace = {
-                ...namespace,
-                projectId: session.projectId,
-                workspaceId: session.workspaceId
-            };
-            const changeSeq = this.deps.repos.runtime.appendChange({
-                memoryId: session.id,
-                namespaceId: this.deps.namespaceIdFromContext(scopedNamespace),
-                kind: "session",
-                op: "created",
-                entityId: session.id,
-                userId: session.userId,
-                changeType: "session_opened",
-                after: session,
-                source: "session.open",
-                createdAt: at
-            });
-            return {
-                ...this.v2SessionOpenBody(session, false),
-                changeSeq,
-                syncCursor: this.deps.encodeChangeCursor(changeSeq, scopedNamespace)
-            };
-        });
-    }
-    bindV2SessionWorkspace(session, workspaceUri, at) {
-        if (!session.projectId)
-            return;
-        if (!workspaceUri) {
-            throw new MemoryServiceError("conflict", "l3_world_model_v2_session_workspace_missing");
-        }
-        try {
-            this.deps.repos.l3WorldModels.bindWorkspaceUri(session.userId, session.projectId, workspaceUri, at);
-        }
-        catch (error) {
-            if (error instanceof L3WorldModelScopeWorkspaceConflictError) {
-                throw new MemoryServiceError("conflict", "l3_world_model_v2_session_scope_conflict");
-            }
-            throw error;
-        }
-    }
-    assertV2SessionIdentity(session, request, namespace, workspace) {
-        const savedWorkspaceUri = optionalMetaString(session.meta, "workspace_uri");
-        const savedWorkspaceHostId = optionalMetaString(session.meta, "workspace_host_id");
-        const requestProjectId = request.projectId ?? request.namespace?.projectId;
-        const requestWorkspaceId = request.workspaceId ?? request.namespace?.workspaceId;
-        const mismatch = session.userId !== namespace.userId ||
-            session.source !== (request.source ?? namespace.source) ||
-            session.profileId !== (request.profileId ?? namespace.profileId) ||
-            session.hostSessionKey !== namespace.sessionKey ||
-            (requestProjectId !== undefined && requestProjectId !== session.projectId) ||
-            (requestWorkspaceId !== undefined && requestWorkspaceId !== session.workspaceId) ||
-            (request.workspaceUri !== undefined && request.workspaceUri !== savedWorkspaceUri) ||
-            (request.workspaceHostId !== undefined && request.workspaceHostId !== savedWorkspaceHostId) ||
-            (request.workspaceUri !== undefined && workspace.projectId !== (session.projectId ?? null));
-        if (mismatch) {
-            throw new MemoryServiceError("conflict", "l3_world_model_v2_session_scope_conflict");
-        }
-    }
-    closeLegacySessionForV2Rollover(session, at) {
-        const closedEpisodes = this.deps.repos.runtime.closeOpenEpisodesForSession(session.id, at);
-        const closed = this.deps.repos.runtime.closeSession(session.id, at);
-        if (!closed)
-            throw new MemoryServiceError("conflict", "l3_world_model_v2_session_not_open");
-        const closedWithMeta = this.deps.repos.runtime.updateSessionMeta(session.id, {
-            close_reason: "l3_world_model_protocol_v2"
-        }, at) ?? closed;
-        for (const episode of closedEpisodes) {
-            this.deps.repos.runtime.appendChange({
-                memoryId: episode.id,
-                namespaceId: this.deps.namespaceIdFromSession(closedWithMeta),
-                kind: "episode",
-                op: "updated",
-                entityId: episode.id,
-                userId: episode.userId,
-                changeType: "episode_closed",
-                after: episode,
-                source: "session.open.v2_rollover",
-                createdAt: at
-            });
-            this.deps.finalizeClosedEpisode(episode, at, "session_closed");
-        }
-        this.deps.repos.runtime.appendChange({
-            memoryId: session.id,
-            namespaceId: this.deps.namespaceIdFromSession(closedWithMeta),
-            kind: "session",
-            op: "updated",
-            entityId: session.id,
-            userId: session.userId,
-            changeType: "session_closed",
-            before: session,
-            after: closedWithMeta,
-            source: "session.open.v2_rollover",
-            createdAt: at
-        });
-    }
-    v2SessionOpenBody(session, resumed) {
-        return {
-            sessionId: session.id,
-            userId: session.userId,
-            source: session.source,
-            profileId: session.profileId,
-            projectId: session.projectId ?? null,
-            workspaceId: session.workspaceId,
-            conversationId: session.conversationId,
-            status: "open",
-            resumed,
-            openedAt: session.openedAt,
-            serverTime: nowIso()
-        };
-    }
     closeSession(sessionId, request = {}) {
         if (!this.deps.memoryAddEnabled()) {
             return this.deps.closeSessionNoWrite(sessionId, request);
@@ -680,13 +485,6 @@ export class SessionTurnService {
                     createdAt: at
                 });
                 this.deps.finalizeClosedEpisode(episode, at, "session_closed");
-            }
-            if (session.meta.l3_world_model_protocol_version === 2) {
-                this.deps.repos.l3WorldModels.freezeBatches({
-                    sessionId,
-                    trigger: "session_close",
-                    at
-                });
             }
             const changeSeq = this.deps.repos.runtime.appendChange({
                 memoryId: sessionId,
@@ -1008,18 +806,12 @@ export class SessionTurnService {
                     return memory && (this.deps.rawTurnIdFromMemory(memory) === existingRawTurn.id ||
                         memory.id === existingCaptureClaim?.primaryMemoryId);
                 });
-                const userMemoryIds = this.deps.repos.userMemories
-                    .listActive(session.userId)
-                    .filter((memory) => memory.sourceTurnRefs.includes(existingRawTurn.id))
-                    .map((memory) => memory.id);
                 const responseChangeSeq = this.deps.repos.runtime.latestChangeSeq(session.userId, this.deps.namespaceIdFromSession(session));
                 const body = {
                     turnId,
                     sessionId: session.id,
                     episodeId: episode.id,
                     rawTurnId: existingRawTurn.id,
-                    userMemoryId: userMemoryIds[0] ?? "",
-                    userMemoryIds,
                     l1MemoryId: l1MemoryIds[0] ?? "",
                     l1MemoryIds,
                     closedEpisodeIds: episodeClosedByEndTopicTurn(episode, turnId) ? [episode.id] : [],
@@ -1232,7 +1024,6 @@ export class SessionTurnService {
                 });
             }
             this.deps.repos.runtime.appendEpisodeRawTurn(episode.id, rawTurn.id, at);
-            const userMemoryCapture = this.captureUserMemory(rawTurn, request, at);
             const requestTags = this.deps.normalizeRequestTags(request.tags);
             const capturedSteps = this.captureEpisodeIncrementalSteps(episode, rawTurn, at)
                 .map((step) => {
@@ -1244,7 +1035,7 @@ export class SessionTurnService {
             const l1MemoryIds = [];
             const captureClaimByRawTurnId = new Map();
             let changeSeq = 0;
-            const jobs = [...route.jobs, ...userMemoryCapture.jobs];
+            const jobs = [...route.jobs];
             for (const step of capturedSteps) {
                 const stepRawTurnId = step.rawTurnId ?? rawTurn.id;
                 const sourceRawTurn = stepRawTurnId === rawTurn.id
@@ -1359,15 +1150,6 @@ export class SessionTurnService {
                             }
                             if (existing.status !== "deleted" && !existing.deletedAt) {
                                 l1MemoryIds.push(existing.id);
-                                if (session.meta.l3_world_model_protocol_version === 2) {
-                                    this.deps.repos.l3WorldModels.registerInputTrace({
-                                        sessionId: session.id,
-                                        l1MemoryId: existing.id,
-                                        rawTurnId: stepRawTurnId,
-                                        episodeId: episode.id,
-                                        createdAt: at
-                                    });
-                                }
                                 this.deps.repos.runtime.appendEpisodeTurn(episode.id, stepRawTurnId, existing.id, at);
                             }
                         }
@@ -1382,15 +1164,6 @@ export class SessionTurnService {
                 const upsert = this.deps.repos.memories.upsertByKey(l1Memory);
                 l1MemoryIds.push(upsert.memory.id);
                 newlyStoredL1MemoryIds.push(upsert.memory.id);
-                if (session.meta.l3_world_model_protocol_version === 2) {
-                    this.deps.repos.l3WorldModels.registerInputTrace({
-                        sessionId: session.id,
-                        l1MemoryId: upsert.memory.id,
-                        rawTurnId: stepRawTurnId,
-                        episodeId: episode.id,
-                        createdAt: at
-                    });
-                }
                 changeSeq = this.deps.repos.runtime.appendChange({
                     memoryId: upsert.memory.id,
                     namespaceId: this.deps.namespaceIdFromMemory(upsert.memory),
@@ -1434,13 +1207,7 @@ export class SessionTurnService {
                         payload: {
                             source: "turn.complete.capture",
                             contentHash: upsert.memory.contentHash,
-                            decideCapture: modelDecidesCapture,
-                            captureUserMemory: modelDecidesCapture && !request.userMemoryCorrection && step.stepIndex === 0,
-                            capturedUserMemoryIds: userMemoryCapture.memoryIds,
-                            ...(request.userMemoryCorrection ? {
-                                capturedUserMemoryAction: "corrected",
-                                capturedUserMemoryTargetId: request.userMemoryCorrection.targetMemoryId
-                            } : {})
+                            decideCapture: modelDecidesCapture
                         },
                         maxAttempts: 3,
                         createdAt: at
@@ -1534,8 +1301,6 @@ export class SessionTurnService {
                 sessionId: session.id,
                 episodeId: episode.id,
                 rawTurnId: rawTurn.id,
-                userMemoryId: userMemoryCapture.memoryIds[0] ?? "",
-                userMemoryIds: userMemoryCapture.memoryIds,
                 l1MemoryId: l1MemoryIds[0] ?? "",
                 l1MemoryIds,
                 closedEpisodeIds: uniqueClosedEpisodeIds,
@@ -1545,7 +1310,6 @@ export class SessionTurnService {
                 syncCursor: this.deps.encodeChangeCursor(responseChangeSeq, namespaceForSession(session)),
                 etag: stableHash({
                     changeSeq: responseChangeSeq,
-                    userMemoryIds: userMemoryCapture.memoryIds,
                     l1MemoryIds,
                     rawTurnId: rawTurn.id
                 }),
@@ -1803,7 +1567,6 @@ export class SessionTurnService {
             antiPattern,
             highValueMemoryIds: evidence.highValueMemories.map((memory) => memory.id),
             lowValueMemoryIds: evidence.lowValueMemories.map((memory) => memory.id),
-            attachedPolicyMemoryIds: [],
             validated: false,
             source: {
                 source: "tools.observe.decision_repair.v7",
@@ -1843,34 +1606,14 @@ export class SessionTurnService {
             source: "tools.observe.decision_repair.v7",
             createdAt: at
         });
-        this.deps.enqueueJob({
-            jobType: "negative_experience",
-            userId: session.userId,
-            sessionId: session.id,
-            episodeId: episode.id,
-            payload: {
-                source: "tool_failure_burst",
-                sourceEventId: repair.id,
-                repairId: repair.id,
-                triggerCondition: `${burst.toolId}:${burst.context}`,
-                confidence: repair.meta.confidence
-            },
-            createdAt: at
-        });
         return {
             repairId: repair.id,
             contextHash: burst.contextHash,
-            skipped: false,
-            attachedPolicyIds: []
+            skipped: false
         };
     }
     failureBurstRepairEvidence(input) {
         const query = `${input.toolId}\n${input.reason}`;
-        const policies = this.deps.repos.memories.search(query, {
-            memoryLayer: "L2",
-            status: "activated"
-        }, input.limit);
-        const policyIds = policies.map((policy) => policy.id);
         const l1Hits = this.deps.repos.memories.search(query, {
             memoryLayer: "L1",
             status: "activated"
@@ -1890,24 +1633,6 @@ export class SessionTurnService {
             if (trace.value < -this.deps.config.algorithm.feedback.minLowValueThreshold &&
                 lowValueMemories.length < input.limit) {
                 lowValueMemories.push(memory);
-            }
-        }
-        for (const policy of this.deps.repos.memories.getMany(policyIds)) {
-            const meta = policyMetaFromMemory(policy);
-            if (!meta)
-                continue;
-            for (const memory of this.deps.repos.memories.getMany(meta.sourceTraceIds)) {
-                const trace = this.deps.traceMeta(memory);
-                if (!trace)
-                    continue;
-                if (trace.value > 0 && highValueMemories.length < input.limit && !highValueMemories.some((item) => item.id === memory.id)) {
-                    highValueMemories.push(memory);
-                }
-                if (trace.value < -this.deps.config.algorithm.feedback.minLowValueThreshold &&
-                    lowValueMemories.length < input.limit &&
-                    !lowValueMemories.some((item) => item.id === memory.id)) {
-                    lowValueMemories.push(memory);
-                }
             }
         }
         return {
@@ -2099,21 +1824,8 @@ export class SessionTurnService {
             config: this.deps.retrievalTuningConfig()
         });
         const retrievedMemories = this.deps.repos.memories.getMany(retrieval.hits.map((hit) => hit.id));
-        const policyMemories = retrievedMemories.filter((memory) => memory.memoryLayer === "L2");
         const retrievedMemoryById = new Map(retrievedMemories.map((memory) => [memory.id, memory]));
-        const policyGuidance = policyMemories.flatMap((memory) => {
-            const policy = policyMetaFromMemory(memory);
-            if (!policy)
-                return [];
-            return [
-                ...policy.decisionGuidance.preference,
-                ...policy.decisionGuidance.antiPattern,
-                policy.procedure ? `Related policy: ${clip(policy.procedure, 220)}` : undefined
-            ].filter((item) => Boolean(item));
-        });
-        const retrievalGuidance = retrieval.hits
-            .filter((hit) => !policyMemories.some((memory) => memory.id === hit.id))
-            .map((hit) => {
+        const retrievalGuidance = retrieval.hits.map((hit) => {
             const memory = retrievedMemoryById.get(hit.id);
             const trace = memory ? traceMetaFromMemory(memory) : null;
             const toolText = trace?.toolCalls
@@ -2142,7 +1854,6 @@ export class SessionTurnService {
         ].filter((item) => Boolean(item)));
         const hint = uniq([
             ...repairGuidance,
-            ...policyGuidance,
             ...retrievalGuidance
         ]).join("\n");
         const retrievedRawTurnIds = new Set(retrievedMemories
@@ -2156,7 +1867,6 @@ export class SessionTurnService {
         const sourceMemoryIds = uniq([
             ...retrievedMemories.flatMap((memory) => this.deps.retrievedMemorySourceIds(memory)),
             ...retrievedSiblingTraceIds,
-            ...repairs.flatMap((repair) => repair.attachedPolicyMemoryIds),
             ...repairs.flatMap((repair) => repair.highValueMemoryIds)
         ]);
         return {
@@ -2167,11 +1877,9 @@ export class SessionTurnService {
             } : undefined,
             reason: repairGuidance.length > 0
                 ? "matched decision repair guidance"
-                : policyGuidance.length > 0
-                    ? "matched L2 repair policies"
-                    : retrievalGuidance.length > 0
-                        ? "matched decision repair retrieval"
-                        : "no repair guidance found",
+                : retrievalGuidance.length > 0
+                    ? "matched decision repair retrieval"
+                    : "no repair guidance found",
             sourceMemoryIds
         };
     }
@@ -2203,94 +1911,6 @@ export class SessionTurnService {
             maxTextChars: this.deps.config.algorithm.capture.maxTextChars,
             maxToolOutputChars: this.deps.config.algorithm.capture.maxToolOutputChars
         }).map((step) => ({ ...step, rawTurnId: rawTurn.id })));
-    }
-    captureUserMemory(rawTurn, request, at) {
-        const correction = request.userMemoryCorrection;
-        if (correction) {
-            const target = this.deps.repos.userMemories.get(correction.targetMemoryId);
-            if (!target || target.userId !== rawTurn.userId || target.status !== "active") {
-                throw new MemoryServiceError("not_found", `active user memory not found: ${correction.targetMemoryId}`);
-            }
-            const content = correction.revisedContent.trim();
-            const memoryTypes = classifyUserMemory(content);
-            if (!content || memoryTypes.length === 0) {
-                throw new MemoryServiceError("invalid_argument", "user memory correction requires complete revised user content");
-            }
-            const replacement = buildUserMemory({
-                id: `user_memory_${stableHash(`${rawTurn.id}:${target.id}:${content}`).slice(0, 20)}`,
-                sourceTurnId: rawTurn.id,
-                userId: rawTurn.userId,
-                memoryTypes,
-                content,
-                createdAt: at,
-                replacesMemoryId: target.id
-            });
-            if (replacement.normalizedUserTextHash === target.normalizedUserTextHash) {
-                throw new MemoryServiceError("invalid_argument", "user memory correction must change the target content");
-            }
-            const upsert = this.deps.repos.userMemories.upsertExact(replacement);
-            const inserted = upsert.memory;
-            const archived = this.deps.repos.userMemories.archiveForCorrection(target.id, inserted.id, at);
-            this.appendUserMemoryChange(inserted, upsert.previous, upsert.created ? "created" : "updated", at);
-            if (archived)
-                this.appendUserMemoryChange(archived, target, "archived", at);
-            return {
-                memoryIds: [inserted.id],
-                jobs: upsert.created ? this.userMemoryEmbeddingJobs(inserted, rawTurn, at) : []
-            };
-        }
-        if (Array.isArray(request.tags) &&
-            request.tags.some((tag) => typeof tag === "string" && tag.trim().toLowerCase() === "agent-source")) {
-            return { memoryIds: [], jobs: [] };
-        }
-        if (this.deps.llm.isConfigured())
-            return { memoryIds: [], jobs: [] };
-        const content = rawTurn.userText?.trim() ?? "";
-        const memoryTypes = classifyUserMemory(content);
-        if (memoryTypes.length === 0)
-            return { memoryIds: [], jobs: [] };
-        const candidate = buildUserMemory({
-            id: `user_memory_${stableHash(`${rawTurn.id}:${content}`).slice(0, 20)}`,
-            sourceTurnId: rawTurn.id,
-            userId: rawTurn.userId,
-            memoryTypes,
-            content,
-            createdAt: at
-        });
-        const upsert = this.deps.repos.userMemories.upsertExact(candidate);
-        this.appendUserMemoryChange(upsert.memory, upsert.previous, upsert.created ? "created" : "updated", at);
-        return {
-            memoryIds: [upsert.memory.id],
-            jobs: upsert.created ? this.userMemoryEmbeddingJobs(upsert.memory, rawTurn, at) : []
-        };
-    }
-    userMemoryEmbeddingJobs(memory, rawTurn, at) {
-        if (!this.deps.config.algorithm.capture.embedAfterCapture)
-            return [];
-        return [this.deps.enqueueJob({
-                jobType: "user_memory_embedding",
-                userId: memory.userId,
-                sessionId: rawTurn.sessionId,
-                episodeId: rawTurn.episodeId,
-                targetMemoryId: memory.id,
-                payload: { contentHash: stableHash(memory.content) },
-                maxAttempts: 6,
-                createdAt: at
-            })];
-    }
-    appendUserMemoryChange(memory, before, op, at) {
-        this.deps.repos.runtime.appendChange({
-            memoryId: memory.id,
-            kind: "user_memory",
-            op,
-            entityId: memory.id,
-            userId: memory.userId,
-            changeType: `user_memory_${op}`,
-            before,
-            after: memory,
-            source: "turn.complete.user_memory",
-            createdAt: at
-        });
     }
     buildTurnRouteProposal(latest, decision, lastTurnAtMs, proposedAt = nowIso()) {
         const mergeMode = this.deps.config.algorithm.session.followUpMode === "merge_follow_ups";
@@ -2496,24 +2116,10 @@ export class SessionTurnService {
                 });
                 jobs.push(...this.deps.finalizeClosedEpisode(closed, at, "topic_boundary"));
                 closedEpisodeIds.push(closed.id);
-                if (decision.relation === "new_task" && session.meta.l3_world_model_protocol_version === 2) {
-                    this.deps.repos.l3WorldModels.freezeBatches({
-                        sessionId: session.id,
-                        trigger: "new_task",
-                        at
-                    });
-                }
             }
         }
         else {
             jobs.push(...this.deps.finalizeClosedEpisode(latest, at, "topic_boundary"));
-            if (decision.relation === "new_task" && session.meta.l3_world_model_protocol_version === 2) {
-                this.deps.repos.l3WorldModels.freezeBatches({
-                    sessionId: session.id,
-                    trigger: "new_task",
-                    at
-                });
-            }
         }
         const next = this.ensureEpisode(session);
         const episode = this.deps.repos.runtime.updateEpisodeMeta(next.id, {
@@ -2800,17 +2406,4 @@ function sanitizedSessionMeta(meta) {
     delete sanitized.workspace_uri;
     delete sanitized.workspace_host_id;
     return sanitized;
-}
-function v2SessionMeta(request, workspace, timeZone) {
-    return {
-        ...sanitizedSessionMeta(request.meta),
-        l3_world_model_protocol_version: 2,
-        ...(workspace.workspaceUri ? { workspace_uri: workspace.workspaceUri } : {}),
-        ...(workspace.workspaceHostId ? { workspace_host_id: workspace.workspaceHostId } : {}),
-        ...(timeZone ? { time_zone: timeZone } : {})
-    };
-}
-function optionalMetaString(meta, key) {
-    const value = meta[key];
-    return typeof value === "string" && value ? value : undefined;
 }

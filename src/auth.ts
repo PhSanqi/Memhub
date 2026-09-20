@@ -186,64 +186,6 @@ export async function resolveCloudflareAccount(
   });
 }
 
-export async function importNormifyAccounts(
-  stateRoot: string,
-  normifyRoot: string
-): Promise<{ imported: number; skipped: number }> {
-  const sourcePath = join(resolve(normifyRoot), ".normify", "accounts.json");
-  const raw = JSON.parse(await readFile(sourcePath, "utf8")) as unknown;
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Normify accounts.json 格式无效");
-  const sourceAccounts = (raw as { accounts?: unknown }).accounts;
-  if (!sourceAccounts || typeof sourceAccounts !== "object" || Array.isArray(sourceAccounts)) {
-    throw new Error("Normify accounts.json 缺少 accounts");
-  }
-  return withMutationLock(async () => {
-    const data = await load(stateRoot);
-    let imported = 0;
-    let skipped = 0;
-    for (const [rawUsername, rawRecord] of Object.entries(sourceAccounts as Record<string, unknown>)) {
-      const username = usernameOf(rawUsername);
-      if (!rawRecord || typeof rawRecord !== "object" || Array.isArray(rawRecord)) {
-        skipped += 1;
-        continue;
-      }
-      const record = rawRecord as Record<string, unknown>;
-      if (typeof record.account_id !== "string" || !record.account_id.trim()) {
-        skipped += 1;
-        continue;
-      }
-      const cloudflare = normalizeImportedCloudflare(record.cloudflare);
-      const existingById = Object.entries(data.accounts).find(([, item]) => item.account_id === record.account_id);
-      if (existingById) {
-        skipped += 1;
-        continue;
-      }
-      if (data.accounts[username]) throw new Error(`导入账号用户名冲突：${username}`);
-      if (cloudflare) assertEmailAvailable(data, cloudflare.email);
-      data.accounts[username] = {
-        account_id: record.account_id.trim(),
-        created_at: typeof record.created_at === "string" && record.created_at.trim()
-          ? record.created_at
-          : new Date().toISOString(),
-        ...(record.role === "admin" ? { role: "admin" as const } : {}),
-        ...(cloudflare ? { cloudflare } : {})
-      };
-      imported += 1;
-    }
-    if (imported > 0) await save(stateRoot, data);
-    return { imported, skipped };
-  });
-}
-
-function normalizeImportedCloudflare(value: unknown): { email: string; sub?: string } | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const record = value as Record<string, unknown>;
-  if (typeof record.email !== "string") return undefined;
-  const email = emailOf(record.email);
-  const sub = typeof record.sub === "string" && record.sub.trim() ? record.sub.trim() : undefined;
-  return { email, ...(sub ? { sub } : {}) };
-}
-
 function assertEmailAvailable(data: AccountStore, email: string, exceptUsername?: string): void {
   const conflict = Object.entries(data.accounts).find(([username, record]) =>
     username !== exceptUsername && record.cloudflare?.email === email

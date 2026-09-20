@@ -78,7 +78,6 @@ MEMHUB_MEMORY_TOKEN=$MEMORY_TOKEN
 MEMHUB_MEMORY_URL=http://127.0.0.1:18960
 MEMHUB_STATE_ROOT=$SERVER_STATE
 MEMHUB_BINDINGS=$STATE_ROOT/conversation-project-bindings.json
-MEMHUB_ARCHITECTURE_CORE=embedded
 EOF_ENV
 chmod 600 "$ENV_PATH"
 
@@ -124,7 +123,7 @@ Requires=memhub-core.service
 [Service]
 Type=simple
 EnvironmentFile=$ENV_PATH
-ExecStart=$NODE $REPO_ROOT/dist/mcp.js --http 3001 --http-path /memhub/mcp --capture-path /memhub/capture --state-root $SERVER_STATE --memory-url http://127.0.0.1:18960 --normify-root $REPO_ROOT/..
+ExecStart=$NODE $REPO_ROOT/dist/mcp.js --http 3001 --http-path /memhub/mcp --capture-path /memhub/capture --state-root $SERVER_STATE --memory-url http://127.0.0.1:18960
 Restart=on-failure
 RestartSec=3s
 UMask=0077

@@ -49,29 +49,6 @@ export async function verifyCloudflareAccessJwt(
   return { sub: payload.sub.trim(), email: payload.email.trim().toLowerCase() };
 }
 
-export async function importNormifyCloudflarePin(
-  stateRoot: string,
-  normifyRoot: string
-): Promise<{ imported: boolean; present: boolean }> {
-  const sourcePath = join(resolve(normifyRoot), ".normify", "cloudflare-access.json");
-  let source: CloudflarePin;
-  try {
-    source = validatePin(JSON.parse(await readFile(sourcePath, "utf8")) as unknown);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { imported: false, present: false };
-    throw error;
-  }
-  const existing = await loadPin(stateRoot);
-  if (existing) {
-    if (existing.issuer !== source.issuer || existing.audience !== source.audience) {
-      throw new Error("Memhub 与 Normify 的 Cloudflare Access pin 不一致，拒绝覆盖");
-    }
-    return { imported: false, present: true };
-  }
-  await savePin(stateRoot, source);
-  return { imported: true, present: true };
-}
-
 function pinPath(stateRoot: string): string {
   return join(resolve(stateRoot), "cloudflare-access.json");
 }

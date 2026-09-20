@@ -26,7 +26,7 @@ export function polardbMigrationSql() {
       tags JSONB NOT NULL DEFAULT '[]'::jsonb,
       info JSONB NOT NULL DEFAULT '{}'::jsonb,
       properties JSONB NOT NULL DEFAULT '{}'::jsonb,
-      memory_layer TEXT NOT NULL CHECK (memory_layer IN ('L1', 'L2', 'L3', 'Skill')),
+      memory_layer TEXT NOT NULL CHECK (memory_layer IN ('L1', 'L2', 'L3', 'L4', 'Skill')),
       embedding vector,
       embedding_model TEXT,
       embedding_dim INTEGER,

@@ -31,7 +31,6 @@ const configPath = resolve(args.config ?? (existsSync(legacyConfig) ? legacyConf
 const migrationRoot = resolve(args["state-root"] ?? join(homedir(), ".memmy", "memhub", "core-migrations"));
 const memoryVendor = resolve(args["memory-vendor"] ?? join(memhubDir, "vendor", "memory-core", "src"));
 const agentSourceVendor = resolve(args["agent-source-vendor"] ?? join(memhubDir, "vendor", "agent-source-core"));
-const normifyVendor = resolve(args["normify-vendor"] ?? join(memhubDir, "vendor", "normify", "lib"));
 const vendorManifestPath = resolve(args["vendor-manifest"] ?? join(memhubDir, "vendor", "manifest.json"));
 
 if (command === "preflight") {
@@ -54,12 +53,10 @@ async function preflight() {
   }
   const memoryParity = await verifyVendoredTree("memory-core", memoryVendor, vendorManifest.components?.memory);
   const agentSourceParity = await verifyVendoredTree("agent-source-core", agentSourceVendor, vendorManifest.components?.agentSource);
-  const normifyParity = await verifyVendoredTree("architecture-core", normifyVendor, vendorManifest.components?.architecture);
-  if (!memoryParity.equal || !agentSourceParity.equal || !normifyParity.equal) {
+  if (!memoryParity.equal || !agentSourceParity.equal) {
     fail("vendored core integrity check failed", {
       memoryParity,
-      agentSourceParity,
-      normifyParity
+      agentSourceParity
     });
   }
 
@@ -107,8 +104,7 @@ async function preflight() {
     },
     runtimeParity: {
       memory: memoryParity,
-      agentSource: agentSourceParity,
-      architecture: normifyParity
+      agentSource: agentSourceParity
     },
     database: fingerprint
   };
@@ -128,8 +124,7 @@ async function preflight() {
     },
     runtimeParity: {
       memory: memoryParity.equal,
-      agentSource: agentSourceParity.equal,
-      architecture: normifyParity.equal
+      agentSource: agentSourceParity.equal
     }
   }, null, 2) + "\n");
 }
@@ -199,15 +194,21 @@ async function preserved() {
   const current = openDatabase(dbPath);
   const baselineSchema = schemaHash(baseline);
   const currentSchema = schemaHash(current);
+  const baselineVersion = migrationVersion(baseline);
+  const currentVersion = migrationVersion(current);
+  const currentIntegrity = integrity(current);
   const missing = [];
   const regressions = [];
   const checked = {};
 
-  if (baselineSchema !== currentSchema) {
-    regressions.push({ kind: "schema", expected: baselineSchema, current: currentSchema });
-  }
+  if (currentIntegrity !== "ok") regressions.push({ kind: "integrity", current: currentIntegrity });
   const tables = durableTableNames(baseline);
   for (const table of tables) {
+    if (!tableExists(current, table)) {
+      checked[table] = { baselineRows: null, currentRows: 0, primaryKey: [], missingTable: true };
+      regressions.push({ kind: "missing-table", table });
+      continue;
+    }
     const pk = primaryKeyColumns(baseline, table);
     if (pk.length === 0) {
       const before = Number(baseline.prepare(`select count(*) as n from ${quoteId(table)}`).get().n);
@@ -250,6 +251,14 @@ async function preserved() {
     phase: "preserved",
     manifest: manifestPath,
     db: dbPath,
+    integrity: currentIntegrity,
+    schema: {
+      changed: baselineSchema !== currentSchema,
+      baselineHash: baselineSchema,
+      currentHash: currentSchema,
+      baselineVersion,
+      currentVersion
+    },
     tablesChecked: Object.keys(checked).length,
     baselineRowsPreserved: Object.values(checked).reduce((sum, item) => sum + item.baselineRows, 0),
     checked
@@ -303,6 +312,17 @@ function primaryKeyColumns(db, table) {
     .filter((column) => Number(column.pk) > 0)
     .sort((left, right) => Number(left.pk) - Number(right.pk))
     .map((column) => column.name);
+}
+
+function tableExists(db, table) {
+  return Boolean(db.prepare(
+    "select 1 from sqlite_master where type='table' and name=? limit 1"
+  ).get(table));
+}
+
+function migrationVersion(db) {
+  if (!tableExists(db, "schema_migrations")) return 0;
+  return Number(db.prepare("select coalesce(max(version), 0) as version from schema_migrations").get().version);
 }
 
 function keyTuple(columns, row) {

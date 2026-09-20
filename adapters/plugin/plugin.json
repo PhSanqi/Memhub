@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "memhub",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Private long-term memory, project context and automatic turn capture through a local Memhub Bridge.",
   "license": "MIT",
   "keywords": ["memory", "context", "mcp", "architecture", "capture"],

@@ -99,6 +99,7 @@ export class ImportJobProcessor {
             },
             internal: {
                 source: request.source ?? "manual", title, summary: importSummary ?? firstLine(request.content), turn_id: request.turnId, time_zone: request.timeZone,
+                ...(request.sourceArtifactId?.trim() ? { source_artifact_id: request.sourceArtifactId.trim() } : {}),
                 ...(readOnlySkill ? {
                     read_only: true,
                     source_agent_id: sourceAgentId,
@@ -113,8 +114,7 @@ export class ImportJobProcessor {
                     eta: 0.5,
                     support: 1,
                     gain: 0,
-                    source_policy_ids: [],
-                    source_world_model_ids: [],
+                    source_memory_ids: [],
                     evidence_anchor_ids: [],
                     skill: {
                         name: title,
@@ -122,8 +122,7 @@ export class ImportJobProcessor {
                         status: "active",
                         support: 1,
                         gain: 0,
-                        source_policy_ids: [],
-                        source_world_model_ids: [],
+                        source_memory_ids: [],
                         evidence_anchor_ids: [],
                         invocation_guide: request.content,
                         procedure_json: { summary: request.content },
@@ -400,9 +399,11 @@ export function updateImportPipelineStatus(memory, _status, at) {
 }
 function kindForLayer(layer) {
     if (layer === "L2")
-        return "policy";
+        return "timeline";
     if (layer === "L3")
-        return "world_model";
+        return "project_profile";
+    if (layer === "L4")
+        return "user_profile";
     if (layer === "Skill")
         return "skill";
     return "trace";

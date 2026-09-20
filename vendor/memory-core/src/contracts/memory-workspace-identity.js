@@ -3,8 +3,6 @@ import { z } from "zod";
 import { sha256Hex } from "./memory-canonical-json.js";
 const MAX_WORKSPACE_URI_BYTES = 4096;
 const LOCAL_HOST_NAMES = new Set(["", "localhost"]);
-export const L3WorldModelProtocolVersionSchema = z.literal(2);
-export const L3WorldModelTransitionSchema = z.enum(["allow_legacy_rollover", "resume_only"]);
 export const WorkspaceHostIdSchema = z.string().regex(/^[a-f0-9]{64}$/);
 export const WorkspaceUriSchema = z.string().min(1).superRefine((value, context) => {
     try {

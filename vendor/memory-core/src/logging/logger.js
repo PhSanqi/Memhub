@@ -290,16 +290,10 @@ function safeTag(value) {
 }
 function jobTypeTag(value) {
     const tags = {
-        skill_crystallization: "skill.crystallize",
-        l3_abstraction: "l3.abstraction",
-        l3_world_model_update: "l3.world_model.update",
-        project_environment_profile: "project.environment.profile",
-        l2_induction: "l2.induction",
         trace_summary: "memory.summary",
         import_summary: "memory.import_summary",
         episode_idle_close: "episode.close",
-        skill_trial_resolve: "skill.trial_resolve",
-        l2_association: "l2.association"
+        skill_trial_resolve: "skill.trial_resolve"
     };
     return tags[value] ?? value.replace(/_/g, ".");
 }
