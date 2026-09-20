@@ -28,6 +28,7 @@ const commonPaths = [
   "src",
   "scripts",
   "tests",
+  "deploy",
   "adapters",
   "docs",
   "vendor",
