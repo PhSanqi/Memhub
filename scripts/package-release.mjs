@@ -66,7 +66,12 @@ for (const variant of variants) {
   const rootName = `memhub-v${version}-${variant.id}`;
   const filename = `${rootName}.${variant.format}`;
   const output = resolve(outputRoot, filename);
-  const paths = [...commonPaths, `editions/${variant.edition}`];
+  const paths = [
+    ...commonPaths,
+    `editions/${variant.edition}/README.md`,
+    `editions/${variant.edition}/README.zh-CN.md`,
+    `editions/${variant.edition}/${variant.os}`
+  ];
   gitArchive({ ref: REF, format: variant.format, prefix: `${rootName}/`, output, paths });
   const digest = createHash("sha256").update(await readFile(output)).digest("hex");
   assets.push({ ...variant, filename, sha256: digest });
