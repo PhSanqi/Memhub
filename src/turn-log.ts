@@ -151,14 +151,13 @@ export async function listL1Turns(input: {
   projectId?: string;
   limit?: number;
 }): Promise<L1TurnView[]> {
-  const items = await listCaptureEvents(input.stateRoot, input.accountId);
-  const filtered = items
-    .filter((item) => !input.continuityId || item.continuity_id === input.continuityId)
-    .filter((item) => !input.conversationId || item.conversation_id === input.conversationId)
-    .filter((item) => !input.projectId || item.project_hint === input.projectId)
-    .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
-    .slice(0, Math.max(1, Math.min(500, Math.trunc(input.limit ?? 100))));
-  return filtered.map((item) => turnView(item, item.ingested));
+  const items = await listCaptureEvents(input.stateRoot, input.accountId, {
+    ...(input.continuityId ? { continuityId: input.continuityId } : {}),
+    ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+    ...(input.projectId ? { projectId: input.projectId } : {}),
+    limit: Math.max(1, Math.min(500, Math.trunc(input.limit ?? 100)))
+  });
+  return items.map((item) => turnView(item, item.ingested));
 }
 
 export async function recentL1Continuity(input: {

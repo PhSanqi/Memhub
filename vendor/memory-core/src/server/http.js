@@ -532,7 +532,8 @@ async function routeRequest(service, autoWorker, method, url, body, principal, c
             sourceSkillId: typeof request.sourceSkillId === "string" ? request.sourceSkillId : undefined,
             sourceSkillPath: typeof request.sourceSkillPath === "string" ? request.sourceSkillPath : undefined,
             sourceSkillVersion: typeof request.sourceSkillVersion === "string" ? request.sourceSkillVersion : undefined,
-            sourceContentHash: typeof request.sourceContentHash === "string" ? request.sourceContentHash : undefined
+            sourceContentHash: typeof request.sourceContentHash === "string" ? request.sourceContentHash : undefined,
+            sourceArtifactId: typeof request.sourceArtifactId === "string" ? request.sourceArtifactId : undefined
         };
         const result = await trackExternalToolCall(pluginRuntimeAnalytics, { ...request, toolName: "memmy_memory_add" }, () => service.idempotent("memory.add", publicRequest, { path, request: publicRequest }, () => service.addMemory(publicRequest)), (addResult) => ({
             stored_count: storedCountFromAddResponse(addResult),

@@ -126,37 +126,47 @@ export class MemoryRestContextSource implements ContextMemorySource {
           : "Skill";
     const sourceHarness = requireNonEmpty(input.sourceHarness, "sourceHarness");
     const stableArtifactId = input.artifactId?.trim() || stableDistillId(input);
+    const tags = unique([
+      "memhub",
+      "distilled",
+      ...(input.contractVersion ? [`distill-contract:${input.contractVersion}`] : []),
+      ...(input.confidence !== undefined ? [`confidence:${input.confidence}`] : []),
+      ...(input.evidenceRefs ?? []).map((ref) => `evidence:${ref}`),
+      ...(input.sourceConversations ?? []).map((ref) => `source-conversation:${ref}`),
+      ...provenanceTags(input.provenance),
+      `artifact:${input.kind}`,
+      ...(input.projectId ? [`project:${input.projectId}`] : ["global"]),
+      ...(input.tags ?? [])
+    ]);
+    const requestBody = {
+      namespace,
+      source: `memhub:${sourceHarness}:${provenanceSource(input.provenance)}`,
+      content: input.content,
+      title: input.title,
+      layer,
+      tags,
+      sourceArtifactId: stableArtifactId,
+      ...(skill ? {
+        sourceAgentId: sourceHarness,
+        sourceSkillId: stableArtifactId,
+        ...(input.version?.trim() ? { sourceSkillVersion: input.version.trim() } : {})
+      } : {})
+    };
+    // requestId is retry-stable for an identical write, but changes when the
+    // canonical artifact evolves. Memory Core upserts by memory key/title;
+    // using only the artifact identity here would turn legitimate revisions
+    // into idempotency conflicts (same key, different request body).
     const request = {
       requestId: stableRequestId("distill", [
         input.accountId,
         input.projectId ?? "global",
         input.kind,
         sourceHarness,
-        stableArtifactId
+        stableArtifactId,
+        stableHashJson(requestBody)
       ]),
       adapterId: "memhub-distill",
-      namespace,
-      source: `memhub:${sourceHarness}:${provenanceSource(input.provenance)}`,
-      content: input.content,
-      title: input.title,
-      layer,
-      tags: unique([
-        "memhub",
-        "distilled",
-        ...(input.contractVersion ? [`distill-contract:${input.contractVersion}`] : []),
-        ...(input.confidence !== undefined ? [`confidence:${input.confidence}`] : []),
-        ...(input.evidenceRefs ?? []).map((ref) => `evidence:${ref}`),
-        ...(input.sourceConversations ?? []).map((ref) => `source-conversation:${ref}`),
-        ...provenanceTags(input.provenance),
-        `artifact:${input.kind}`,
-        ...(input.projectId ? [`project:${input.projectId}`] : ["global"]),
-        ...(input.tags ?? [])
-      ]),
-      ...(skill ? {
-        sourceAgentId: sourceHarness,
-        sourceSkillId: stableArtifactId,
-        ...(input.version?.trim() ? { sourceSkillVersion: input.version.trim() } : {})
-      } : {})
+      ...requestBody
     };
     return this.client.addMemory(request);
   }
@@ -303,4 +313,8 @@ function stableRequestId(prefix: string, parts: readonly string[]): string {
     .update(parts.join("\u0000"), "utf8")
     .digest("hex")
     .slice(0, 40)}`;
+}
+
+function stableHashJson(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
 }

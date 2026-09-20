@@ -4,15 +4,36 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLlmClient } from "../vendor/memory-core/src/model/llm.js";
+import { memoryAddKey } from "../vendor/memory-core/src/service/import/memory-import-pipeline.js";
 import { migrate } from "../vendor/memory-core/src/storage/schema.js";
 
 const root = await mkdtemp(join(tmpdir(), "memhub-vendor-regression-"));
 try {
   testUnavailableAssignedModelIsNotConfigured();
+  testStableArtifactMemoryKey();
   testV7ToV8Migration();
   console.log("memhub-vendor-regressions: ok");
 } finally {
   await rm(root, { recursive: true, force: true });
+}
+
+function testStableArtifactMemoryKey() {
+  const base = {
+    adapterId: "memhub-distill",
+    namespace: { tenantId: "acct-a", userId: "user-a", projectId: "memhub" },
+    sourceArtifactId: "project-timeline:memhub"
+  };
+  const first = memoryAddKey({ ...base, requestId: "request-v1", content: "timeline v1" }, "L2", "Project Timeline · memhub");
+  const second = memoryAddKey({ ...base, requestId: "request-v2", content: "timeline v2" }, "L2", "Project Timeline · memhub");
+  const otherAccount = memoryAddKey({
+    ...base,
+    namespace: { tenantId: "acct-b", userId: "user-b", projectId: "memhub" },
+    requestId: "request-v1",
+    content: "timeline v1"
+  }, "L2", "Project Timeline · memhub");
+  assert.equal(first, second);
+  assert.notEqual(first, otherAccount);
+  assert.match(first, /^artifact:/);
 }
 
 function testUnavailableAssignedModelIsNotConfigured() {

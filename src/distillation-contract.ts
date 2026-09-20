@@ -35,6 +35,13 @@ export function validateDistillationCandidate(input: {
   for (const ref of [...(input.evidence.evidenceRefs ?? []), ...(input.evidence.sourceConversations ?? [])]) {
     if (!ref.trim() || ref.length > 1000) throw new TypeError("distillation evidence reference is invalid");
   }
+  const evidenceRefs = input.evidence.evidenceRefs ?? [];
+  if (input.kind !== "skill" && evidenceRefs.length === 0) {
+    throw new TypeError(`${input.kind.toUpperCase()} distillation requires evidence_refs`);
+  }
+  if (input.kind === "l4" && evidenceRefs.length < 2) {
+    throw new TypeError("L4 distillation requires evidence from at least two project L3 artifacts");
+  }
 }
 
 export function distillationContract() {

@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import Database from "better-sqlite3";
 
 export interface MemhubCaptureEvent {
   event_id: string;
@@ -43,7 +44,33 @@ interface DeviceStore {
   devices: DeviceRecord[];
 }
 
+export interface CaptureIndexEntry {
+  account_id: string;
+  event_id: string;
+  conversation_id: string;
+  continuity_id: string;
+  timestamp: string;
+  project_hint?: string;
+  capture_status: MemhubCaptureEvent["capture_status"];
+  ingested: boolean;
+}
+
+export interface CaptureIndexStats {
+  total: number;
+  complete: number;
+  incomplete: number;
+}
+
+export interface IdleCaptureGroup {
+  account_id: string;
+  conversation_id: string;
+  project_id: string;
+  latest_timestamp: string;
+  complete_count: number;
+}
+
 let deviceMutationTail = Promise.resolve();
+let captureIndexMutationTail = Promise.resolve();
 
 export function normalizeCaptureEvent(value: unknown): MemhubCaptureEvent {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("capture event must be an object");
@@ -142,32 +169,44 @@ export async function storeCaptureEvent(
   device: Pick<DeviceRecord, "device_id" | "account_id">,
   rawEvent: unknown
 ): Promise<{ created: boolean; updated: boolean; event: StoredCaptureEvent }> {
-  const event = normalizeCaptureEvent(rawEvent);
-  const stored: StoredCaptureEvent = {
-    ...event,
-    account_id: device.account_id,
-    device_id: device.device_id,
-    received_at: new Date().toISOString()
-  };
-  const path = captureEventPath(stateRoot, device.account_id, event.event_id);
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  try {
-    const existing = normalizeStoredCapture(JSON.parse(await readFile(path, "utf8")) as unknown);
-    if (existing.event_id !== event.event_id) throw new Error("capture event hash collision");
-    if (existing.account_id !== device.account_id) throw new Error("capture event account mismatch");
-    if (existing.device_id !== device.device_id) throw new Error("capture event device mismatch");
-    const merged = mergeCaptureEvent(existing, event);
-    if (!merged.updated) return { created: false, updated: false, event: existing };
-    const updated: StoredCaptureEvent = { ...existing, ...merged.event };
-    assertCaptureCompleteness(updated);
-    await writeStoredCapture(path, updated);
-    return { created: false, updated: true, event: updated };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
-  }
-  assertCaptureCompleteness(stored);
-  await writeStoredCapture(path, stored, true);
-  return { created: true, updated: false, event: stored };
+  return withCaptureIndexMutation(async () => {
+    const event = normalizeCaptureEvent(rawEvent);
+    const stored: StoredCaptureEvent = {
+      ...event,
+      account_id: device.account_id,
+      device_id: device.device_id,
+      received_at: new Date().toISOString()
+    };
+    const path = captureEventPath(stateRoot, device.account_id, event.event_id);
+    await ensureCaptureIndexUnlocked(stateRoot, device.account_id);
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    try {
+      const existing = normalizeStoredCapture(JSON.parse(await readFile(path, "utf8")) as unknown);
+      if (existing.event_id !== event.event_id) throw new Error("capture event hash collision");
+      if (existing.account_id !== device.account_id) throw new Error("capture event account mismatch");
+      if (existing.device_id !== device.device_id) throw new Error("capture event device mismatch");
+      const merged = mergeCaptureEvent(existing, event);
+      if (!merged.updated) {
+        await upsertCaptureIndexUnlocked(stateRoot, existing, await isCaptureIngested(stateRoot, device.account_id, existing.event_id));
+        return { created: false, updated: false, event: existing };
+      }
+      const updated: StoredCaptureEvent = { ...existing, ...merged.event };
+      assertCaptureCompleteness(updated);
+      await markCaptureIndexDirty(stateRoot, device.account_id, event.event_id);
+      await writeStoredCapture(path, updated);
+      await upsertCaptureIndexUnlocked(stateRoot, updated);
+      await clearCaptureIndexDirty(stateRoot, device.account_id, event.event_id);
+      return { created: false, updated: true, event: updated };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+    }
+    assertCaptureCompleteness(stored);
+    await markCaptureIndexDirty(stateRoot, device.account_id, event.event_id);
+    await writeStoredCapture(path, stored, true);
+    await upsertCaptureIndexUnlocked(stateRoot, stored, false);
+    await clearCaptureIndexDirty(stateRoot, device.account_id, event.event_id);
+    return { created: true, updated: false, event: stored };
+  });
 }
 
 function assertCaptureCompleteness(event: MemhubCaptureEvent): void {
@@ -187,60 +226,140 @@ export async function isCaptureIngested(stateRoot: string, accountId: string, ev
 }
 
 export async function markCaptureIngested(stateRoot: string, accountId: string, eventId: string): Promise<void> {
-  const path = `${captureEventPath(stateRoot, accountId, eventId)}.ingested`;
-  await writeFile(path, new Date().toISOString() + "\n", { mode: 0o600 });
+  await withCaptureIndexMutation(async () => {
+    await ensureCaptureIndexUnlocked(stateRoot, accountId);
+    await markCaptureIndexDirty(stateRoot, accountId, eventId);
+    const path = `${captureEventPath(stateRoot, accountId, eventId)}.ingested`;
+    await writeFile(path, new Date().toISOString() + "\n", { mode: 0o600 });
+    await markCaptureIndexIngestedUnlocked(stateRoot, accountId, eventId);
+    await clearCaptureIndexDirty(stateRoot, accountId, eventId);
+  });
 }
 
 export async function countCaptureEvents(stateRoot: string): Promise<number> {
-  const root = join(resolve(stateRoot), "captures");
-  let count = 0;
-  try {
-    for (const account of await readdir(root, { withFileTypes: true })) {
-      if (!account.isDirectory()) continue;
-      for (const file of await readdir(join(root, account.name), { withFileTypes: true })) {
-        if (file.isFile() && file.name.endsWith(".json")) count += 1;
-      }
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
-  }
-  return count;
+  return (await captureIndexStats(stateRoot)).total;
+}
+
+export async function captureIndexStats(
+  stateRoot: string,
+  accountIdRaw?: string,
+  projectId?: string
+): Promise<CaptureIndexStats> {
+  return withCaptureIndexMutation(async () => {
+    const accountIds = accountIdRaw?.trim()
+      ? [accountIdRaw.trim()]
+      : await discoverCaptureAccountIds(stateRoot);
+    for (const accountId of accountIds) await ensureCaptureIndexUnlocked(stateRoot, accountId);
+    return withCaptureIndexDb(stateRoot, (db) => {
+      const where: string[] = [];
+      const params: string[] = [];
+      if (accountIdRaw?.trim()) { where.push("account_id=?"); params.push(accountIdRaw.trim()); }
+      if (projectId) { where.push("project_hint=?"); params.push(projectId); }
+      const row = db.prepare(`SELECT
+          COUNT(*) AS total,
+          SUM(CASE WHEN capture_status='complete' THEN 1 ELSE 0 END) AS complete,
+          SUM(CASE WHEN capture_status<>'complete' THEN 1 ELSE 0 END) AS incomplete
+        FROM capture_index${where.length ? ` WHERE ${where.join(" AND ")}` : ""}`)
+        .get(...params) as { total?: number; complete?: number | null; incomplete?: number | null } | undefined;
+      return {
+        total: Number(row?.total ?? 0),
+        complete: Number(row?.complete ?? 0),
+        incomplete: Number(row?.incomplete ?? 0)
+      };
+    });
+  });
+}
+
+export async function listIdleCaptureGroups(stateRoot: string, cutoffIso: string): Promise<IdleCaptureGroup[]> {
+  return withCaptureIndexMutation(async () => {
+    const accountIds = await discoverCaptureAccountIds(stateRoot);
+    for (const accountId of accountIds) await ensureCaptureIndexUnlocked(stateRoot, accountId);
+    return withCaptureIndexDb(stateRoot, (db) => {
+      const rows = db.prepare(`SELECT
+          account_id,
+          conversation_id,
+          project_hint AS project_id,
+          MAX(timestamp) AS latest_timestamp,
+          COUNT(*) AS complete_count
+        FROM capture_index
+        WHERE ingested=1 AND capture_status='complete' AND project_hint IS NOT NULL
+        GROUP BY account_id, conversation_id, project_hint
+        HAVING COUNT(*) >= 2 AND MAX(timestamp) <= ?
+        ORDER BY latest_timestamp ASC`).all(cutoffIso) as Array<Record<string, unknown>>;
+      return rows.map((row) => ({
+        account_id: requiredId(row.account_id, "account_id", 500),
+        conversation_id: requiredId(row.conversation_id, "conversation_id", 500),
+        project_id: requiredId(row.project_id, "project_id", 500),
+        latest_timestamp: normalizeTimestamp(row.latest_timestamp),
+        complete_count: Number(row.complete_count ?? 0)
+      }));
+    });
+  });
 }
 
 export async function listCaptureEvents(
   stateRoot: string,
-  accountIdRaw?: string
+  accountIdRaw?: string,
+  options: {
+    conversationId?: string;
+    continuityId?: string;
+    projectId?: string | null;
+    ingested?: boolean;
+    completeOnly?: boolean;
+    limit?: number;
+  } = {}
 ): Promise<Array<StoredCaptureEvent & { ingested: boolean }>> {
-  const root = join(resolve(stateRoot), "captures");
-  const accountKey = accountIdRaw
-    ? createHash("sha256").update(accountIdRaw.trim(), "utf8").digest("hex")
-    : undefined;
+  const entries = await listCaptureIndexEntries(stateRoot, accountIdRaw, options);
   const results: Array<StoredCaptureEvent & { ingested: boolean }> = [];
-  let accounts;
-  try {
-    accounts = await readdir(root, { withFileTypes: true });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
-    throw error;
+  for (const entry of entries) {
+    const event = normalizeStoredCapture(JSON.parse(await readFile(
+      captureEventPath(stateRoot, entry.account_id, entry.event_id),
+      "utf8"
+    )) as unknown);
+    results.push({ ...event, ingested: entry.ingested });
   }
-  for (const account of accounts) {
-    if (!account.isDirectory() || (accountKey && account.name !== accountKey)) continue;
-    const dir = join(root, account.name);
-    for (const file of await readdir(dir, { withFileTypes: true })) {
-      if (!file.isFile() || !file.name.endsWith(".json")) continue;
-      const path = join(dir, file.name);
-      const event = normalizeStoredCapture(JSON.parse(await readFile(path, "utf8")) as unknown);
-      let ingested = false;
-      try {
-        await readFile(`${path}.ingested`, "utf8");
-        ingested = true;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+  return results;
+}
+
+export async function listCaptureIndexEntries(
+  stateRoot: string,
+  accountIdRaw?: string,
+  options: {
+    conversationId?: string;
+    continuityId?: string;
+    projectId?: string | null;
+    ingested?: boolean;
+    completeOnly?: boolean;
+    limit?: number;
+  } = {}
+): Promise<CaptureIndexEntry[]> {
+  return withCaptureIndexMutation(async () => {
+    const accountIds = accountIdRaw?.trim()
+      ? [accountIdRaw.trim()]
+      : await discoverCaptureAccountIds(stateRoot);
+    for (const accountId of accountIds) await ensureCaptureIndexUnlocked(stateRoot, accountId);
+    return withCaptureIndexDb(stateRoot, (db) => {
+      const where: string[] = [];
+      const params: Array<string | number> = [];
+      if (accountIdRaw?.trim()) { where.push("account_id=?"); params.push(accountIdRaw.trim()); }
+      if (options.conversationId) { where.push("conversation_id=?"); params.push(options.conversationId); }
+      if (options.continuityId) { where.push("continuity_id=?"); params.push(options.continuityId); }
+      if (options.projectId !== undefined) {
+        if (options.projectId === null) where.push("project_hint IS NULL");
+        else { where.push("project_hint=?"); params.push(options.projectId); }
       }
-      results.push({ ...event, ingested });
-    }
-  }
-  return results.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+      if (options.ingested !== undefined) { where.push("ingested=?"); params.push(options.ingested ? 1 : 0); }
+      if (options.completeOnly) where.push("capture_status='complete'");
+      const limit = options.limit === undefined
+        ? undefined
+        : Math.max(1, Math.min(10_000, Math.trunc(options.limit)));
+      const sql = `SELECT account_id,event_id,conversation_id,continuity_id,timestamp,project_hint,capture_status,ingested
+        FROM capture_index${where.length ? ` WHERE ${where.join(" AND ")}` : ""}
+        ORDER BY timestamp DESC${limit === undefined ? "" : " LIMIT ?"}`;
+      const rows = db.prepare(sql).all(...params, ...(limit === undefined ? [] : [limit])) as Array<Record<string, unknown>>;
+      return rows.map(captureIndexEntryFromRow);
+    });
+  });
 }
 
 function normalizeStoredCapture(value: unknown): StoredCaptureEvent {
@@ -262,6 +381,227 @@ function captureEventPath(stateRoot: string, accountId: string, eventId: string)
   const accountKey = createHash("sha256").update(accountId, "utf8").digest("hex");
   const eventKey = createHash("sha256").update(eventId, "utf8").digest("hex");
   return join(resolve(stateRoot), "captures", accountKey, `${eventKey}.json`);
+}
+
+function captureIndexPath(stateRoot: string): string {
+  return join(resolve(stateRoot), "capture-index.sqlite");
+}
+
+async function withCaptureIndexDb<T>(stateRoot: string, run: (db: Database.Database) => T | Promise<T>): Promise<T> {
+  await mkdir(resolve(stateRoot), { recursive: true, mode: 0o700 });
+  const path = captureIndexPath(stateRoot);
+  const db = new Database(path);
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS capture_index_accounts (
+        account_id TEXT PRIMARY KEY,
+        account_hash TEXT NOT NULL UNIQUE,
+        rebuilt_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS capture_index (
+        account_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        continuity_id TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        project_hint TEXT,
+        capture_status TEXT NOT NULL CHECK (capture_status IN ('open','partial','complete','truncated','failed')),
+        ingested INTEGER NOT NULL DEFAULT 0 CHECK (ingested IN (0,1)),
+        PRIMARY KEY (account_id, event_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_capture_index_account_time ON capture_index(account_id, timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_capture_index_conversation ON capture_index(account_id, conversation_id, timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_capture_index_continuity ON capture_index(account_id, continuity_id, timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_capture_index_project ON capture_index(account_id, project_hint, timestamp DESC);
+      CREATE TABLE IF NOT EXISTS capture_index_dirty (
+        account_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        PRIMARY KEY (account_id, event_id)
+      );
+    `);
+    await chmod(path, 0o600).catch(() => undefined);
+    return await run(db);
+  } finally {
+    db.close();
+  }
+}
+
+async function markCaptureIndexDirty(stateRoot: string, accountId: string, eventId: string): Promise<void> {
+  await withCaptureIndexDb(stateRoot, (db) => {
+    db.prepare("INSERT OR REPLACE INTO capture_index_dirty(account_id,event_id) VALUES (?,?)").run(accountId, eventId);
+  });
+}
+
+async function clearCaptureIndexDirty(stateRoot: string, accountId: string, eventId: string): Promise<void> {
+  await withCaptureIndexDb(stateRoot, (db) => {
+    db.prepare("DELETE FROM capture_index_dirty WHERE account_id=? AND event_id=?").run(accountId, eventId);
+  });
+}
+
+async function ensureCaptureIndexUnlocked(stateRoot: string, accountId: string): Promise<void> {
+  const needsRebuild = await withCaptureIndexDb(stateRoot, (db) => {
+    const known = db.prepare("SELECT 1 FROM capture_index_accounts WHERE account_id=?").get(accountId);
+    const dirty = db.prepare("SELECT 1 FROM capture_index_dirty WHERE account_id=? LIMIT 1").get(accountId);
+    return !known || Boolean(dirty);
+  });
+  if (needsRebuild) await rebuildCaptureIndexUnlocked(stateRoot, accountId);
+}
+
+async function rebuildCaptureIndexUnlocked(stateRoot: string, accountId: string): Promise<void> {
+  const captureDir = dirname(captureEventPath(stateRoot, accountId, "probe"));
+  const entries: CaptureIndexEntry[] = [];
+  for (const file of await captureJsonFiles(captureDir)) {
+    const path = join(captureDir, file);
+    const event = normalizeStoredCapture(JSON.parse(await readFile(path, "utf8")) as unknown);
+    if (event.account_id !== accountId) continue;
+    let ingested = false;
+    try {
+      await readFile(`${path}.ingested`, "utf8");
+      ingested = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+    }
+    entries.push(captureIndexEntry(event, ingested));
+  }
+  await withCaptureIndexDb(stateRoot, (db) => {
+    const transaction = db.transaction(() => {
+      db.prepare("DELETE FROM capture_index WHERE account_id=?").run(accountId);
+      const insert = db.prepare(`
+        INSERT INTO capture_index (
+          account_id,event_id,conversation_id,continuity_id,timestamp,project_hint,capture_status,ingested
+        ) VALUES (?,?,?,?,?,?,?,?)
+      `);
+      for (const entry of entries) insert.run(...captureIndexSqlValues(entry));
+      db.prepare(`
+        INSERT INTO capture_index_accounts(account_id,account_hash,rebuilt_at) VALUES (?,?,?)
+        ON CONFLICT(account_id) DO UPDATE SET account_hash=excluded.account_hash, rebuilt_at=excluded.rebuilt_at
+      `).run(accountId, accountHash(accountId), new Date().toISOString());
+      db.prepare("DELETE FROM capture_index_dirty WHERE account_id=?").run(accountId);
+    });
+    transaction();
+  });
+}
+
+async function upsertCaptureIndexUnlocked(stateRoot: string, event: StoredCaptureEvent, ingested?: boolean): Promise<void> {
+  await withCaptureIndexDb(stateRoot, (db) => {
+    const prior = db.prepare("SELECT ingested FROM capture_index WHERE account_id=? AND event_id=?").get(
+      event.account_id,
+      event.event_id
+    ) as { ingested?: number } | undefined;
+    const entry = captureIndexEntry(event, ingested ?? prior?.ingested === 1);
+    const transaction = db.transaction(() => {
+      db.prepare(`
+        INSERT INTO capture_index (
+          account_id,event_id,conversation_id,continuity_id,timestamp,project_hint,capture_status,ingested
+        ) VALUES (?,?,?,?,?,?,?,?)
+        ON CONFLICT(account_id,event_id) DO UPDATE SET
+          conversation_id=excluded.conversation_id,
+          continuity_id=excluded.continuity_id,
+          timestamp=excluded.timestamp,
+          project_hint=excluded.project_hint,
+          capture_status=excluded.capture_status,
+          ingested=excluded.ingested
+      `).run(...captureIndexSqlValues(entry));
+      db.prepare(`
+        INSERT INTO capture_index_accounts(account_id,account_hash,rebuilt_at) VALUES (?,?,?)
+        ON CONFLICT(account_id) DO UPDATE SET account_hash=excluded.account_hash
+      `).run(event.account_id, accountHash(event.account_id), new Date().toISOString());
+    });
+    transaction();
+  });
+}
+
+async function markCaptureIndexIngestedUnlocked(stateRoot: string, accountId: string, eventId: string): Promise<void> {
+  await withCaptureIndexDb(stateRoot, (db) => {
+    db.prepare("UPDATE capture_index SET ingested=1 WHERE account_id=? AND event_id=?").run(accountId, eventId);
+  });
+}
+
+async function discoverCaptureAccountIds(stateRoot: string): Promise<string[]> {
+  const ids = new Set(await withCaptureIndexDb(stateRoot, (db) =>
+    (db.prepare("SELECT account_id FROM capture_index_accounts").all() as Array<{ account_id: string }>).map((row) => row.account_id)
+  ));
+  const knownHashes = new Set([...ids].map(accountHash));
+  const captureRoot = join(resolve(stateRoot), "captures");
+  try {
+    for (const dir of await readdir(captureRoot, { withFileTypes: true })) {
+      if (!dir.isDirectory() || knownHashes.has(dir.name)) continue;
+      const files = await captureJsonFiles(join(captureRoot, dir.name));
+      if (files.length === 0) continue;
+      const event = normalizeStoredCapture(JSON.parse(await readFile(join(captureRoot, dir.name, files[0]!), "utf8")) as unknown);
+      ids.add(event.account_id);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+  }
+  return [...ids].sort();
+}
+
+async function captureJsonFiles(dir: string): Promise<string[]> {
+  try {
+    return (await readdir(dir, { withFileTypes: true }))
+      .filter((file) => file.isFile() && file.name.endsWith(".json"))
+      .map((file) => file.name)
+      .sort();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+function captureIndexEntry(event: StoredCaptureEvent, ingested: boolean): CaptureIndexEntry {
+  return {
+    account_id: event.account_id,
+    event_id: event.event_id,
+    conversation_id: event.conversation_id,
+    continuity_id: event.continuity_id,
+    timestamp: event.timestamp,
+    ...(event.project_hint ? { project_hint: event.project_hint } : {}),
+    capture_status: event.capture_status,
+    ingested
+  };
+}
+
+function captureIndexSqlValues(entry: CaptureIndexEntry): [string, string, string, string, string, string | null, string, number] {
+  return [
+    entry.account_id,
+    entry.event_id,
+    entry.conversation_id,
+    entry.continuity_id,
+    entry.timestamp,
+    entry.project_hint ?? null,
+    entry.capture_status,
+    entry.ingested ? 1 : 0
+  ];
+}
+
+function captureIndexEntryFromRow(row: Record<string, unknown>): CaptureIndexEntry {
+  const status = row.capture_status;
+  if (!(status === "open" || status === "partial" || status === "complete" || status === "truncated" || status === "failed")) {
+    throw new Error("capture index row invalid");
+  }
+  return {
+    account_id: requiredId(row.account_id, "account_id", 500),
+    event_id: requiredId(row.event_id, "event_id", 200),
+    conversation_id: requiredId(row.conversation_id, "conversation_id", 500),
+    continuity_id: requiredId(row.continuity_id, "continuity_id", 500),
+    timestamp: normalizeTimestamp(row.timestamp),
+    ...(optionalText(row.project_hint, 500) ? { project_hint: optionalText(row.project_hint, 500) } : {}),
+    capture_status: status,
+    ingested: row.ingested === 1
+  };
+}
+
+function accountHash(accountId: string): string {
+  return createHash("sha256").update(accountId, "utf8").digest("hex");
+}
+
+async function withCaptureIndexMutation<T>(run: () => Promise<T>): Promise<T> {
+  const previous = captureIndexMutationTail;
+  let release!: () => void;
+  captureIndexMutationTail = new Promise<void>((resolveLock) => { release = resolveLock; });
+  await previous;
+  try { return await run(); } finally { release(); }
 }
 
 export function mergeCaptureEvent(

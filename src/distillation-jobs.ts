@@ -187,10 +187,12 @@ export async function completeDistillationJob(
   stateRoot: string,
   accountId: string,
   jobId: string,
-  result: { kind: DistillationTarget | "noop"; resultId?: string; content?: string }
+  result: { kind: DistillationTarget | "noop"; resultId?: string; content?: string },
+  leaseOwner: string
 ): Promise<DistillationJob> {
   let completed!: DistillationJob;
   await mutateJob(stateRoot, accountId, jobId, (job) => {
+    assertActiveDistillationLease(job, leaseOwner);
     job.status = "completed";
     job.completed_at = new Date().toISOString();
     job.updated_at = job.completed_at;
@@ -206,8 +208,15 @@ export async function completeDistillationJob(
   return completed;
 }
 
-export async function failDistillationJob(stateRoot: string, accountId: string, jobId: string, message: string): Promise<void> {
+export async function failDistillationJob(
+  stateRoot: string,
+  accountId: string,
+  jobId: string,
+  message: string,
+  leaseOwner: string
+): Promise<void> {
   await mutateJob(stateRoot, accountId, jobId, (job) => {
+    assertActiveDistillationLease(job, leaseOwner);
     job.status = "failed";
     job.failure = message.slice(0, 2000);
     job.failed_at = new Date().toISOString();
@@ -215,6 +224,16 @@ export async function failDistillationJob(stateRoot: string, accountId: string, 
     delete job.leased_until;
     delete job.leased_by;
   });
+}
+
+export function assertActiveDistillationLease(job: DistillationJob, leaseOwner: string): void {
+  if (job.status !== "leased") throw new Error(`distillation job is not leased: ${job.status}`);
+  if (!job.leased_until || Date.parse(job.leased_until) <= Date.now()) {
+    throw new Error("distillation job lease has expired");
+  }
+  if (job.leased_by !== leaseOwner) {
+    throw new Error(`distillation job is leased by another harness: ${job.leased_by ?? "unknown"}`);
+  }
 }
 
 export async function retryDistillationJob(stateRoot: string, accountId: string, jobId: string): Promise<DistillationJob> {

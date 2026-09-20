@@ -1,11 +1,11 @@
 {
   "format": "memhub-vendor-manifest-v1",
-  "createdAt": "2026-09-20T09:56:00.000Z",
+  "createdAt": "2026-09-20T11:33:05.000Z",
   "components": {
     "memory": {
       "path": "memory-core/src",
       "files": 193,
-      "sha256": "1f3e602ebe497f7ed2e0899acea9e8487555f1a1009af3e0957899be8fe9ff27"
+      "sha256": "5a1c5fa033077e84ea8e16b4504c8b28c023c0136d9e018c1d549c0a39690833"
     },
     "agentSource": {
       "path": "agent-source-core",

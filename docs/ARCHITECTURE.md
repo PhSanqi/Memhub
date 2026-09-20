@@ -40,6 +40,8 @@ Skill ------------------------------ orthogonal reusable capability
 
 Current-turn explicit project/workspace evidence has priority over an older conversation binding. Reusable Skills can cross project boundaries only through the separate capability channel.
 
+L1 storage deliberately separates authority from indexing. The authoritative source is the per-turn capture JSON under the Memhub state root; `capture-index.sqlite` only stores rebuildable metadata used for project/conversation filtering, counts, threshold scheduling and idle scheduling. A dirty ledger is written before raw/index state transitions, so an interrupted update causes the affected account index to be rebuilt from the original capture files on the next read. The Control Plane pages the original turn bodies instead of loading the complete L1 corpus.
+
 Normal context recall prefers L4 account memory plus the current project's L3/L2 artifacts and reusable Skills. During bootstrap or immediately after a migration, if the resolved project has no L2/L3 hit yet, Memhub may fall back to relevant project-scoped L1 evidence. As soon as L2/L3 exists, raw L1 is excluded from normal context again and remains the evidence layer for later distillation.
 
 ## Distillation ownership

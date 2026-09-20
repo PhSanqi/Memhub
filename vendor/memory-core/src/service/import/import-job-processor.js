@@ -99,6 +99,7 @@ export class ImportJobProcessor {
             },
             internal: {
                 source: request.source ?? "manual", title, summary: importSummary ?? firstLine(request.content), turn_id: request.turnId, time_zone: request.timeZone,
+                ...(request.sourceArtifactId?.trim() ? { source_artifact_id: request.sourceArtifactId.trim() } : {}),
                 ...(readOnlySkill ? {
                     read_only: true,
                     source_agent_id: sourceAgentId,

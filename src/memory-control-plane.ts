@@ -1,4 +1,5 @@
-import { listDistillationJobs } from "./distillation-jobs.js";
+import { getDistillationConfig, listDistillationJobs } from "./distillation-jobs.js";
+import { captureIndexStats } from "./capture.js";
 import { listL1Turns } from "./turn-log.js";
 import type { MemhubRuntime } from "./runtime.js";
 import type { ProjectDescriptor } from "./project-registry.js";
@@ -44,13 +45,8 @@ export async function readMemoryControlData(input: MemoryControlRequest): Promis
 }
 
 async function overviewPayload(input: MemoryControlRequest): Promise<unknown> {
-  const [turns, l2, l3, l4, skills, jobs] = await Promise.all([
-    listL1Turns({
-      stateRoot: input.stateRoot,
-      accountId: input.runtime.accountId,
-      ...(input.projectId ? { projectId: input.projectId } : {}),
-      limit: 500
-    }),
+  const [l1, l2, l3, l4, skills, jobs] = await Promise.all([
+    captureIndexStats(input.stateRoot, input.runtime.accountId, input.projectId),
     coreLayerPayload(input, "l2"),
     coreLayerPayload(input, "l3"),
     coreLayerPayload(input, "l4"),
@@ -64,15 +60,15 @@ async function overviewPayload(input: MemoryControlRequest): Promise<unknown> {
   return {
     counts: {
       projects: scopedProjects.length,
-      L1: turns.length,
+      L1: l1.total,
       L2: totalValue(l2),
       L3: totalValue(l3),
       L4: totalValue(l4),
       Skill: totalValue(skills)
     },
     l1: {
-      complete: turns.filter((turn) => turn.status === "complete").length,
-      incomplete: turns.filter((turn) => turn.status !== "complete").length
+      complete: l1.complete,
+      incomplete: l1.incomplete
     },
     processing: {
       pending: relevantJobs.filter((job) => job.status === "pending").length,
@@ -85,13 +81,16 @@ async function overviewPayload(input: MemoryControlRequest): Promise<unknown> {
 }
 
 async function l1Payload(input: MemoryControlRequest): Promise<unknown> {
-  const items = await listL1Turns({
-    stateRoot: input.stateRoot,
-    accountId: input.runtime.accountId,
-    ...(input.projectId ? { projectId: input.projectId } : {}),
-    limit: 500
-  });
-  return { items, total: items.length };
+  const [stats, items] = await Promise.all([
+    captureIndexStats(input.stateRoot, input.runtime.accountId, input.projectId),
+    listL1Turns({
+      stateRoot: input.stateRoot,
+      accountId: input.runtime.accountId,
+      ...(input.projectId ? { projectId: input.projectId } : {}),
+      limit: 200
+    })
+  ]);
+  return { items, total: stats.total, page_limit: 200 };
 }
 
 async function coreLayerPayload(
@@ -107,11 +106,16 @@ async function coreLayerPayload(
 }
 
 async function processingPayload(input: MemoryControlRequest): Promise<unknown> {
-  const items = (await listDistillationJobs(input.stateRoot, input.runtime.accountId))
+  const [allJobs, config] = await Promise.all([
+    listDistillationJobs(input.stateRoot, input.runtime.accountId),
+    getDistillationConfig(input.stateRoot)
+  ]);
+  const items = allJobs
     .filter((job) => !input.projectId || job.project_id === input.projectId);
   return {
     items,
     total: items.length,
+    config,
     counts: {
       pending: items.filter((job) => job.status === "pending").length,
       leased: items.filter((job) => job.status === "leased").length,

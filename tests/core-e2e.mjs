@@ -118,6 +118,31 @@ try {
   assert.equal(layeredRecall.projectMemory.length, 1);
   assert.equal(layeredRecall.projectMemory[0].provenance.memoryLayer, "L2");
 
+  const distillWrites = [];
+  const distillSource = new MemoryRestContextSource({
+    async addMemory(request) {
+      distillWrites.push(request);
+      return { id: "canonical-l2" };
+    }
+  });
+  const distillBase = {
+    accountId: "acct",
+    userId: "user",
+    kind: "l2",
+    projectId: "aide",
+    title: "Project Timeline · aide",
+    sourceHarness: "test",
+    artifactId: "project-timeline:aide",
+    evidenceRefs: ["l1:turn-1"],
+    contractVersion: "memhub-distill-v2"
+  };
+  await distillSource.distill({ ...distillBase, content: "timeline v1" });
+  await distillSource.distill({ ...distillBase, content: "timeline v2" });
+  await distillSource.distill({ ...distillBase, content: "timeline v2" });
+  assert.equal(distillWrites[0].sourceArtifactId, "project-timeline:aide");
+  assert.notEqual(distillWrites[0].requestId, distillWrites[1].requestId);
+  assert.equal(distillWrites[1].requestId, distillWrites[2].requestId);
+
   const embeddedMemory = new EmbeddedMemoryCore({
     stateRoot: join(root, "embedded-memory"),
     configPath: join(root, "embedded-memory", "config.yaml"),
