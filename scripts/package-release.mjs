@@ -27,6 +27,7 @@ const commonPaths = [
   "tsconfig.json",
   "src",
   "scripts",
+  "tests",
   "adapters",
   "docs",
   "vendor",
