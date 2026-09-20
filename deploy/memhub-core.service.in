@@ -1,0 +1,17 @@
+[Unit]
+Description=Memhub Embedded Memory Core
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=@MEMHUB_DIR@
+Environment="MEMMY_HOME=%h/.memmy"
+Environment="MEMMY_CONFIG=%h/.memmy/config.yaml"
+ExecStart=@NODE@ @MEMHUB_DIR@/vendor/memory-core/src/server/index.js --config %h/.memmy/config.yaml --host 127.0.0.1 --port 18960 --db %h/.memmy/memory-service/memory.sqlite
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=15s
+UMask=0077
+
+[Install]
+WantedBy=default.target

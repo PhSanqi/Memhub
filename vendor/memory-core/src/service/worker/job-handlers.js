@@ -1,9 +1,8 @@
 import { ModelHttpError } from "../../model/http.js";
-import { newId, stableHash } from "../../utils/id.js";
+import { newId } from "../../utils/id.js";
 import { isRecord } from "../../utils/json.js";
 import { embeddingRetryTargetKindForMemory, embeddingRetryVectorFieldForMemory } from "../embedding/embedding-pipeline.js";
 import { memoryHasImportPipeline } from "../import/import-job-processor.js";
-import { isTerminalL3WorldModelError } from "../evolution/l3-world-model-pipeline.js";
 import { namespaceForMemory, namespaceForSession } from "../namespace/namespace-scope.js";
 export const EPISODE_IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 /** Directly append the same change-log record previously written by MemoryService. */
@@ -101,32 +100,6 @@ export async function processJob(deps, job) {
         case "import_summary":
             await deps.processors.import.summarizeImportedTrace(job);
             return;
-        case "l2_induction":
-            await deps.processors.evolution.induceL2(job);
-            return;
-        case "negative_experience":
-            await deps.processors.evolution.materializeNegativeExperience(job);
-            return;
-        case "l3_abstraction":
-            await deps.processors.evolution.abstractL3(job);
-            return;
-        case "l3_world_model_update":
-            try {
-                await deps.processors.evolution.updateL3WorldModel(job);
-            }
-            catch (error) {
-                if (isTerminalL3WorldModelError(error)) {
-                    deps.repos.runtime.failJob(job.id, error instanceof Error ? error.message : String(error), deps.nowIso(), true);
-                }
-                throw error;
-            }
-            return;
-        case "project_environment_profile":
-            await deps.processors.evolution.updateProjectEnvironment(job);
-            return;
-        case "skill_crystallization":
-            await deps.processors.evolution.crystallizeSkill(job);
-            return;
         case "reward":
             await deps.processors.feedback.applyReward(job);
             return;
@@ -136,17 +109,11 @@ export async function processJob(deps, job) {
         case "embedding":
             await deps.processors.embedding.embedMemory(job);
             return;
-        case "user_memory_embedding":
-            await deps.processors.embedding.embedUserMemory(job);
-            return;
         case "reflection":
             await deps.processors.feedback.reflectTrace(job);
             return;
         case "skill_trial_resolve":
             await deps.processors.feedback.resolveSkillTrial(job);
-            return;
-        case "l2_association":
-            await deps.processors.evolution.associateL2(job);
             return;
         default:
             throw new Error(`unsupported job type: ${job.jobType}`);
@@ -330,9 +297,7 @@ export function episodeRewardWasSkipped(episode) {
 export function workerJobCanRunInParallel(job) {
     return job.jobType === "trace_summary" ||
         job.jobType === "import_summary" ||
-        job.jobType === "embedding" ||
-        job.jobType === "l3_world_model_update" ||
-        job.jobType === "project_environment_profile";
+        job.jobType === "embedding";
 }
 export function processingStageForJob(jobType) {
     if (jobType === "trace_summary" || jobType === "import_summary")
@@ -395,12 +360,6 @@ export function evolutionJobDedupeKey(input) {
         const value = payload[key];
         return typeof value === "string" && value.trim() ? value.trim() : undefined;
     };
-    const payloadStringArray = (key) => {
-        const value = payload[key];
-        return Array.isArray(value)
-            ? value.filter((item) => typeof item === "string" && item.trim().length > 0)
-            : [];
-    };
     const target = input.targetMemoryId;
     switch (input.jobType) {
         case "episode_idle_close":
@@ -409,8 +368,6 @@ export function evolutionJobDedupeKey(input) {
                 : undefined;
         case "embedding":
             return target ? `embedding:${target}:${payloadString("contentHash") ?? "current"}` : undefined;
-        case "user_memory_embedding":
-            return target ? `user_memory_embedding:${target}:${payloadString("contentHash") ?? "current"}` : undefined;
         case "trace_summary":
             return target ? `trace_summary:${target}:${payloadString("contentHash") ?? "current"}` : undefined;
         case "import_summary":
@@ -421,32 +378,6 @@ export function evolutionJobDedupeKey(input) {
             return input.episodeId ? `reward:${input.episodeId}` : target ? `reward:${target}` : undefined;
         case "span_big_turn":
             return target ? `span_big_turn:${target}` : undefined;
-        case "negative_experience": {
-            const source = payloadString("source");
-            const sourceEventId = payloadString("sourceEventId");
-            return source && sourceEventId
-                ? `negative_experience:${source}:${sourceEventId}`
-                : input.episodeId
-                    ? `negative_experience:${input.episodeId}`
-                    : undefined;
-        }
-        case "l2_association":
-            return target ? `l2_association:${target}` : undefined;
-        case "l2_induction": {
-            const seed = target ?? payloadString("sourceMemoryId") ?? payloadString("seedMemoryId");
-            return seed ? `l2_induction:${seed}` : input.episodeId ? `l2_induction:${input.episodeId}` : undefined;
-        }
-        case "l3_abstraction": {
-            const signature = payloadString("signature");
-            const seed = payloadString("seedPolicyId") ?? target;
-            const policyIds = payloadStringArray("policyIds").sort();
-            const basis = signature ?? seed ?? (policyIds.length ? stableHash(policyIds).slice(0, 24) : undefined);
-            return basis ? `l3_abstraction:${basis}` : input.episodeId ? `l3_abstraction:${input.episodeId}` : undefined;
-        }
-        case "skill_crystallization": {
-            const seed = payloadString("skillId") ?? target ?? payloadString("policyId");
-            return seed ? `skill_crystallization:${seed}` : input.episodeId ? `skill_crystallization:${input.episodeId}` : undefined;
-        }
         case "skill_trial_resolve": {
             const trial = payloadString("trialId") ?? target;
             return trial ? `skill_trial_resolve:${trial}` : input.episodeId ? `skill_trial_resolve:${input.episodeId}` : undefined;

@@ -26,10 +26,10 @@ export async function ingestCaptureIntoMemory(input: {
   const { event, device, runtime, projectId } = input;
   const userText = event.user_text?.trim();
   const assistantText = event.assistant_text?.trim();
-  if (!userText || !assistantText) {
+  if (!userText || !assistantText || event.capture_status !== "complete") {
     return {
       ingested: false,
-      reason: "incomplete_turn_requires_user_and_assistant_text",
+      reason: `turn_not_complete:${event.capture_status}`,
       project_id: projectId
     };
   }
@@ -37,7 +37,7 @@ export async function ingestCaptureIntoMemory(input: {
   // Memory sessions are project-scoped. A host conversation that switches
   // projects therefore gets a new Memory session while retaining its host
   // conversation_id in provenance/bindings.
-  const sessionId = captureSessionId(runtime.accountId, event.host, event.conversation_id, projectId);
+  const sessionId = captureSessionId(runtime.accountId, event.host, event.continuity_id, projectId);
   const turnId = deterministicId(
     "mhcap_turn",
     `${runtime.accountId}\0${event.host}\0${event.event_id}`
@@ -47,7 +47,7 @@ export async function ingestCaptureIntoMemory(input: {
     profileId: "default",
     userId: runtime.userId,
     tenantId: runtime.accountId,
-    sessionKey: `${event.host}:${event.conversation_id}`,
+    sessionKey: `${event.host}:${event.continuity_id}`,
     ...(projectId ? { projectId } : {}),
     ...(event.workspace_id ? { workspaceId: event.workspace_id } : {}),
     ...(event.workspace_path ? { workspacePath: event.workspace_path } : {})
@@ -63,7 +63,7 @@ export async function ingestCaptureIntoMemory(input: {
     ...common,
     requestId: deterministicId(
       "mhcap_req",
-      `${runtime.accountId}\0${event.host}\0${event.conversation_id}\0${projectId ?? "global"}:session`
+      `${runtime.accountId}\0${event.host}\0${event.continuity_id}\0${projectId ?? "global"}:session`
     ),
     source: "memhub-capture",
     sessionId,
@@ -74,7 +74,8 @@ export async function ingestCaptureIntoMemory(input: {
       device_id: device.device_id,
       device_name: device.name,
       host: event.host,
-      conversation_id: event.conversation_id
+      conversation_id: event.conversation_id,
+      continuity_id: event.continuity_id
     }
   });
 
@@ -87,7 +88,9 @@ export async function ingestCaptureIntoMemory(input: {
     sessionId,
     query: userText,
     answer: assistantText,
-    ...(event.tool_summary ? { reasoningSummary: event.tool_summary } : {}),
+    ...((event.reasoning_summary ?? event.tool_summary)
+      ? { reasoningSummary: event.reasoning_summary ?? event.tool_summary }
+      : {}),
     tags: unique([
       "memhub-capture",
       `host:${event.host}`,
@@ -99,6 +102,9 @@ export async function ingestCaptureIntoMemory(input: {
       device_id: device.device_id,
       ...(event.host_version ? { host_version: event.host_version } : {}),
       ...(event.turn_id ? { original_turn_id: event.turn_id } : {}),
+      continuity_id: event.continuity_id,
+      capture_status: event.capture_status,
+      ...(event.previous_event_id ? { previous_event_id: event.previous_event_id } : {}),
       timestamp: event.timestamp,
       ...(event.workspace_id ? { workspace_id: event.workspace_id } : {}),
       ...(event.workspace_path ? { workspace_path: event.workspace_path } : {}),
@@ -119,8 +125,8 @@ function deterministicId(prefix: string, source: string): string {
   return `${prefix}_${createHash("sha256").update(source, "utf8").digest("hex").slice(0, 40)}`;
 }
 
-export function captureSessionId(accountId: string, host: string, conversationId: string, projectId: string | null): string {
-  return deterministicId("mhcap_session", `${accountId}\0${host}\0${conversationId}\0${projectId ?? "global"}`);
+export function captureSessionId(accountId: string, host: string, continuityId: string, projectId: string | null): string {
+  return deterministicId("mhcap_session", `${accountId}\0${host}\0${continuityId}\0${projectId ?? "global"}`);
 }
 
 function unique(values: readonly string[]): string[] {

@@ -1,10 +1,9 @@
 import { attachMemoryVector } from "../../storage/memory-vector-state.js";
-import { policyMetaFromMemory, RETRIEVAL_DOCUMENT_VERSION, retrievalDocumentForMemory, skillMetaFromMemory, traceMetaFromMemory, worldModelMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
+import { RETRIEVAL_DOCUMENT_VERSION, retrievalDocumentForMemory, skillMetaFromMemory, traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import { isRecord } from "../../utils/json.js";
 import { clip } from "../../utils/text.js";
 const EMBEDDING_RETRY_BASE_BACKOFF_MS = 60_000;
 const EMBEDDING_RETRY_MAX_BACKOFF_MS = 60 * 60_000;
-const NEGATIVE_POLICY_EMBEDDING_TOKEN_LIMIT = 2_048;
 export function embeddingTextForMemory(memory) {
     const trace = traceMetaFromMemory(memory);
     if (trace) {
@@ -12,36 +11,9 @@ export function embeddingTextForMemory(memory) {
             .filter(Boolean)
             .join("\n");
     }
-    const policy = policyMetaFromMemory(memory);
-    if (policy) {
-        if (policy.experienceType === "failure_avoidance" || policy.evidencePolarity === "negative") {
-            const text = [policy.title, policy.trigger].filter(Boolean).join("\n");
-            return exceedsMixedLanguageTokenLimit(text, NEGATIVE_POLICY_EMBEDDING_TOKEN_LIMIT)
-                ? policy.title
-                : text;
-        }
-        return [policy.title, policy.trigger, policy.procedure, policy.verification, policy.boundary]
-            .filter(Boolean)
-            .join("\n");
-    }
-    const skill = skillMetaFromMemory(memory);
-    if (skill) {
+    if (memory.memoryLayer === "Skill" && skillMetaFromMemory(memory))
         return retrievalDocumentForMemory(memory);
-    }
-    const world = worldModelMetaFromMemory(memory);
-    if (world) {
-        return retrievalDocumentForMemory(memory);
-    }
     return memory.memoryValue;
-}
-function exceedsMixedLanguageTokenLimit(value, limit) {
-    let count = 0;
-    for (const _match of value.matchAll(/\p{Script=Han}|[A-Za-z]+(?:['’-][A-Za-z]+)*/gu)) {
-        count += 1;
-        if (count > limit)
-            return true;
-    }
-    return false;
 }
 export function traceSummaryEmbeddingText(memory) {
     const span = isRecord(memory.properties.internal_info.span)
@@ -71,9 +43,11 @@ export function embeddingRetryTargetKindForMemory(memory) {
     if (memory.memoryLayer === "L1")
         return "trace";
     if (memory.memoryLayer === "L2")
-        return "policy";
+        return "timeline";
     if (memory.memoryLayer === "L3")
-        return "world_model";
+        return "project_profile";
+    if (memory.memoryLayer === "L4")
+        return "user_profile";
     return "skill";
 }
 export function embeddingRetryVectorFieldForMemory(memory) {
@@ -99,16 +73,10 @@ export function updateMemoryVectorField(memory, vectorField, vector, input) {
     if (memory.memoryLayer === "L1" && isRecord(internal.trace)) {
         nextInternal.trace = { ...internal.trace };
     }
-    else if (memory.memoryLayer === "L2" && isRecord(internal.policy)) {
-        nextInternal.policy = { ...internal.policy };
-    }
-    else if (memory.memoryLayer === "L3" && isRecord(internal.world_model)) {
-        nextInternal.world_model = { ...internal.world_model };
-    }
     else if (memory.memoryLayer === "Skill" && isRecord(internal.skill)) {
         nextInternal.skill = { ...internal.skill };
     }
-    if ((memory.memoryLayer === "L3" || memory.memoryLayer === "Skill") && input.sourceHash) {
+    if (memory.memoryLayer !== "L1" && input.sourceHash) {
         nextInternal.retrieval_index = {
             version: RETRIEVAL_DOCUMENT_VERSION,
             source_hash: input.sourceHash,

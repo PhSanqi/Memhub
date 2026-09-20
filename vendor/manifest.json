@@ -1,21 +1,16 @@
 {
   "format": "memhub-vendor-manifest-v1",
-  "createdAt": "2026-09-18T15:44:08.000Z",
+  "createdAt": "2026-09-20T11:33:05.000Z",
   "components": {
     "memory": {
       "path": "memory-core/src",
-      "files": 206,
-      "sha256": "6d7f9c3c29348c46893a4a77a5b4fa7288535553db5d0fd3731712299935c9bb"
+      "files": 193,
+      "sha256": "5a1c5fa033077e84ea8e16b4504c8b28c023c0136d9e018c1d549c0a39690833"
     },
     "agentSource": {
       "path": "agent-source-core",
       "files": 1,
       "sha256": "8f8fccc9cbf2feeb740f385db07a1afdce5756f8c13fcbf38aeae109b20a5528"
-    },
-    "architecture": {
-      "path": "normify/lib",
-      "files": 66,
-      "sha256": "0e4fca49ca87e38fdca0c7ba4ee88edab523e76c893de9b5e81bfd35c5c68e53"
     }
   }
 }

@@ -1,147 +1,167 @@
 # Memhub
 
-**Shared long-term memory for AI agents, with local and server deployment.**
-
 [简体中文](README.zh-CN.md)
 
-Memhub gives MCP-capable AI agents a durable memory space that can follow work across conversations, projects and machines. It is designed for people who want their agents to remember important context without turning every chat into permanent noise.
+Memhub is a private, project-aware memory and context hub for AI harnesses. Codex, Claude Code, ChatGPT-style remote MCP clients, CoWorker, and other hosts can share one durable memory system without sharing one integration mechanism.
 
-## What you can do
+Current release line: **v0.2.0**. See [CHANGELOG.md](CHANGELOG.md).
 
-- **Keep long-term memory across conversations** — durable facts, decisions, preferences and corrections can be recalled later.
-- **Separate global and project memory** — keep account-wide context while preserving project-specific boundaries.
-- **Continue work across agents and machines** — connect multiple MCP-capable clients to the same memory space.
-- **Capture conversation history** — supported host integrations can preserve completed turns automatically.
-- **Distill history on demand** — turn accumulated history into cleaner cumulative memory instead of repeatedly rereading old conversations.
-- **Extract reusable skills** — preserve procedures and repeatable workflows separately from ordinary memory.
-- **Keep project context** — recall project-level context alongside ordinary long-term memory.
-- **Manage memory from the web** — user and administrator views make projects, devices, memories and lifecycle data visible.
-- **Run locally or centrally** — choose a single-machine Local Edition or a multi-device Server Edition.
+## Current memory model
 
-## Editions
+Memhub exposes four memory layers plus an orthogonal Skill layer:
 
-| Edition | Best for | Platform |
-| --- | --- | --- |
-| Local | One machine, no VPS or public endpoint required | Linux |
-| Local | One Windows workstation | Windows |
-| Server | Central memory service for multiple devices/agents | Linux |
-| Server | Central memory service on a Windows host | Windows |
+- **L1 — Original Conversation**: source user/assistant turns plus bounded, auditable reasoning/tool summaries. Raw Capture and Episode remain internal processing mechanisms.
+- **L2 — Project Timeline**: a human-readable chronological account of project development, decisions, state changes, superseded history, and current truth.
+- **L3 — Project Rules & Experience**: durable project-scoped rules, preferences, working habits, and experience distilled from L2.
+- **L4 — User Profile**: account-scoped cross-project traits and stable working patterns distilled from evidence across multiple project L3 artifacts.
+- **Skill**: reusable executable procedures. Skills are not another memory depth and may be project-scoped or explicitly reusable across projects.
 
-Four matching GitHub Releases are published for each Memhub version.
+L2 and L3 are always project-scoped. L4 is always account-scoped. Project business memory never silently crosses into another project.
 
-## Requirements
+## Architecture
 
-- Node.js 20 or newer; Node.js 22 is recommended.
-- npm.
-- Linux packages expect a user-level systemd session.
-- Windows packages use Windows Task Scheduler for background startup.
+```text
+AI host / plugin / remote MCP
+            |
+            v
+      Memhub Bridge
+   queue + credentials
+            |
+            v
+       Memhub Server
+   +----------------------+
+   | Context Router       |
+   | L1 Turn Log          |
+   | Distillation Jobs    |
+   | Memory Core          |
+   | Project Registry     |
+   | Architecture Reader  |
+   +----------------------+
+```
 
-## Install
+The architecture reader is deliberately small. It can read existing authoritative project architecture Markdown from legacy `normify-<project>` trees, but it does not execute or vendor the old Normify engine. New CLI/config naming is `architecture-root`; `--normify-root` remains a deprecated compatibility alias so existing service units can restart safely.
 
-Download the Release matching your platform and deployment mode, then extract it.
+Memhub supports Local and Server editions from the same codebase:
 
-### Linux Local
+```text
+editions/
+├── local/
+│   ├── linux/
+│   └── windows/
+└── server/
+    ├── linux/
+    └── windows/
+```
+
+Local Edition keeps MCP, capture, SQLite and processing on one machine. Server Edition keeps the authoritative memory service on one server while device Bridges upload captured turns through authenticated transport.
+
+See [Memhub edition design](docs/EDITIONS.md).
+
+## MCP surface
+
+The high-level MCP surface is intentionally small:
+
+- `memmy_turn` — open/checkpoint/commit/resume the L1 original-conversation turn log.
+- `memmy_context` — resolve the current project and recall L4, project L2/L3, reusable Skills, recent L1 continuity, and read-only project architecture.
+- `memhub_distill` — lease or submit L2/L3/L4/Skill distillation work. The connected Harness/model performs semantic synthesis; Memhub enforces evidence, scope, provenance and canonical artifact identity.
+- `memmy_project_list` — list/suggest canonical projects.
+- `memmy_project_manage` — controlled project create/update/delete/merge via plan then explicit authorization.
+- `memmy_project` — list/current/bind/unbind project context and read project architecture.
+
+`memmy_project action=current` uses a persistent conversation binding when the Harness exposes a stable `conversation_id`. If a transport cannot provide one, Memhub does not invent an ID: the tool reports `binding_available=false`, while `memmy_context.resolvedProjectId` and explicit current-turn project/workspace evidence remain authoritative for that request.
+
+A completed L2 job can enqueue L3. Completed L3 artifacts from at least two projects can form an L4 job. Memhub itself does not silently invoke an LLM.
+
+## Capture and Control Plane
+
+Capture is a host capability, not an MCP side effect. A host plugin/hook can write complete or partial turns to the local Bridge, which queues them durably and uploads them when connectivity is available.
+
+The browser routes are:
+
+- `/memhub` — public landing page.
+- `/memhub/user` — authenticated user workspace.
+- `/memhub/admin` — authenticated admin Control Plane.
+
+The management model is intentionally the product taxonomy: Overview, Projects, L1, L2, L3, L4, Skills and Processing. Raw Capture and Episode are internal implementation details and are not management layers.
+
+Explicit current-turn project/workspace evidence overrides an older conversation binding. If project resolution is ambiguous, Memhub falls back to global-only recall rather than leaking project context.
+
+## Data migration and maintenance
+
+The current SQLite schema migration is v8. During v7 → v8 migration Memhub:
+
+- changes the durable memory-layer constraint to L1/L2/L3/L4/Skill;
+- preserves old rows and archives legacy L2/L3 products instead of deleting them;
+- archives legacy `user_memories`;
+- dead-letters retired evolution jobs;
+- remaps embedding retry targets to the new artifact names.
+
+Production cutover is guarded by:
 
 ```bash
-tar -xzf memhub-v0.1.0-linux-local.tar.gz
-cd memhub-v0.1.0-linux-local
-bash editions/local/linux/install.sh
+npm run core:preflight
+npm run core:verify -- --manifest <manifest>
+npm run core:preserved -- --manifest <manifest>
 ```
 
-After installation, connect your AI client to:
+`core:preflight` verifies vendored runtime integrity and creates an online SQLite rollback snapshot. `core:preserved` is intended for schema-changing cutovers: schema/version changes are reported, while SQLite integrity, durable table presence and preservation of every baseline durable row identity are enforced.
 
-```text
-http://127.0.0.1:17861/mcp
-```
-
-### Windows Local
-
-Extract `memhub-v0.1.0-windows-local.zip`, open PowerShell in the extracted directory, then run:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\editions\local\windows\install.ps1
-```
-
-Connect your AI client to:
-
-```text
-http://127.0.0.1:17861/mcp
-```
-
-### Linux Server
-
-Extract `memhub-v0.1.0-linux-server.tar.gz`, then run:
-
-```bash
-cd memhub-v0.1.0-linux-server
-MEMHUB_PUBLIC_HOST=memory.example.com bash editions/server/linux/install.sh
-```
-
-The server binds its services to loopback. Put the `/memhub/*` routes behind your authenticated reverse proxy before exposing them publicly.
-
-Your MCP endpoint is then typically:
-
-```text
-https://memory.example.com/memhub/mcp
-```
-
-### Windows Server
-
-Extract `memhub-v0.1.0-windows-server.zip`, then run:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\editions\server\windows\install.ps1 -PublicHost memory.example.com
-```
-
-Put `/memhub/*` behind your authenticated reverse proxy before exposing the service publicly.
-
-## Use
-
-Once the MCP endpoint is connected to your AI client, Memhub exposes tools for:
-
-- recalling relevant long-term context;
-- saving durable memory;
-- working with project memory;
-- distilling accumulated history;
-- creating reusable skills from history;
-- managing memory evolution.
-
-For the best continuity, configure your agent to recall Memhub context at the start of each meaningful turn and only write back durable information rather than every raw message.
-
-### Project routing and maintenance
-
-Project routing is turn-scoped rather than permanently conversation-locked. Current-turn project/workspace evidence can override an older conversation binding; the binding is only a fallback when the current turn has no project evidence. Business memory and authoritative architecture remain isolated to the primary project, while explicit Skill artifacts can be reused through a separate cross-project capability channel.
-
-AgentSource history scanning is opt-in in all four editions. Imported AgentSource traces are not promoted into durable user preferences.
-
-Maintenance commands are read-first:
+Long-term cleanup remains read-first:
 
 ```bash
 npm run memory:audit
 npm run memory:repair
-npm run normify:audit
-npm run normify:migrate
 ```
 
-`memory:repair` creates a SQLite backup and JSON report before changing durable state. Model-dependent L3 and Project Environment jobs remain queued when no evolution model is available instead of exhausting retries into dead-letter.
+`memory:repair` creates an online backup and report before applying changes.
 
-### Web pages
+See [Core migration](docs/CORE_MIGRATION.md), [architecture](docs/ARCHITECTURE.md), [memory scopes](docs/EVOLUTION_SCOPES.md), and [Control Plane / distillation](docs/CONTROL_PLANE_AND_DISTILLATION.md).
 
-When using Server Edition:
+## Install from source
 
-- `/memhub` — project landing page;
-- `/memhub/user` — authenticated user workspace;
-- `/memhub/admin` — administrator Control Plane.
+Node.js 20+ is required.
 
-## Acknowledgements
+Local Linux:
 
-Memhub is grateful to:
+```bash
+bash editions/local/linux/install.sh
+```
 
-- [Memmy](https://github.com/MemTensor/memmy-agent) by [@MemTensor](https://github.com/MemTensor) — an open-source shared memory project for AI agents.
-- [DSH-Normify](https://github.com/yan-mc/dsh-normify) by [@yan-mc](https://github.com/yan-mc) — project architecture and agent workflow tooling.
+Local Windows:
 
-Please also retain the license notices shipped with third-party and vendored components.
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Memhub\editions\local\windows\install.ps1
+```
+
+Server Linux:
+
+```bash
+MEMHUB_USERNAME=owner bash editions/server/linux/install.sh
+```
+
+Server Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Memhub\editions\server\windows\install.ps1 -Username owner
+```
+
+Server Edition binds Memhub to loopback and does not create Cloudflare configuration. Public access should remain behind an authenticated reverse proxy such as Cloudflare Access; device/account authentication remains enforced by Memhub itself.
+
+## Release packages
+
+Every v0.2.x release is produced from one source commit and carries four platform/edition assets:
+
+- `memhub-vX.Y.Z-linux-local.tar.gz`
+- `memhub-vX.Y.Z-linux-server.tar.gz`
+- `memhub-vX.Y.Z-windows-local.zip`
+- `memhub-vX.Y.Z-windows-server.zip`
+
+`SHA256SUMS.txt` and `release-manifest.json` bind all four packages to the same commit. Maintainers can verify release inputs with `npm run release:check` and generate the four assets with `npm run release:package`.
+
+## Repository status
+
+Memhub is under active development. The embedded Memory Core originates from the open-source Memmy lineage and is maintained here as part of the Memhub runtime boundary. See [upstream notes](docs/UPSTREAM.md).
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+See [LICENSE](LICENSE).

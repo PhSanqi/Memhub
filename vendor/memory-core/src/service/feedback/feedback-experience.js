@@ -1,4 +1,4 @@
-import { DECISION_REPAIR_PROMPT, classifyFeedbackText, cosine, policyMetaFromMemory, policyStatusAfterGain, skillMetaFromMemory, traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
+import { DECISION_REPAIR_PROMPT, classifyFeedbackText, traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import {} from "../../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../../logging/logger.js";
 import { Repositories, jobToRef, kindFromMemory } from "../../storage/repositories.js";
@@ -7,7 +7,6 @@ import { newId, stableHash, stableStringify } from "../../utils/id.js";
 import { isRecord } from "../../utils/json.js";
 import { clip } from "../../utils/text.js";
 import { nowIso } from "../../utils/time.js";
-import { updatePolicyStats } from "../evolution/policy-induction.js";
 import { namespaceForMemory, namespaceForSession, normalizeNamespace, profileIdFromMemory, projectIdFromMemory } from "../namespace/namespace-scope.js";
 import { skillBetaPosterior } from "../read-model/skill.js";
 import { isRepairFailureLikeTrace as sessionIsRepairFailureLikeTrace, repairTraceContains as sessionRepairTraceContains } from "../session/session-turn-service.js";
@@ -87,9 +86,6 @@ export class FeedbackExperienceService {
             this.applyRecallOutcome(updatedRecallEvent, feedback, feedback.createdAt);
         }
         const jobs = [];
-        if (feedback.polarity !== "negative") {
-            jobs.push(...await this.maybeCreateFeedbackExperience(attributedRequest, feedback, context));
-        }
         const rewardEpisode = attributedRequest.episodeId
             ? this.deps.repos.runtime.getEpisode(attributedRequest.episodeId)
             : undefined;
@@ -196,11 +192,7 @@ export class FeedbackExperienceService {
             if (recent.length > 0)
                 return undefined;
         }
-        const attachedPolicyIds = feedback.polarity !== "negative"
-            && this.deps.config.algorithm.feedback.attachToPolicy
-            ? this.feedbackCandidatePolicyIds(request, feedback)
-            : [];
-        const evidence = this.feedbackRepairEvidence(request, feedback, attachedPolicyIds);
+        const evidence = this.feedbackRepairEvidence(request, feedback);
         const highValue = this.decisionRepairTraceSources(this.deps.repos.memories.getMany(evidence.highValueMemoryIds));
         const lowValue = this.decisionRepairTraceSources(this.deps.repos.memories.getMany(evidence.lowValueMemoryIds));
         return synthesizeDecisionRepairDraft({
@@ -246,10 +238,7 @@ export class FeedbackExperienceService {
                 };
             }
         }
-        const attachedPolicyIds = this.deps.config.algorithm.feedback.attachToPolicy
-            ? this.feedbackCandidatePolicyIds(request, feedback)
-            : [];
-        const evidence = this.feedbackRepairEvidence(request, feedback, attachedPolicyIds);
+        const evidence = this.feedbackRepairEvidence(request, feedback);
         const repair = this.deps.repos.runtime.insertDecisionRepair({
             id: newId("repair"),
             sessionId: feedback.sessionId,
@@ -264,13 +253,11 @@ export class FeedbackExperienceService {
             antiPattern: llmDraft?.antiPattern ?? repairAntiPatternFromFeedback(request, classification),
             highValueMemoryIds: evidence.highValueMemoryIds,
             lowValueMemoryIds: evidence.lowValueMemoryIds,
-            attachedPolicyMemoryIds: attachedPolicyIds,
             feedbackId: feedback.id,
             validated: false,
             source: {
                 source: "feedback.decision_repair.v7",
                 classification,
-                attachedPolicyIds,
                 ...(llmDraft ? { synthesis: "llm" } : {})
             },
             meta: {
@@ -284,9 +271,6 @@ export class FeedbackExperienceService {
         if (feedback.episodeId) {
             this.deps.repos.runtime.appendEpisodeDecisionRepair(feedback.episodeId, repair.id, feedback.createdAt);
         }
-        const actuallyAttached = attachedPolicyIds.length > 0
-            ? this.attachRepairToPolicies(repair.id, attachedPolicyIds, repair.preference, repair.antiPattern, feedback.createdAt)
-            : [];
         this.deps.repos.runtime.appendChange({
             memoryId: repair.id,
             namespaceId,
@@ -302,583 +286,10 @@ export class FeedbackExperienceService {
         return {
             repairId: repair.id,
             contextHash,
-            skipped: false,
-            attachedPolicyIds: actuallyAttached
+            skipped: false
         };
     }
-    async maybeCreateFeedbackExperience(request, feedback, context) {
-        const text = feedbackExperienceText(feedback);
-        if (!text)
-            return [];
-        const classification = classifyFeedbackText(text);
-        const episode = feedback.episodeId ? this.deps.repos.runtime.getEpisode(feedback.episodeId) : undefined;
-        const traceMemory = feedback.l1MemoryId ? this.deps.repos.memories.get(feedback.l1MemoryId) : undefined;
-        const trace = traceMemory ? this.deps.traceMeta(traceMemory) : null;
-        const significance = feedbackExperienceSignificance(feedback, classification, episode);
-        if (significance < 0.5 || !isActionableFeedbackExperience(text, classification.shape)) {
-            return [];
-        }
-        const fallbackDraft = buildFeedbackExperienceDraft({
-            feedback,
-            text,
-            classification,
-            significance,
-            episode,
-            trace,
-            traceMemory
-        });
-        const draft = await this.enhanceFeedbackExperienceDraft(fallbackDraft, {
-            text,
-            feedback,
-            episode,
-            trace
-        });
-        const vector = await this.deps.embedder.embedOne(draft.vectorText, "query");
-        const existing = this.findSimilarFeedbackExperience(draft, vector);
-        const at = feedback.createdAt;
-        const saved = existing
-            ? this.mergeFeedbackExperiencePolicy(existing, draft, vector, at)
-            : this.insertFeedbackExperiencePolicy(request, feedback, context, draft, vector, at);
-        for (const episodeId of draft.sourceEpisodeIds) {
-            this.deps.repos.runtime.appendEpisodeDerivedMemory(episodeId, "L2", saved.id, at);
-        }
-        const repairCandidate = this.maybeMintRepairCandidateSkill(saved, context, at);
-        if (repairCandidate) {
-            for (const episodeId of draft.sourceEpisodeIds) {
-                this.deps.repos.runtime.appendEpisodeDerivedMemory(episodeId, "Skill", repairCandidate.id, at);
-            }
-        }
-        const jobs = [];
-        if (this.deps.config.algorithm.capture.embedAfterCapture) {
-            if (repairCandidate) {
-                jobs.push(this.deps.enqueueJob({
-                    jobType: "embedding",
-                    userId: repairCandidate.userId,
-                    sessionId: repairCandidate.sessionId,
-                    episodeId: feedback.episodeId,
-                    targetMemoryId: repairCandidate.id,
-                    payload: { reason: "repair.candidate" },
-                    createdAt: at
-                }));
-            }
-        }
-        const savedPolicy = policyMetaFromMemory(saved);
-        if (savedPolicy?.status !== "active")
-            return jobs;
-        jobs.push(this.deps.enqueueJob({
-            jobType: "skill_crystallization",
-            userId: saved.userId,
-            sessionId: saved.sessionId,
-            episodeId: feedback.episodeId,
-            targetMemoryId: saved.id,
-            payload: { reason: "feedback.experience", feedbackId: feedback.id },
-            createdAt: at
-        }));
-        return jobs;
-    }
-    maybeMintRepairCandidateSkill(policyMemory, context, at) {
-        const policy = policyMetaFromMemory(policyMemory);
-        if (!policy || !isRepairCandidatePolicyForSkill(policy))
-            return undefined;
-        if (this.deps.findExistingSkillForPolicy(policy))
-            return undefined;
-        const fix = policy.decisionGuidance.preference.find((item) => item.trim().length > 0);
-        if (!fix)
-            return undefined;
-        const name = repairCandidateSkillName(policy, fix);
-        const invocationGuide = renderRepairCandidateGuide(policy, fix);
-        const eta = Math.max(0.1, this.deps.config.algorithm.skill.minEtaForRetrieval);
-        const betaPosterior = skillBetaPosterior(0, 0);
-        const procedureJson = {
-            summary: policy.procedure || fix,
-            preconditions: [policy.trigger].filter(Boolean),
-            parameters: [],
-            steps: [
-                {
-                    title: "Apply candidate repair",
-                    body: fix
-                },
-                {
-                    title: "Verify closure",
-                    body: policy.verification || "Check the current task outcome before treating the repair as validated."
-                }
-            ],
-            decisionGuidance: {
-                preference: policy.decisionGuidance.preference,
-                antiPattern: policy.decisionGuidance.antiPattern
-            },
-            reliability: {
-                supportCount: 1,
-                successRate: 0,
-                betaPosterior
-            },
-            repairOrigin: true,
-            strictTrial: repairCandidateStrictTrial(policy)
-        };
-        const skill = this.deps.buildMemory({
-            userId: policyMemory.userId,
-            conversationId: policyMemory.conversationId,
-            sessionId: policyMemory.sessionId,
-            agentId: policyMemory.agentId ?? context.namespace.source,
-            appId: policyMemory.appId ?? context.namespace.workspaceId,
-            projectId: projectIdFromMemory(policyMemory) ?? context.namespace.projectId,
-            profileId: profileIdFromMemory(policyMemory) ?? context.namespace.profileId,
-            layer: "Skill",
-            kind: "skill",
-            lifecycleStatus: "candidate",
-            memoryType: "SkillMemory",
-            key: `skill:${stableHash({
-                userId: policyMemory.userId,
-                projectId: projectIdFromMemory(policyMemory) ?? context.namespace.projectId,
-                profileId: profileIdFromMemory(policyMemory) ?? context.namespace.profileId,
-                name,
-                trigger: policy.trigger
-            }).slice(0, 20)}`,
-            value: invocationGuide,
-            tags: uniq(["skill", "repair_candidate", ...policyMemory.tags.filter((tag) => tag !== "policy")]).slice(0, 12),
-            info: {
-                name,
-                eta,
-                status: "candidate",
-                source_memory_ids: [policy.id],
-                repair_origin: true,
-                strict_trial: repairCandidateStrictTrial(policy)
-            },
-            internal: {
-                source: "feedback.repair_candidate.v1",
-                plugin_algorithm: "skill.repair_candidate.v1",
-                source_memory_ids: [policy.id],
-                source_policy_ids: [policy.id],
-                source_world_model_ids: [],
-                evidence_anchor_ids: policy.sourceTraceIds.slice(0, this.deps.config.algorithm.skill.evidenceLimit),
-                name,
-                invocation_guide: invocationGuide,
-                procedure_json: procedureJson,
-                eta,
-                support: 1,
-                gain: policy.gain,
-                repair_origin: true,
-                repairOrigin: true,
-                strict_trial: repairCandidateStrictTrial(policy),
-                strictTrial: repairCandidateStrictTrial(policy),
-                skill: {
-                    name,
-                    eta,
-                    status: "candidate",
-                    support: 1,
-                    gain: policy.gain,
-                    source_policy_ids: [policy.id],
-                    source_world_model_ids: [],
-                    evidence_anchor_ids: policy.sourceTraceIds.slice(0, this.deps.config.algorithm.skill.evidenceLimit),
-                    invocation_guide: invocationGuide,
-                    procedure_json: procedureJson,
-                    trials_attempted: 0,
-                    trials_passed: 0,
-                    success_rate: 0,
-                    beta_posterior: betaPosterior,
-                    repair_origin: true,
-                    repairOrigin: true,
-                    strict_trial: repairCandidateStrictTrial(policy),
-                    strictTrial: repairCandidateStrictTrial(policy),
-                    vec: null
-                }
-            },
-            createdAt: at
-        });
-        const upsert = this.deps.upsertEvolutionMemory(skill);
-        this.deps.repos.runtime.appendChange({
-            memoryId: upsert.memory.id,
-            namespaceId: namespaceIdFromMemory(upsert.memory),
-            kind: "skill",
-            op: upsert.created ? "created" : "updated",
-            entityId: upsert.memory.id,
-            userId: upsert.memory.userId,
-            changeType: upsert.created ? "repair_candidate_skill_create" : "repair_candidate_skill_update",
-            before: upsert.previous,
-            after: upsert.memory,
-            source: "feedback.repair_candidate.v1",
-            createdAt: at
-        });
-        return upsert.memory;
-    }
-    async enhanceFeedbackExperienceDraft(fallback, input) {
-        if (!this.deps.config.algorithm.feedback.useLlm || !this.deps.skillLlm.isConfigured()) {
-            return fallback;
-        }
-        const context = this.feedbackExperienceEpisodeContext(input.episode, input.trace);
-        const polarity = feedbackPolarityForRefinement(input.feedback, fallback);
-        try {
-            if (polarity === "negative") {
-                const result = await this.deps.skillLlm.completeJson([
-                    {
-                        role: "system",
-                        content: FAILURE_EXPERIENCE_SINK_PROMPT.system
-                    },
-                    {
-                        role: "user",
-                        content: failureExperienceSinkUserPrompt({
-                            feedbackText: input.text,
-                            userRequest: context.userRequest,
-                            agentResponse: context.agentResponse,
-                            episodeContext: context.fullContext
-                        })
-                    }
-                ], {
-                    operation: `${FAILURE_EXPERIENCE_SINK_PROMPT.id}.v${FAILURE_EXPERIENCE_SINK_PROMPT.version}`,
-                    thinkingMode: "enabled",
-                    temperature: 0.2,
-                    maxTokens: 900
-                });
-                return applyFailureExperienceSink(fallback, result);
-            }
-            const result = await this.deps.skillLlm.completeJson([
-                {
-                    role: "system",
-                    content: FEEDBACK_REFINEMENT_SYSTEM_PROMPT
-                },
-                {
-                    role: "user",
-                    content: feedbackRefinementUserPrompt({
-                        feedbackText: input.text,
-                        polarity,
-                        userRequest: context.userRequest,
-                        agentResponse: context.agentResponse,
-                        episodeContext: context.fullContext
-                    })
-                }
-            ], {
-                operation: "feedback.refine.v1",
-                thinkingMode: "enabled",
-                temperature: 0.2,
-                maxTokens: 700
-            });
-            return applyFeedbackRefinement(fallback, {
-                title: stringOr(result.title, ""),
-                trigger: stringOr(result.trigger, ""),
-                procedure: stringOr(result.procedure, ""),
-                verification: stringOr(result.verification, ""),
-                caveats: stringArray(result.caveats),
-                confidence: numberOr(result.confidence, fallback.confidence),
-                method: "llm"
-            });
-        }
-        catch (error) {
-            pipelineLogger.warn("fallback.used", {
-                operation: polarity === "negative"
-                    ? `${FAILURE_EXPERIENCE_SINK_PROMPT.id}.v${FAILURE_EXPERIENCE_SINK_PROMPT.version}`
-                    : "feedback.refine.v1",
-                pipeline: "feedback.refinement",
-                fallback: "rule_based_refinement",
-                feedbackId: input.feedback.id,
-                ...memoryErrorFields(error)
-            });
-            return applyFeedbackRefinement(fallback, refineFeedbackExperienceByRules({
-                feedbackText: input.text,
-                polarity,
-                userRequest: context.userRequest,
-                episodeContext: context.fullContext
-            }));
-        }
-    }
-    feedbackExperienceEpisodeContext(episode, currentTrace) {
-        const traces = [];
-        for (const id of episode?.l1MemoryIds ?? []) {
-            const memory = this.deps.repos.memories.get(id);
-            const trace = memory ? this.deps.traceMeta(memory) : null;
-            if (trace)
-                traces.push(trace);
-        }
-        if (currentTrace && !traces.some((trace) => trace.id === currentTrace.id)) {
-            traces.push(currentTrace);
-        }
-        traces.sort((a, b) => a.ts - b.ts);
-        if (traces.length === 0) {
-            return { userRequest: "", agentResponse: "", fullContext: "" };
-        }
-        const selected = feedbackRefinementSelectedTraces(traces);
-        const last = selected[selected.length - 1] ?? traces[traces.length - 1];
-        return {
-            userRequest: last.userText,
-            agentResponse: last.agentText,
-            fullContext: selected.map((trace) => feedbackRefinementTurnBlock(traces.indexOf(trace) + 1, trace)).join("\n\n")
-        };
-    }
-    findSimilarFeedbackExperience(draft, vector) {
-        let best = null;
-        for (const memory of this.deps.repos.memories.list({ memoryLayer: "L2", status: ["activated", "resolving"] }, 1000)) {
-            const policy = policyMetaFromMemory(memory);
-            if (!policy)
-                continue;
-            const sourceFeedbackIds = stringArray(memory.properties.internal_info.source_feedback_ids)
-                .concat(stringArray(isRecord(memory.properties.internal_info.policy)
-                ? memory.properties.internal_info.policy.source_feedback_ids
-                : undefined));
-            const sourceOverlap = draft.sourceTraceIds.some((id) => policy.sourceTraceIds.includes(id));
-            const vectorScore = policy.vec ? cosine(vector, policy.vec) : 0;
-            const score = Math.max(vectorScore, sourceOverlap && sourceFeedbackIds.length > 0 ? 0.83 : 0);
-            if (score < 0.72)
-                continue;
-            if (policy.experienceType !== draft.type && score < 0.82)
-                continue;
-            if (!best || score > best.score)
-                best = { memory, score, policy };
-        }
-        return best?.memory ?? null;
-    }
-    insertFeedbackExperiencePolicy(request, feedback, context, draft, vector, at) {
-        const key = `feedback:${stableHash(`${draft.type}:${draft.title}:${draft.trigger}`).slice(0, 16)}`;
-        const l2 = this.deps.buildMemory({
-            userId: feedback.userId,
-            conversationId: feedback.conversationId ?? context.conversationId,
-            sessionId: feedback.sessionId ?? request.sessionId,
-            agentId: context.namespace.source,
-            appId: context.namespace.workspaceId,
-            projectId: context.namespace.projectId,
-            profileId: context.namespace.profileId,
-            layer: "L2",
-            kind: "policy",
-            lifecycleStatus: "candidate",
-            memoryType: "LongTermMemory",
-            key,
-            value: renderFeedbackExperienceBody(draft),
-            tags: draft.tags,
-            info: {
-                support: 1,
-                gain: Math.max(0.02, draft.salience),
-                policy_confidence: draft.confidence,
-                status: "candidate",
-                source_memory_ids: draft.sourceTraceIds,
-                source_feedback_ids: draft.sourceFeedbackIds,
-                experience_type: draft.type,
-                evidence_polarity: draft.polarity
-            },
-            internal: {
-                source: "feedback.experience.v1",
-                plugin_algorithm: "feedback.experience.v1",
-                source_memory_ids: draft.sourceTraceIds,
-                source_l1_memory_ids: draft.sourceTraceIds,
-                source_feedback_ids: draft.sourceFeedbackIds,
-                title: draft.title,
-                trigger: draft.trigger,
-                procedure: draft.procedure,
-                verification: draft.verification,
-                boundary: draft.boundary,
-                support: 1,
-                gain: Math.max(0.02, draft.salience),
-                raw_gain: draft.salience,
-                policy_confidence: draft.confidence,
-                status: "candidate",
-                source_episode_ids: draft.sourceEpisodeIds,
-                source_trace_ids: draft.sourceTraceIds,
-                policy: {
-                    title: draft.title,
-                    trigger: draft.trigger,
-                    procedure: draft.procedure,
-                    verification: draft.verification,
-                    boundary: draft.boundary,
-                    support: 1,
-                    gain: Math.max(0.02, draft.salience),
-                    raw_gain: draft.salience,
-                    policy_confidence: draft.confidence,
-                    status: "candidate",
-                    experience_type: draft.type,
-                    evidence_polarity: draft.polarity,
-                    salience: draft.salience,
-                    confidence: draft.confidence,
-                    source_episode_ids: draft.sourceEpisodeIds,
-                    source_trace_ids: draft.sourceTraceIds,
-                    source_feedback_ids: draft.sourceFeedbackIds,
-                    induced_by: "feedback.experience.v1",
-                    decision_guidance: policyDecisionGuidanceForStorage(draft.decisionGuidance),
-                    verifier_meta: draft.verifierMeta,
-                    skill_eligible: draft.skillEligible,
-                    signature: `feedback|${draft.type}|${draft.polarity}`,
-                    vec: vector
-                }
-            },
-            createdAt: at
-        });
-        const upsert = this.deps.repos.memories.upsertByKey(l2);
-        this.deps.repos.runtime.appendChange({
-            memoryId: upsert.memory.id,
-            namespaceId: namespaceIdFromMemory(upsert.memory),
-            kind: "policy",
-            op: upsert.created ? "created" : "updated",
-            entityId: upsert.memory.id,
-            userId: upsert.memory.userId,
-            changeType: upsert.created ? "feedback_experience_create" : "feedback_experience_update",
-            before: upsert.previous,
-            after: upsert.memory,
-            source: "feedback.experience.v1",
-            createdAt: at
-        });
-        return upsert.memory;
-    }
-    mergeFeedbackExperiencePolicy(memory, draft, vector, at) {
-        const previous = memory;
-        const policy = policyMetaFromMemory(memory);
-        const internalPolicy = isRecord(memory.properties.internal_info.policy)
-            ? memory.properties.internal_info.policy
-            : {};
-        const existingPolarity = policy?.evidencePolarity ?? "positive";
-        const polarity = mergeFeedbackPolarity(existingPolarity, draft.polarity);
-        const skillEligible = Boolean((policy?.skillEligible ?? true) || draft.skillEligible);
-        const support = Math.max(1, policy?.support ?? 0) + 1;
-        const gain = Math.max(policy?.gain ?? 0, draft.salience, 0.02);
-        const sourceEpisodeIds = uniq([...(policy?.sourceEpisodeIds ?? []), ...draft.sourceEpisodeIds]);
-        const activationReady = sourceEpisodeIds.length >= this.deps.config.algorithm.l2Induction.minEpisodesForActivation;
-        const lifecycleStatus = memory.status === "archived"
-            ? "archived"
-            : activationReady
-                ? "active"
-                : "candidate";
-        const status = memoryStatusForLifecycleStatus(lifecycleStatus);
-        const experienceType = skillEligible && polarity === "mixed"
-            ? "repair_validated"
-            : (policy?.experienceType ?? draft.type);
-        const sourceTraceIds = uniq([...(policy?.sourceTraceIds ?? []), ...draft.sourceTraceIds]);
-        const sourceFeedbackIds = uniq([
-            ...stringArray(internalPolicy.source_feedback_ids),
-            ...draft.sourceFeedbackIds
-        ]);
-        const decisionGuidance = {
-            preference: uniq([...(policy?.decisionGuidance.preference ?? []), ...draft.decisionGuidance.preference]),
-            antiPattern: uniq([...(policy?.decisionGuidance.antiPattern ?? []), ...draft.decisionGuidance.antiPattern])
-        };
-        const nextPolicy = {
-            ...internalPolicy,
-            title: draft.title,
-            trigger: draft.trigger,
-            procedure: draft.procedure,
-            verification: draft.verification,
-            boundary: draft.boundary,
-            support,
-            gain,
-            raw_gain: Math.max(numberOr(internalPolicy.raw_gain, 0), draft.salience),
-            status: lifecycleStatus,
-            experience_type: experienceType,
-            evidence_polarity: polarity,
-            salience: Math.max(numberOr(internalPolicy.salience, 0), draft.salience),
-            policy_confidence: Math.max(policy?.confidence ?? 0.5, draft.confidence),
-            confidence: Math.max(policy?.confidence ?? 0.5, draft.confidence),
-            source_episode_ids: sourceEpisodeIds,
-            source_trace_ids: sourceTraceIds,
-            source_feedback_ids: sourceFeedbackIds,
-            decision_guidance: policyDecisionGuidanceForStorage(decisionGuidance),
-            verifier_meta: internalPolicy.verifier_meta ?? draft.verifierMeta,
-            skill_eligible: skillEligible,
-            vec: vector
-        };
-        const mergedDraft = {
-            ...draft,
-            type: experienceType,
-            polarity,
-            support,
-            gain,
-            sourceEpisodeIds,
-            sourceTraceIds,
-            sourceFeedbackIds,
-            decisionGuidance
-        };
-        const next = {
-            ...memory,
-            status,
-            memoryValue: renderFeedbackExperienceBody(mergedDraft),
-            info: {
-                ...memory.info,
-                support,
-                gain,
-                policy_confidence: nextPolicy.policy_confidence,
-                status: nextPolicy.status,
-                source_memory_ids: sourceTraceIds,
-                source_feedback_ids: sourceFeedbackIds,
-                experience_type: experienceType,
-                evidence_polarity: polarity
-            },
-            properties: {
-                ...memory.properties,
-                status,
-                info: {
-                    ...(memory.properties.info ?? {}),
-                    support,
-                    gain,
-                    policy_confidence: nextPolicy.policy_confidence,
-                    status: nextPolicy.status,
-                    source_memory_ids: sourceTraceIds,
-                    source_feedback_ids: sourceFeedbackIds,
-                    experience_type: experienceType,
-                    evidence_polarity: polarity
-                },
-                internal_info: {
-                    ...memory.properties.internal_info,
-                    source_memory_ids: sourceTraceIds,
-                    source_l1_memory_ids: sourceTraceIds,
-                    source_feedback_ids: sourceFeedbackIds,
-                    title: nextPolicy.title,
-                    trigger: nextPolicy.trigger,
-                    procedure: nextPolicy.procedure,
-                    verification: nextPolicy.verification,
-                    boundary: nextPolicy.boundary,
-                    support,
-                    gain,
-                    raw_gain: nextPolicy.raw_gain,
-                    policy_confidence: nextPolicy.policy_confidence,
-                    status: nextPolicy.status,
-                    source_episode_ids: sourceEpisodeIds,
-                    source_trace_ids: sourceTraceIds,
-                    decision_guidance: nextPolicy.decision_guidance,
-                    policy: nextPolicy
-                }
-            },
-            updatedAt: at,
-            contentHash: stableHash(renderFeedbackExperienceBody(mergedDraft))
-        };
-        const saved = this.deps.repos.memories.update(next);
-        this.deps.repos.runtime.appendChange({
-            memoryId: saved.id,
-            namespaceId: namespaceIdFromMemory(saved),
-            kind: "policy",
-            op: "updated",
-            entityId: saved.id,
-            userId: saved.userId,
-            changeType: "feedback_experience_merge",
-            before: previous,
-            after: saved,
-            source: "feedback.experience.v1",
-            createdAt: at
-        });
-        return saved;
-    }
-    feedbackCandidatePolicyIds(request, feedback) {
-        const ids = new Set();
-        if (request.recallEventId) {
-            const recall = this.deps.repos.runtime.getRecallEvent(request.recallEventId);
-            for (const id of recall?.injectedMemoryIds ?? []) {
-                const memory = this.deps.repos.memories.get(id);
-                if (memory?.memoryLayer === "L2")
-                    ids.add(memory.id);
-            }
-        }
-        if (feedback.l1MemoryId) {
-            for (const link of this.deps.repos.runtime.listTracePolicyLinks({
-                userId: feedback.userId,
-                l1MemoryId: feedback.l1MemoryId,
-                limit: 20
-            })) {
-                ids.add(link.l2MemoryId);
-            }
-        }
-        if (ids.size === 0 && feedback.rationale) {
-            for (const hit of this.deps.repos.memories.search(feedback.rationale, {
-                memoryLayer: "L2",
-                status: "activated"
-            }, 3)) {
-                ids.add(hit.id);
-            }
-        }
-        return [...ids].slice(0, this.deps.config.algorithm.feedback.evidenceLimit);
-    }
-    feedbackRepairEvidence(request, feedback, policyIds) {
+    feedbackRepairEvidence(request, feedback) {
         const limit = this.deps.config.algorithm.feedback.evidenceLimit;
         const low = new Set();
         const high = new Set();
@@ -899,17 +310,6 @@ export class FeedbackExperienceService {
                 else if (feedback.polarity === "positive") {
                     high.add(id);
                 }
-            }
-        }
-        for (const policy of this.deps.repos.memories.getMany(policyIds)) {
-            const meta = policyMetaFromMemory(policy);
-            if (!meta)
-                continue;
-            for (const id of meta.sourceTraceIds) {
-                if (feedback.polarity === "negative")
-                    low.add(id);
-                if (feedback.polarity === "positive")
-                    high.add(id);
             }
         }
         const searchText = request.rationale ?? feedback.rationale;
@@ -1008,39 +408,6 @@ export class FeedbackExperienceService {
             };
         });
     }
-    attachRepairToPolicies(repairId, policyIds, preference, antiPattern, at) {
-        const attached = [];
-        for (const policyId of policyIds) {
-            const memory = this.deps.repos.memories.get(policyId);
-            if (!memory || memory.memoryLayer !== "L2")
-                continue;
-            const previous = memory;
-            const next = updatePolicyDecisionGuidance(memory, {
-                preference,
-                antiPattern,
-                repairId,
-                updatedAt: at
-            });
-            if (next === memory)
-                continue;
-            const saved = this.deps.repos.memories.update(next);
-            attached.push(saved.id);
-            this.deps.repos.runtime.appendChange({
-                memoryId: saved.id,
-                namespaceId: namespaceIdFromMemory(saved),
-                kind: kindFromMemory(saved),
-                op: "updated",
-                entityId: saved.id,
-                userId: saved.userId,
-                changeType: "policy_repair_attached",
-                before: previous,
-                after: saved,
-                source: "feedback.decision_repair.v7",
-                createdAt: at
-            });
-        }
-        return attached;
-    }
     applyRecallOutcome(event, feedback, at) {
         const outcome = event.outcome;
         if (!outcome || outcome === "pending")
@@ -1054,34 +421,6 @@ export class FeedbackExperienceService {
                 recallEventId: event.id,
                 updatedAt: at
             });
-            if (outcome !== "ignored" && memory.memoryLayer === "L2") {
-                const policy = policyMetaFromMemory(next);
-                if (policy) {
-                    const direction = outcome === "positive" ? 1 : -1;
-                    const nextGain = clampNumber(policy.gain + direction * 0.02 * clampNumber(feedback.magnitude, 0, 1), -1, 1);
-                    const status = policyStatusAfterGain({
-                        currentStatus: policy.status === "active"
-                            ? "active"
-                            : policy.status === "candidate"
-                                ? "candidate"
-                                : "archived",
-                        support: policy.support,
-                        gain: nextGain,
-                        minSupport: this.deps.config.algorithm.l2Induction.minEpisodesForInduction,
-                        minGain: this.deps.config.algorithm.l2Induction.minGain,
-                        archiveGain: this.deps.config.algorithm.l2Induction.archiveGain
-                    });
-                    next = updatePolicyStats(next, {
-                        support: policy.support,
-                        gain: nextGain,
-                        rawGain: nextGain,
-                        status,
-                        sourceEpisodeIds: policy.sourceEpisodeIds,
-                        sourceTraceIds: policy.sourceTraceIds,
-                        updatedAt: at
-                    });
-                }
-            }
             const saved = this.deps.repos.memories.update(next);
             this.deps.repos.runtime.appendChange({
                 memoryId: saved.id,
@@ -1300,54 +639,6 @@ export class FeedbackExperienceService {
         return undefined;
     }
 }
-function updatePolicyDecisionGuidance(memory, input) {
-    const internalPolicy = isRecord(memory.properties.internal_info.policy)
-        ? memory.properties.internal_info.policy
-        : {};
-    const currentGuidance = isRecord(internalPolicy.decision_guidance)
-        ? internalPolicy.decision_guidance
-        : {};
-    const preference = uniq([
-        ...stringArray(currentGuidance.preference),
-        ...(input.preference ? [input.preference] : [])
-    ]);
-    const antiPattern = uniq([
-        ...stringArray(currentGuidance.anti_pattern),
-        ...(input.antiPattern ? [input.antiPattern] : [])
-    ]);
-    const repairIds = uniq([
-        ...stringArray(currentGuidance.repair_ids),
-        input.repairId
-    ]);
-    const changed = preference.length !== stringArray(currentGuidance.preference).length ||
-        antiPattern.length !== stringArray(currentGuidance.anti_pattern).length ||
-        repairIds.length !== stringArray(currentGuidance.repair_ids).length;
-    if (!changed)
-        return memory;
-    return {
-        ...memory,
-        properties: {
-            ...memory.properties,
-            internal_info: {
-                ...memory.properties.internal_info,
-                decision_guidance: {
-                    preference,
-                    anti_pattern: antiPattern,
-                    repair_ids: repairIds
-                },
-                policy: {
-                    ...internalPolicy,
-                    decision_guidance: {
-                        preference,
-                        anti_pattern: antiPattern,
-                        repair_ids: repairIds
-                    }
-                }
-            }
-        },
-        updatedAt: input.updatedAt
-    };
-}
 function updateRecallStats(memory, input) {
     const current = isRecord(memory.properties.internal_info.recall)
         ? memory.properties.internal_info.recall
@@ -1379,53 +670,6 @@ function updateRecallStats(memory, input) {
         },
         updatedAt: input.updatedAt
     };
-}
-function isRepairCandidatePolicyForSkill(policy) {
-    return policy.status === "active" &&
-        policy.evidencePolarity === "negative" &&
-        policy.skillEligible === false &&
-        policy.decisionGuidance.preference.some((item) => item.trim().length > 0);
-}
-function repairCandidateStrictTrial(policy) {
-    const internalPolicy = isRecord(policy.memory.properties.internal_info.policy)
-        ? policy.memory.properties.internal_info.policy
-        : {};
-    const verifierMeta = isRecord(internalPolicy.verifier_meta)
-        ? internalPolicy.verifier_meta
-        : null;
-    return Boolean(verifierMeta && (verifierMeta.passed !== undefined ||
-        verifierMeta.total !== undefined ||
-        verifierMeta.reward !== undefined ||
-        verifierMeta.score !== undefined));
-}
-function repairCandidateSkillName(policy, fix) {
-    const words = `${policy.title} ${fix}`
-        .toLowerCase()
-        .replace(/[^a-z0-9_]+/g, " ")
-        .trim()
-        .split(/\s+/)
-        .filter((word) => word.length >= 3 && word !== "repair" && word !== "avoid")
-        .slice(0, 5);
-    const raw = ["repair", ...words].join("_").slice(0, 48).replace(/_+$/g, "");
-    return raw && raw !== "repair" ? raw : `repair_${stableHash(policy.id).slice(0, 10)}`;
-}
-function renderRepairCandidateGuide(policy, fix) {
-    return [
-        `# ${policy.title || "Repair candidate"}`,
-        "Candidate fix distilled from a past failure on a similar task. Applying it here both solves the task and validates the fix.",
-        "",
-        policy.trigger ? "**When to use**" : "",
-        policy.trigger,
-        policy.trigger ? "" : "",
-        "**Suggested fix**",
-        fix,
-        "",
-        policy.decisionGuidance.antiPattern.length > 0 ? "**Avoid**" : "",
-        ...policy.decisionGuidance.antiPattern.map((item) => `- ${item}`),
-        policy.verification ? "" : "",
-        policy.verification ? "**Verify**" : "",
-        policy.verification
-    ].filter((line) => typeof line === "string" && line.length > 0).join("\n");
 }
 function recallOutcomeFromFeedback(feedback) {
     if (feedback.polarity === "positive")
@@ -1584,101 +828,6 @@ export function normalizeDecisionRepairLlmDraft(value) {
         confidence
     };
 }
-const FAILURE_EXPERIENCE_SINK_PROMPT = {
-    id: "failure.experience.sink",
-    version: 5,
-    system: `You induce a candidate policy from an episode where the task was not finished satisfactorily.
-
-Goal:
-- Extract one reusable policy that helps a similar task reach a satisfactory finish.
-- Make it operational: trigger + procedure + verification. Prefer practical guidance (priorities, sequencing, closure checks) over abstract commentary.
-- Use corrective_signals to see what the goal still needed; use phase_chunks and episode_timeline for context.
-
-Input:
-- task_context.user_goal: task framing and requirements (may be truncated).
-- phase_chunks: recent traces (conversation + limited tool output snippets).
-- episode_timeline.turns: ordered user turns with timing.
-- corrective_signals: feedback with turn_index and timing relative to turns.
-
-Evidence:
-1) Ground only in the fields above. Do not invent tests, files, errors, or violations.
-2) task_context states requirements; it does not by itself show what went wrong in the attempt.
-3) Tie each claim to a quotable phenomenon (e.g. external judgment still open, requested substance missing, timeout without deliverable, feedback naming an unmet acceptance criterion).
-4) If evidence is thin, keep the policy narrow and note limits in boundary.
-5) Source-specific entities are not reusable guidance by default: names, locations, product names, file names, one-off requested targets, and one task's acceptance details must be abstracted into categories or variables.
-6) Preserve an entity only when the input explicitly marks it as a structured stable fact, such as a user profile fact, workspace/project fact, long-term preference memory, or stable-fact annotation.
-7) Current episode text, tool output, verifier feedback, or a one-time task requirement are not enough evidence to call an entity long-term. Do not infer long-term preference from them.
-8) Do not put source-specific entities into title, trigger, procedure, verification, boundary, or decision_guidance unless the structured stable source is present.
-
-Guidance:
-9) prefer: habits that advance completion (may be empty).
-10) avoid: habits that leave the goal unmet--outcome/behavior gaps only. Do not name tools or channels; do not use "do not use / never call" style lines.
-11) procedure and verification must be checkable from visible outcomes or judgments in the input.
-12) verification: how to tell the task is done or accepted.
-
-Types:
-13) "failure_avoidance" when feedback shows the goal stayed open and you mainly generalize what to stop doing before ending.
-14) "repair_instruction" when you can give a repeatable completion pattern (what to finish or confirm before done).
-
-Other:
-15) trigger: task-level, recognizable when a similar task starts or nears closure.
-16) support_trace_ids: only traces you actually used.
-
-Return JSON:
-{
-  "title": "short title",
-  "trigger": "state condition",
-  "procedure": "step-by-step guidance",
-  "verification": "how to verify completion",
-  "boundary": "scope/limits",
-  "experience_type": "repair_instruction | failure_avoidance",
-  "decision_guidance": {
-    "prefer": ["..."],
-    "avoid": ["..."]
-  },
-  "support_trace_ids": ["tr_..."]
-}`
-};
-const FEEDBACK_REFINEMENT_SYSTEM_PROMPT = `You extract actionable guidance from user feedback.
-
-Given a user's feedback on an agent's response, produce a procedural policy
-that helps the agent avoid the same mistake (or replicate the same success)
-in future similar tasks.
-
-CRITICAL REQUIREMENTS:
-
-1. TRIGGER must be SPECIFIC and CONCRETE:
-   - BAD: "When a similar task appears" (what is similar?)
-   - GOOD: "When the user asks to implement bubble sort"
-   Extract the concrete task type, domain, or feature from the episode context.
-
-2. PROCEDURE must be ACTIONABLE and CONCISE:
-   - BAD: "adjust according to feedback"
-   - GOOD: "Implement descending order by using > in the comparison"
-   Specify concrete steps the agent should take.
-
-3. CAVEATS must provide SPECIFIC ANTI-PATTERNS:
-   - BAD: "avoid repeating the current mistake"
-   - GOOD: "Do not assume the default sort direction is ascending"
-   Return [] if no concrete anti-pattern can be extracted.
-
-4. VERIFICATION is OPTIONAL:
-   - BAD: "check whether the issue is solved"
-   - GOOD: "Check the comparison operator direction (< vs >)"
-   Return "" if no concrete, checkable verification method exists.
-
-Focus on TRIGGER + PROCEDURE. Caveats and verification are optional - only
-fill them when there is specific content.
-
-Return JSON:
-{
-  "title": "short imperative title",
-  "trigger": "SPECIFIC task type/domain/feature (not 'similar task')",
-  "procedure": "CONCRETE actionable steps (not 'adjust according to feedback')",
-  "caveats": ["SPECIFIC anti-patterns"] or [],
-  "verification": "CHECKABLE verification method" or "",
-  "confidence": number in [0, 1]
-}`;
 const NEGATIVE_FEEDBACK_REFINEMENT_EXAMPLES = `Extract guidance to AVOID this mistake.
 
 CRITICAL: Be SPECIFIC and CONCISE.
@@ -1755,214 +904,9 @@ Output:
   "verification": "Check that the code partitions into less-than, equal-to, and greater-than groups.",
   "confidence": 0.85
 }`;
-function feedbackExperienceText(feedback) {
-    return dedupeTextLines([
-        feedback.rationale,
-        feedbackRawText(feedback.rawPayload)
-    ]).join("\n").trim();
-}
-function feedbackPolarityForRefinement(feedback, draft) {
-    if (feedback.polarity === "positive" || draft.polarity === "positive")
-        return "positive";
-    if (feedback.polarity === "negative" || draft.polarity === "negative")
-        return "negative";
-    return "neutral";
-}
-function feedbackRefinementUserPrompt(input) {
-    const isNegative = input.polarity === "negative";
-    const context = input.episodeContext
-        ? `EPISODE CONTEXT (first turn + last 3 turns):\n${input.episodeContext}`
-        : [
-            `USER REQUEST:\n${clip(input.userRequest, 500)}`,
-            `AGENT RESPONSE:\n${clip(input.agentResponse, 800)}`
-        ].join("\n\n");
-    return [
-        context,
-        `USER FEEDBACK (${input.polarity}):\n${input.feedbackText}`,
-        isNegative ? NEGATIVE_FEEDBACK_REFINEMENT_EXAMPLES : POSITIVE_FEEDBACK_REFINEMENT_EXAMPLES,
-        "Output JSON only."
-    ].join("\n\n");
-}
-function failureExperienceSinkUserPrompt(input) {
-    const timeline = input.episodeContext
-        .split(/\n\s*\n/)
-        .map((text, index) => ({
-        turn_index: index + 1,
-        text: clip(text, 700)
-    }))
-        .filter((turn) => turn.text.length > 0);
-    return stableStringify({
-        task_context: {
-            user_goal: clip(input.userRequest || input.episodeContext || "unknown task", 800)
-        },
-        phase_chunks: [
-            {
-                id: "recent_episode_context",
-                text: clip(input.episodeContext || [
-                    `User: ${input.userRequest}`,
-                    `Agent: ${input.agentResponse}`
-                ].join("\n"), 2400)
-            }
-        ],
-        episode_timeline: {
-            turns: timeline
-        },
-        corrective_signals: [
-            {
-                turn_index: timeline.length || null,
-                timing: "after_attempt",
-                text: clip(input.feedbackText, 1000)
-            }
-        ]
-    });
-}
-function applyFeedbackRefinement(draft, refinement) {
-    const prefix = feedbackExperiencePrefix(draft.type);
-    const refinedTitle = cleanFeedbackText(refinement.title);
-    const title = refinedTitle
-        ? `${prefix}: ${stripFeedbackRefinementPrefix(refinedTitle, prefix)}`
-        : draft.title;
-    const trigger = cleanFeedbackText(refinement.trigger) ?? draft.trigger;
-    const procedure = cleanFeedbackText(refinement.procedure) ?? draft.procedure;
-    const verification = typeof refinement.verification === "string" && refinement.verification.trim()
-        ? refinement.verification.trim()
-        : draft.verification;
-    const caveats = dedupeTextLines(refinement.caveats.map((item) => clip(item, 360)));
-    const decisionGuidance = {
-        preference: dedupeTextLines([
-            ...draft.decisionGuidance.preference,
-            draft.type === "success_pattern" || draft.type === "repair_validated" ? procedure : undefined
-        ]),
-        antiPattern: dedupeTextLines([
-            ...draft.decisionGuidance.antiPattern,
-            ...caveats
-        ])
-    };
-    return {
-        ...draft,
-        title,
-        trigger,
-        procedure,
-        verification,
-        decisionGuidance,
-        confidence: clampNumber(Math.max(draft.confidence, refinement.confidence), 0, 1),
-        vectorText: [title, trigger, procedure, verification, draft.boundary].join("\n"),
-        tags: uniq([...draft.tags, `feedback-${refinement.method}-refined`]).slice(0, 12)
-    };
-}
-function applyFailureExperienceSink(draft, sink) {
-    const guidance = isRecord(sink.decision_guidance) ? sink.decision_guidance : {};
-    const title = cleanFeedbackText(stringOr(sink.title, "")) ?? draft.title;
-    const trigger = cleanFeedbackText(stringOr(sink.trigger, "")) ?? draft.trigger;
-    const procedure = cleanFeedbackText(stringOr(sink.procedure, "")) ?? draft.procedure;
-    const verification = cleanFeedbackText(stringOr(sink.verification, "")) ?? draft.verification;
-    const boundary = cleanFeedbackText(stringOr(sink.boundary, "")) ?? draft.boundary;
-    const experienceType = sink.experience_type === "failure_avoidance"
-        ? "failure_avoidance"
-        : sink.experience_type === "repair_instruction"
-            ? "repair_instruction"
-            : draft.type === "failure_avoidance"
-                ? "failure_avoidance"
-                : "repair_instruction";
-    const supportTraceIds = stringArray(sink.support_trace_ids);
-    const decisionGuidance = {
-        preference: dedupeTextLines([
-            ...draft.decisionGuidance.preference,
-            ...stringArray(guidance.prefer),
-            ...stringArray(guidance.preference)
-        ]),
-        antiPattern: dedupeTextLines([
-            ...draft.decisionGuidance.antiPattern,
-            ...stringArray(guidance.avoid),
-            ...stringArray(guidance.anti_pattern),
-            ...stringArray(guidance.antiPattern)
-        ])
-    };
-    return {
-        ...draft,
-        type: experienceType,
-        title,
-        trigger,
-        procedure,
-        verification,
-        boundary,
-        decisionGuidance,
-        sourceTraceIds: supportTraceIds.length > 0
-            ? uniq([...draft.sourceTraceIds, ...supportTraceIds]).slice(0, 20)
-            : draft.sourceTraceIds,
-        vectorText: [title, trigger, procedure, verification, boundary].join("\n"),
-        tags: uniq([...draft.tags, "feedback-failure-sink-refined"]).slice(0, 12)
-    };
-}
 function stripFeedbackRefinementPrefix(title, prefix) {
     const pattern = new RegExp(`^${escapeRegExp(prefix)}\\s*[:：-]\\s*`, "i");
     return title.replace(pattern, "").trim() || title;
-}
-function refineFeedbackExperienceByRules(input) {
-    const text = input.feedbackText.trim();
-    const lower = text.toLowerCase();
-    const task = feedbackTaskContext(input.userRequest, input.episodeContext);
-    const preferZh = text.match(/用\s*(.+?)\s*(代替|而不是)\s*(.+?)([。!?\n]|$)/i);
-    const preferEn = preferZh ? null : text.match(/use\s+(.+?)\s+instead\s+of\s+(.+?)([.!?\n]|$)/i);
-    if (preferZh || preferEn) {
-        const preferred = cleanFeedbackText(preferZh?.[1] ?? preferEn?.[1]) ?? "";
-        const avoided = cleanFeedbackText(preferZh?.[3] ?? preferEn?.[2]) ?? "";
-        return {
-            title: preferred ? `Use ${firstFeedbackSentence(preferred, 60)}` : firstFeedbackSentence(text, 80),
-            trigger: task.trigger || "When choosing an implementation approach.",
-            procedure: preferred && avoided ? `Use ${preferred} instead of ${avoided}.` : text,
-            caveats: avoided ? [`Avoid using ${avoided}.`] : [],
-            verification: preferred ? `Check that the answer uses ${firstFeedbackSentence(preferred, 80)}.` : "",
-            confidence: 0.75,
-            method: "rule"
-        };
-    }
-    const should = text.match(/(?:应该|should)\s+(.+?)([。!?\n]|$)/i);
-    if (should) {
-        const action = cleanFeedbackText(should[1]) ?? text;
-        return {
-            title: firstFeedbackSentence(action, 80),
-            trigger: task.trigger || "When handling the related task.",
-            procedure: action,
-            caveats: input.polarity === "negative" ? [`Avoid ignoring this requirement: ${action}`] : [],
-            verification: `Check that the answer applies: ${firstFeedbackSentence(action, 80)}.`,
-            confidence: 0.65,
-            method: "rule"
-        };
-    }
-    const avoid = text.match(/(?:不要|别|avoid|don't|do not)\s+(.+?)([。!?\n]|$)/i);
-    if (avoid) {
-        const antiPattern = cleanFeedbackText(avoid[1]) ?? text;
-        return {
-            title: `Avoid ${firstFeedbackSentence(antiPattern, 60)}`,
-            trigger: task.trigger || "When handling the related task.",
-            procedure: `Check the plan and avoid: ${antiPattern}`,
-            caveats: [antiPattern],
-            verification: `Check that the answer avoids: ${firstFeedbackSentence(antiPattern, 80)}.`,
-            confidence: 0.7,
-            method: "rule"
-        };
-    }
-    if (input.polarity === "negative") {
-        return {
-            title: firstFeedbackSentence(text, 80),
-            trigger: task.trigger || task.taskType || "When handling the related task.",
-            procedure: text,
-            caveats: [],
-            verification: "",
-            confidence: 0.5,
-            method: "rule"
-        };
-    }
-    return {
-        title: firstFeedbackSentence(text, 80),
-        trigger: task.trigger || task.taskType || "When handling the related task.",
-        procedure: `Continue using this approach: ${text}`,
-        caveats: [],
-        verification: "",
-        confidence: 0.6,
-        method: "rule"
-    };
 }
 function feedbackTaskContext(userRequest, episodeContext) {
     const combined = `${userRequest} ${episodeContext}`.toLowerCase();
@@ -1991,159 +935,8 @@ function feedbackTaskContext(userRequest, episodeContext) {
     }
     return { trigger: "", taskType: "" };
 }
-function feedbackRefinementSelectedTraces(traces) {
-    const selected = [];
-    const first = traces[0];
-    if (first)
-        selected.push(first);
-    const start = Math.max(1, traces.length - 3);
-    for (let index = start; index < traces.length; index += 1) {
-        const trace = traces[index];
-        if (trace && trace.id !== first?.id)
-            selected.push(trace);
-    }
-    return selected;
-}
-function feedbackRefinementTurnBlock(turnNumber, trace) {
-    return [
-        `Turn ${turnNumber}:`,
-        `User: ${clip(trace.userText, 400)}`,
-        `Agent: ${clip(trace.agentText, 600)}`
-    ].join("\n");
-}
 function escapeRegExp(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-function feedbackExperienceSignificance(feedback, classification, episode) {
-    const reward = isRecord(episode?.meta.reward) && typeof episode.meta.reward.rHuman === "number"
-        ? Math.abs(episode.meta.reward.rHuman)
-        : 0;
-    return clampNumber(Math.max(feedback.magnitude ?? 0, classification.confidence, feedbackVerifierScore(feedback.rawPayload), reward), 0, 1);
-}
-function isActionableFeedbackExperience(text, shape) {
-    if (shape !== "unknown" && shape !== "confusion")
-        return true;
-    return /\b(next time|should|must|avoid|prefer|instead|do not|don't|pass|fail|failed|success|expected|actual)\b/i.test(text) ||
-        /下次|应该|必须|不要|别|成功|失败|反例|期望|实际|改/.test(text);
-}
-function buildFeedbackExperienceDraft(input) {
-    const text = clip(input.text, 360);
-    const lower = input.text.toLowerCase();
-    const verifierMeta = extractFeedbackVerifierMeta(input.feedback.rawPayload, lower);
-    const pass = isPositiveFeedbackExperience(input.feedback, lower, input.classification.shape, verifierMeta);
-    const fail = isNegativeFeedbackExperience(input.feedback, lower, input.classification.shape, verifierMeta);
-    const hasAvoid = /\b(avoid|do not|don't|never|stop|wrong|incorrect|failed|fail)\b/i.test(input.text) ||
-        /不要|别|不能|错误|失败|反例/.test(input.text);
-    let type;
-    let polarity;
-    let skillEligible = false;
-    if (pass) {
-        type = "success_pattern";
-        polarity = "positive";
-        skillEligible = true;
-    }
-    else if (fail && hasAvoid) {
-        type = "failure_avoidance";
-        polarity = "negative";
-    }
-    else if (input.classification.shape === "preference") {
-        type = "preference";
-        polarity = fail ? "negative" : "neutral";
-    }
-    else if (hasAvoid) {
-        type = "failure_avoidance";
-        polarity = "negative";
-    }
-    else if (input.classification.shape === "correction" || input.classification.shape === "constraint" || fail) {
-        type = "repair_instruction";
-        polarity = fail ? "negative" : "neutral";
-    }
-    else if (verifierMeta) {
-        type = "verifier_feedback";
-        polarity = pass ? "positive" : fail ? "negative" : "neutral";
-    }
-    else {
-        type = "repair_instruction";
-        polarity = "neutral";
-    }
-    const prefix = feedbackExperiencePrefix(type);
-    const traceContext = input.trace ? feedbackTraceHint(input.trace) : null;
-    const title = `${prefix}: ${firstFeedbackSentence(text, Math.max(30, 120 - prefix.length - 2))}`;
-    const trigger = [
-        "When a future task is similar to the source episode or asks for comparable output.",
-        input.trace?.userText ? `Source user request: ${clip(input.trace.userText, 220)}` : null
-    ].filter(Boolean).join("\n");
-    const procedure = [
-        type === "failure_avoidance"
-            ? `Avoid repeating this behavior: ${text}`
-            : type === "repair_instruction"
-                ? `When this feedback pattern appears, repair the answer by applying: ${text}`
-                : type === "preference"
-                    ? `Prefer this behavior in similar tasks: ${text}`
-                    : `This was accepted as a useful approach: ${text}`,
-        traceContext ? `Source turn context: ${traceContext}` : null
-    ].filter(Boolean).join("\n");
-    const verification = type === "success_pattern"
-        ? "Before reusing, confirm the current task has the same success criteria as the feedback."
-        : "Before answering, check the current plan against this avoid/repair instruction.";
-    const boundary = [
-        "Use only for similar task shape, evaluator expectation, or user preference.",
-        input.episode?.id ? `Source episode: ${input.episode.id}` : null,
-        input.feedback.id ? `Source feedback: ${input.feedback.id}` : null
-    ].filter(Boolean).join("\n");
-    const sourceTraceIds = feedbackExperienceTraceIds(input.feedback, input.episode, input.trace);
-    const guidance = feedbackExperienceGuidance(type, input.classification, text);
-    const confidence = clampNumber(Math.max(input.classification.confidence, input.significance), 0, 1);
-    const salience = clampNumber(Math.max(input.feedback.magnitude ?? 0, input.significance), 0, 1);
-    const tags = uniq([
-        "policy",
-        "feedback",
-        type,
-        polarity,
-        ...(input.trace?.tags ?? []),
-        ...(input.traceMemory?.tags ?? [])
-    ]).slice(0, 12);
-    return {
-        type,
-        polarity,
-        title,
-        trigger,
-        procedure,
-        verification,
-        boundary,
-        decisionGuidance: guidance,
-        salience,
-        confidence,
-        skillEligible,
-        verifierMeta,
-        sourceEpisodeIds: input.feedback.episodeId ? [input.feedback.episodeId] : [],
-        sourceTraceIds,
-        sourceFeedbackIds: [input.feedback.id],
-        vectorText: [title, trigger, procedure, verification, boundary].join("\n"),
-        tags
-    };
-}
-function renderFeedbackExperienceBody(draft) {
-    return [
-        draft.title,
-        `Trigger: ${draft.trigger}`,
-        `Procedure: ${draft.procedure}`,
-        `Verification: ${draft.verification}`,
-        `Boundary: ${draft.boundary}`,
-        `Experience: ${draft.type}`,
-        `Evidence polarity: ${draft.polarity}`,
-        `Support: ${draft.support ?? 1}`,
-        `Gain: ${roundNumber(draft.gain ?? Math.max(0.02, draft.salience))}`,
-        `Confidence: ${roundNumber(draft.confidence)}`,
-        draft.decisionGuidance.preference.length
-            ? `Preference: ${draft.decisionGuidance.preference.join(" | ")}`
-            : undefined,
-        draft.decisionGuidance.antiPattern.length
-            ? `Anti-pattern: ${draft.decisionGuidance.antiPattern.join(" | ")}`
-            : undefined,
-        `Feedback: ${draft.sourceFeedbackIds.join(", ")}`,
-        draft.sourceTraceIds.length ? `Evidence: ${draft.sourceTraceIds.join(", ")}` : undefined
-    ].filter(Boolean).join("\n");
 }
 function feedbackExperienceGuidance(type, classification, text) {
     const preference = [];
@@ -2167,12 +960,6 @@ function feedbackExperienceGuidance(type, classification, text) {
     return {
         preference: dedupeTextLines(preference),
         antiPattern: dedupeTextLines(antiPattern)
-    };
-}
-function policyDecisionGuidanceForStorage(guidance) {
-    return {
-        preference: guidance.preference,
-        anti_pattern: guidance.antiPattern
     };
 }
 function feedbackExperienceTraceIds(feedback, episode, trace) {
@@ -2271,17 +1058,6 @@ function isNegativeFeedbackExperience(feedback, lower, shape, verifier) {
         return true;
     return /\b(fail|failed|wrong|incorrect|counterexample|not acceptable)\b/.test(lower) ||
         /失败|错误|不对|反例/.test(lower);
-}
-function mergeFeedbackPolarity(current, next) {
-    if (current === next)
-        return current;
-    if (current === "mixed" || next === "mixed")
-        return "mixed";
-    if (current === "neutral")
-        return next;
-    if (next === "neutral")
-        return current;
-    return "mixed";
 }
 function dedupeTextLines(values) {
     const out = [];

@@ -1,4 +1,4 @@
-import { REWARD_R_HUMAN_PROMPT, backpropagateTraces, combineRewardAxes, heuristicHumanScore, signatureFromTrace, traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
+import { REWARD_R_HUMAN_PROMPT, backpropagateTraces, combineRewardAxes, heuristicHumanScore, traceMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import { createMemoryLogger, memoryErrorFields } from "../../logging/logger.js";
 import { kindFromMemory } from "../../storage/repositories.js";
 import { stableHash, stableStringify } from "../../utils/id.js";
@@ -137,29 +137,6 @@ export class RewardPipeline {
                     source: "worker.reward.backprop.v7",
                     createdAt: savedEpisode.updatedAt
                 });
-                if (this.deps.config.algorithm.negativeExperience.enabled
-                    && feedback.rHuman <= this.deps.config.algorithm.negativeExperience.failureRTaskThreshold) {
-                    const feedbackId = job.payload.polarity === "negative" && typeof job.payload.feedbackId === "string"
-                        ? job.payload.feedbackId
-                        : undefined;
-                    const repairId = feedbackId && typeof job.payload.repairId === "string"
-                        ? job.payload.repairId
-                        : undefined;
-                    this.deps.enqueueJob({
-                        jobType: "negative_experience",
-                        userId: savedEpisode.userId,
-                        sessionId: savedEpisode.sessionId,
-                        episodeId: savedEpisode.id,
-                        payload: {
-                            source: feedbackId ? "negative_feedback" : "episode_reward",
-                            sourceEventId: feedbackId ?? savedEpisode.id,
-                            rewardReason: feedback.reason,
-                            ...(feedbackId ? { feedbackId } : {}),
-                            ...(repairId ? { repairId } : {})
-                        },
-                        createdAt: savedEpisode.updatedAt
-                    });
-                }
             }
             this.deps.resolvePendingSkillTrialsForReward({
                 userId: source.userId,
@@ -178,7 +155,6 @@ export class RewardPipeline {
             decayHalfLifeDays: this.deps.config.algorithm.reward.decayHalfLifeDays
         });
         const at = this.deps.nowIso();
-        const l2Eligible = [];
         for (const update of updates) {
             const current = this.deps.repos.memories.get(update.traceId);
             if (!current)
@@ -231,37 +207,7 @@ export class RewardPipeline {
                     createdAt: at
                 });
             }
-            if (job.payload.downstreamScheduled !== true && savedTrace && this.deps.isTraceEligibleForL2(savedTrace)) {
-                this.deps.recordCandidatePoolTrace(savedTrace, signatureFromTrace(savedTrace), at);
-                l2Eligible.push({ memory: saved, trace: savedTrace });
-                this.deps.enqueueJob({
-                    jobType: "l2_association",
-                    userId: saved.userId,
-                    sessionId: saved.sessionId,
-                    episodeId: trace.episodeId,
-                    targetMemoryId: saved.id,
-                    payload: { reason: "reward.updated" },
-                    createdAt: at
-                });
-            }
             await this.maybeCreateValueDistributionRepair(saved, at);
-        }
-        const inductionSeed = l2Eligible[0];
-        if (job.payload.downstreamScheduled !== true && inductionSeed) {
-            this.deps.enqueueJob({
-                jobType: "l2_induction",
-                userId: inductionSeed.memory.userId,
-                sessionId: inductionSeed.memory.sessionId,
-                episodeId: trace.episodeId,
-                targetMemoryId: inductionSeed.memory.id,
-                payload: {
-                    reason: "reward.updated",
-                    targetKind: "episode_candidate_pool",
-                    sourceMemoryId: inductionSeed.memory.id,
-                    episodeTraceIds: l2Eligible.map((item) => item.memory.id)
-                },
-                createdAt: at
-            });
         }
         if (rewardedEpisode)
             this.deps.finalizeClosedEpisode(rewardedEpisode, at, "episode_rewarded");
@@ -411,21 +357,6 @@ export class RewardPipeline {
             source: "worker.reward.value_distribution_repair.v7",
             createdAt: at
         });
-        if (triggerTrace.episodeId) {
-            this.deps.enqueueJob({
-                jobType: "negative_experience",
-                userId: triggerTrace.userId,
-                sessionId: triggerTrace.sessionId,
-                episodeId: triggerTrace.episodeId,
-                payload: {
-                    source: "value_distribution",
-                    sourceEventId: repair.id,
-                    repairId: repair.id,
-                    confidence: repair.meta.confidence
-                },
-                createdAt: at
-            });
-        }
         return { repairId: repair.id, contextHash, skipped: false, attachedPolicyIds: [] };
     }
     valueDistributionRepairEvidence(trace, limit) {

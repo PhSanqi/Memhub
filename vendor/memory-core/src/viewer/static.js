@@ -54,11 +54,12 @@ const VIEWER_PUBLIC_ASSETS = new Set([
 ]);
 const VIEWER_ROOT_ROUTES = new Set([
     "/overview",
-    "/user-memories",
     "/memories",
     "/tasks",
-    "/policies",
-    "/world-models",
+    "/l1",
+    "/l2",
+    "/l3",
+    "/l4",
     "/skills",
     "/analytics",
     "/logs",

@@ -1,7 +1,6 @@
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { createAgentSourceExecutor } from "../agent-source/runtime.js";
-import { L3WorldModelBoundaryRequestSchema, L3WorldModelRequestEnvelopeSchema, OpenSessionInputSchema } from "../contracts/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { isMemoryViewerPath, memoryViewerAsset } from "../viewer/static.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
@@ -21,9 +20,6 @@ export const API_ROUTES = [
     "DELETE /api/v1/admin/data",
     "POST /api/v1/sessions/open",
     "POST /api/v1/sessions/:sessionId/close",
-    "GET /api/v1/sessions/:sessionId/l3-world-model-trace-head",
-    "POST /api/v1/sessions/:sessionId/l3-world-model-boundary",
-    "GET /api/v1/l3-world-model/sessions/:sessionId/context",
     "POST /api/v1/turns/start",
     "POST /api/v1/turns/:turnId/complete",
     "POST /api/v1/memory/search",
@@ -33,8 +29,6 @@ export const API_ROUTES = [
     "POST /api/v1/memory/:id/processing/retry",
     "GET /api/v1/memory/:id",
     "DELETE /api/v1/memory/:id",
-    "POST /api/v1/evolution/l3/lease",
-    "POST /api/v1/evolution/l3/:jobId/submit",
     "POST /api/v1/worker/run",
     "POST /api/v1/worker/import-summaries/enqueue",
     "GET /api/v1/memory/logs",
@@ -410,23 +404,17 @@ async function routeRequest(service, autoWorker, method, url, body, principal, c
     if (method === "POST" && path === "/api/v1/sessions/open") {
         requireMemoryWrite(principal);
         const rawRequest = asObject(body, "sessions.create");
-        const request = rawRequest.l3WorldModelProtocolVersion === 2
-            ? parseV2OpenSessionRequest(strictEnvelopeWithPrincipal(rawRequest, principal))
-            : envelopeWithPrincipal(rawRequest, principal);
-        const publicRequest = request.l3WorldModelProtocolVersion === 2
-            ? request
-            : {
-                requestId: request.requestId,
-                adapterId: request.adapterId,
-                namespace: request.namespace,
-                timeZone: request.timeZone,
-                sessionId: request.sessionId,
-                workspacePath: request.workspacePath,
-                meta: request.meta
-            };
+        const request = envelopeWithPrincipal(rawRequest, principal);
+        const publicRequest = {
+            requestId: request.requestId,
+            adapterId: request.adapterId,
+            namespace: request.namespace,
+            timeZone: request.timeZone,
+            sessionId: request.sessionId,
+            workspacePath: request.workspacePath,
+            meta: request.meta
+        };
         const result = await service.idempotent("sessions.create", publicRequest, publicRequest, () => service.openSession(publicRequest));
-        if (request.l3WorldModelProtocolVersion === 2 && result.projectId)
-            autoWorker.schedule();
         return publicOpenSessionResponse(result);
     }
     const sessionClose = match(path, /^\/api\/v1\/sessions\/([^/]+)\/close$/);
@@ -437,41 +425,6 @@ async function routeRequest(service, autoWorker, method, url, body, principal, c
         const result = await service.idempotent("sessions.close", request, { sessionId, request }, () => service.closeSession(sessionId, request));
         scheduleAutoWorkerForEvolution(result, autoWorker);
         return publicCloseSessionResponse(result);
-    }
-    const l3TraceHead = match(path, /^\/api\/v1\/sessions\/([^/]+)\/l3-world-model-trace-head$/);
-    if (method === "GET" && l3TraceHead) {
-        requireMemoryRead(principal);
-        const sessionId = decodeMatchSegment(l3TraceHead, 1);
-        const request = L3WorldModelRequestEnvelopeSchema.parse(strictEnvelopeWithPrincipal({
-            requestId,
-            adapterId: url.searchParams.get("adapterId"),
-            source: url.searchParams.get("source") ?? undefined,
-            namespace: principal.namespace
-        }, principal));
-        return service.l3WorldModelTraceHead(sessionId, request);
-    }
-    const l3Boundary = match(path, /^\/api\/v1\/sessions\/([^/]+)\/l3-world-model-boundary$/);
-    if (method === "POST" && l3Boundary) {
-        requireMemoryWrite(principal);
-        const sessionId = decodeMatchSegment(l3Boundary, 1);
-        const request = L3WorldModelBoundaryRequestSchema.parse(strictEnvelopeWithPrincipal(asObject(body, "l3-world-model.boundary"), principal));
-        const result = await service.idempotent("l3-world-model.boundary", request, { sessionId, request }, () => service.l3WorldModelBoundary(sessionId, request));
-        scheduleAutoWorkerForEvolution(result, autoWorker);
-        if (request.trigger === "token_compaction")
-            autoWorker.schedule();
-        return result;
-    }
-    const l3Context = match(path, /^\/api\/v1\/l3-world-model\/sessions\/([^/]+)\/context$/);
-    if (method === "GET" && l3Context) {
-        requireMemoryRead(principal);
-        const sessionId = decodeMatchSegment(l3Context, 1);
-        const request = L3WorldModelRequestEnvelopeSchema.parse(strictEnvelopeWithPrincipal({
-            requestId,
-            adapterId: url.searchParams.get("adapterId"),
-            source: url.searchParams.get("source") ?? undefined,
-            namespace: principal.namespace
-        }, principal));
-        return service.l3WorldModelContext(sessionId, request);
     }
     if (method === "POST" && path === "/api/v1/turns/start") {
         requireMemoryRead(principal);
@@ -518,8 +471,7 @@ async function routeRequest(service, autoWorker, method, url, body, principal, c
             artifacts: request.artifacts,
             sourceMemoryIds: request.sourceMemoryIds,
             usage: request.usage,
-            status: request.status,
-            userMemoryCorrection: request.userMemoryCorrection
+            status: request.status
         };
         const result = await trackExternalHookCapture(pluginRuntimeAnalytics, { ...request, turnId }, request, () => service.completeTurn(turnId, publicRequest));
         scheduleAutoWorkerForEvolution(result, autoWorker);
@@ -580,7 +532,8 @@ async function routeRequest(service, autoWorker, method, url, body, principal, c
             sourceSkillId: typeof request.sourceSkillId === "string" ? request.sourceSkillId : undefined,
             sourceSkillPath: typeof request.sourceSkillPath === "string" ? request.sourceSkillPath : undefined,
             sourceSkillVersion: typeof request.sourceSkillVersion === "string" ? request.sourceSkillVersion : undefined,
-            sourceContentHash: typeof request.sourceContentHash === "string" ? request.sourceContentHash : undefined
+            sourceContentHash: typeof request.sourceContentHash === "string" ? request.sourceContentHash : undefined,
+            sourceArtifactId: typeof request.sourceArtifactId === "string" ? request.sourceArtifactId : undefined
         };
         const result = await trackExternalToolCall(pluginRuntimeAnalytics, { ...request, toolName: "memmy_memory_add" }, () => service.idempotent("memory.add", publicRequest, { path, request: publicRequest }, () => service.addMemory(publicRequest)), (addResult) => ({
             stored_count: storedCountFromAddResponse(addResult),
@@ -600,44 +553,6 @@ async function routeRequest(service, autoWorker, method, url, body, principal, c
             autoWorker.schedule();
         }
         return result;
-    }
-    if (method === "POST" && path === "/api/v1/evolution/l3/lease") {
-        requireMemoryWrite(principal);
-        const request = envelopeWithPrincipal(asObject(body, "evolution.l3.lease"), principal);
-        return service.leaseExternalL3WorldModel({
-            ...request,
-            projectId: parseOptionalNullableString(request.projectId, "evolution.l3.lease.projectId"),
-            leaseSeconds: parseNumberValue(request.leaseSeconds)
-        });
-    }
-    const externalL3SubmitMatch = match(path, /^\/api\/v1\/evolution\/l3\/([^/]+)\/submit$/);
-    if (method === "POST" && externalL3SubmitMatch) {
-        requireMemoryWrite(principal);
-        const request = envelopeWithPrincipal(asObject(body, "evolution.l3.submit"), principal);
-        if (typeof request.expectedFieldHash !== "string" || !request.expectedFieldHash.trim()) {
-            throw new MemoryServiceError("invalid_argument", "evolution.l3.submit.expectedFieldHash must be a non-empty string");
-        }
-        if (request.expectedProfileHash !== undefined &&
-            (typeof request.expectedProfileHash !== "string" || !request.expectedProfileHash.trim())) {
-            throw new MemoryServiceError("invalid_argument", "evolution.l3.submit.expectedProfileHash must be a non-empty string when provided");
-        }
-        if (!isRecord(request.candidate)) {
-            throw new MemoryServiceError("invalid_argument", "evolution.l3.submit.candidate must be a JSON object");
-        }
-        const expectedProfileHash = typeof request.expectedProfileHash === "string"
-            ? request.expectedProfileHash.trim()
-            : undefined;
-        return service.submitExternalL3WorldModel(decodeMatchSegment(externalL3SubmitMatch, 1), {
-            requestId: request.requestId,
-            adapterId: request.adapterId,
-            source: request.source,
-            namespace: request.namespace,
-            timeZone: request.timeZone,
-            projectId: parseOptionalNullableString(request.projectId, "evolution.l3.submit.projectId"),
-            expectedFieldHash: request.expectedFieldHash.trim(),
-            ...(expectedProfileHash ? { expectedProfileHash } : {}),
-            candidate: request.candidate
-        });
     }
     if (method === "POST" && path === "/api/v1/worker/run") {
         requireMemoryWrite(principal);
@@ -788,8 +703,6 @@ function publicCompleteTurnResponse(result) {
         sessionId: record.sessionId,
         episodeId: record.episodeId,
         rawTurnId: record.rawTurnId,
-        userMemoryId: record.userMemoryId,
-        userMemoryIds: record.userMemoryIds,
         l1MemoryId: record.l1MemoryId,
         l1MemoryIds: record.l1MemoryIds,
         closedEpisodeIds: record.closedEpisodeIds,
@@ -1137,16 +1050,6 @@ function strictEnvelopeWithPrincipal(body, principal) {
         timeZone: principal.timeZone ?? (typeof body.timeZone === "string" ? body.timeZone : undefined)
     };
 }
-function parseV2OpenSessionRequest(value) {
-    const parsed = OpenSessionInputSchema.safeParse(value);
-    if (!parsed.success || !("l3WorldModelProtocolVersion" in parsed.data) || parsed.data.l3WorldModelProtocolVersion !== 2) {
-        const message = parsed.success
-            ? "invalid protocol v2 session open request"
-            : parsed.error.issues.map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`).join("; ");
-        throw new MemoryServiceError("invalid_argument", message);
-    }
-    return parsed.data;
-}
 function requestTimeZone(request, configuredTimeZone) {
     try {
         return resolveTimeZone(configuredTimeZone ?? headerString(request, "x-memmy-time-zone"));
@@ -1252,10 +1155,10 @@ function parseLayer(value) {
     return parseLayerValue(value);
 }
 function parseRecallLayer(value) {
-    return value === "UserMemory" ? value : parseLayerValue(value);
+    return parseLayerValue(value);
 }
 function parseLayerValue(value) {
-    if (value === "L1" || value === "L2" || value === "L3" || value === "Skill") {
+    if (value === "L1" || value === "L2" || value === "L3" || value === "L4" || value === "Skill") {
         return value;
     }
     return undefined;
@@ -1276,7 +1179,7 @@ function normalizeLayerSelection(value) {
     const layers = value.map((item) => {
         const layer = parseLayerValue(item);
         if (!layer) {
-            throw new MemoryServiceError("invalid_argument", "turn.start layers must contain only L1, L2, L3, or Skill");
+            throw new MemoryServiceError("invalid_argument", "turn.start layers must contain only L1, L2, L3, L4, or Skill");
         }
         return layer;
     });
