@@ -1,6 +1,6 @@
-# Memmy privacy and data-flow boundary
+# Memhub privacy and data-flow boundary
 
-Memmy stores conversation history, durable user memory and project context. In this fork these are treated as private data by default, including project architecture obtained from Normify.
+Memhub stores conversation history, durable user memory and project context. These are private data by default, including project architecture read from existing local architecture Markdown.
 
 ## Default policy
 
@@ -14,7 +14,7 @@ paths use it:
 - remote storage backend construction;
 - raw Memory REST clients.
 
-Loopback HTTP/HTTPS targets are allowed. Non-loopback targets are denied unless the caller makes an explicit code-level `allowRemote: true` decision. This compatibility escape hatch is deliberately not exposed as a normal end-user configuration in the first Context Hub phase.
+Loopback HTTP/HTTPS targets are allowed. Non-loopback targets are denied unless the caller makes an explicit code-level `allowRemote: true` decision. This compatibility escape hatch is deliberately not exposed as a normal end-user Memhub configuration.
 
 ## Data classes
 
@@ -23,14 +23,14 @@ Loopback HTTP/HTTPS targets are allowed. Non-loopback targets are denied unless 
 | Raw conversation turns | high | local only |
 | Long-term/global memory | high | local only |
 | Project memory and decisions | high | local only |
-| Normify architecture/contracts | high | local only |
+| Project architecture/contracts | high | local only |
 | Embeddings derived from private content | high | local only |
 | Account/project identifiers | private | gateway/auth use only |
 | Installer/release metadata | low | network allowed outside Memory Core |
 
 Derived data is not considered less sensitive merely because it is summarized or embedded.
 
-## Known network-capable surfaces in the v1.1.4 baseline
+## Known network-capable surfaces
 
 The baseline contains several different kinds of network behavior. They must not be conflated.
 
@@ -43,7 +43,7 @@ egress paths and are default-denied by the core privacy boundary.
 
 ### Adapter-to-Memory transport
 
-Agent integration templates and workspace bridges use `fetch()` to submit/recall memory through a configured Memory endpoint. The shared workspace bridge now enforces a loopback-only endpoint before sending conversation content. Several legacy generated/plugin templates still carry their own transport copies; they remain compatibility surfaces and must receive the same guard (or be retired) before they can be considered part of the supported Context Hub path. A future remote host must use the authenticated MCP Gateway rather than exposing raw Memory HTTP publicly.
+Agent integration templates and workspace bridges may submit/recall memory through configured endpoints. Raw Memory Core remains loopback-only in supported Memhub deployments; remote hosts use the authenticated Memhub Gateway/Bridge boundary rather than exposing Memory Core directly.
 
 ### Installer/update traffic
 
@@ -67,7 +67,7 @@ Memhub MCP Gateway (identity + account scope)
      v
 Memory Core ---- local SQLite / local embedding
      |
-     +---- Normify adapter -> local/account-scoped architecture data
+     +---- Architecture Reader -> local/account-scoped architecture Markdown
 ```
 
 Memory Core itself should remain bound to loopback. The gateway is the only intended public ingress. Cloudflare receives authentication traffic; it is not the storage or model-processing destination for memory contents.
@@ -81,6 +81,6 @@ An authorization should record at least: account, data class/capability, destina
 ## Current ownership
 
 - Memhub owns the vendored Memory Core runtime and AgentSourceCore helper.
-- Memhub owns the embedded architecture runtime.
+- Memhub owns the lightweight Architecture Reader compatibility layer.
 - The production Memory Core remains loopback-only.
 - Legacy standalone Memory/AgentSourceCore/Normify source trees are retired.

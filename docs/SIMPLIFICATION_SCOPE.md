@@ -1,6 +1,6 @@
-# Memmy Context Hub simplification scope
+# Memhub core scope
 
-The Context Hub fork is intentionally narrower than the existing all-in-one Memmy application.
+Memhub intentionally keeps its supported runtime narrower than the upstream all-in-one Memmy application.
 
 ## Primary product
 
@@ -8,7 +8,7 @@ Keep the product centered on four capabilities:
 
 1. private long-term memory;
 2. deterministic account/project context routing;
-3. authoritative project context through adapters such as Normify;
+3. authoritative project architecture through the read-only Architecture Reader;
 4. a small authenticated MCP surface for many AI hosts.
 
 These capabilities form the supported core. New work should strengthen them before expanding the agent application surface.
@@ -18,17 +18,17 @@ These capabilities form the supported core. New work should strengthen them befo
 - Memory HTTP service bound to loopback.
 - Local SQLite persistence and local indexes/embeddings.
 - Session/turn capture, recall, correction and provenance.
-- Existing user/project L3 ownership model.
+- L1/L2/L3/L4/Skill ownership and scope rules.
 - Agent-source import when it supplies conversation history to Memory.
 - Project/workspace identity and conversation bindings.
 - Privacy/network policy.
 - Context Router and Context Capsule contracts.
-- Normify adapter boundary.
+- Architecture Reader boundary for existing authoritative Markdown.
 - Authenticated MCP Gateway.
 
 ## Defer from the core path
 
-The following existing features are compatibility surfaces, not dependencies of Context Hub:
+The following inherited features are compatibility surfaces, not dependencies of Memhub:
 
 - Memmy's own general-purpose AI chat agent;
 - persistent Goal execution;
@@ -38,7 +38,7 @@ The following existing features are compatibility surfaces, not dependencies of 
 - remote/cloud memory storage;
 - remote memory summarization/evolution/embedding.
 
-Do not delete these in the first restructuring phase. Stop new core code from depending on them, then remove or split packages only after the Context Hub path is independently buildable and deployable.
+New Memhub code must not depend on these surfaces. Retained vendored compatibility code is bounded by regression tests and may be reduced further only when installed user data remains readable.
 
 ## Dependency direction
 
@@ -49,7 +49,7 @@ Host adapters ----+
                   |
 MCP Gateway ------+--> Context Router --> Memory Core
                            |
-                           +-----------> Project Context Adapter --> Normify
+                           +-----------> Architecture Reader --> existing Markdown
 
 Deferred Agent/Goal/Channels -----------------------------> compatibility only
 ```
@@ -60,7 +60,7 @@ The core must never depend on provider-login, channel-login or general agent run
 
 A deferred surface can be removed or moved out only after all of the following are true:
 
-1. Context Hub has its own entrypoint and tests;
+1. Memhub has its own entrypoint and tests;
 2. Memory capture/recall still works without the surface;
 3. no migration, installer or agent-source integration requires it;
 4. installed user data remains readable;

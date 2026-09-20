@@ -18,7 +18,9 @@
     "core:verify": "node scripts/core-migration.mjs verify",
     "core:preserved": "node scripts/core-migration.mjs preserved",
     "memory:audit": "node scripts/long-term-repair.mjs",
-    "memory:repair": "node scripts/long-term-repair.mjs --apply"
+    "memory:repair": "node scripts/long-term-repair.mjs --apply",
+    "release:check": "node scripts/package-release.mjs --check",
+    "release:package": "node scripts/package-release.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.0",

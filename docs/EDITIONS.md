@@ -9,7 +9,7 @@ Both editions use the same:
 - Memory Core and schema;
 - Context Router;
 - project/global isolation rules;
-- Normify architecture adapter;
+- Architecture Reader for existing authoritative project Markdown;
 - MCP tool contract;
 - capture event schema;
 - distillation pipeline;
@@ -27,7 +27,7 @@ device A plugin ----\
 device B plugin -----+--> Cloudflare/Auth --> Memhub Server
 hosted MCP ----------/                         |- Memory Core
                                                |- Context Router
-                                               |- Normify
+                                               |- Architecture Reader
                                                `- capture/distillation
 ```
 
@@ -66,7 +66,7 @@ local AI plugins
 Memhub Local Bridge / MCP
        |
        +--> local Memory Core / SQLite
-       `--> local Normify data
+       `--> local architecture data
 ```
 
 Properties:

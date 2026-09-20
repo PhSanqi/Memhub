@@ -4,6 +4,8 @@
 
 Memhub is a private, project-aware memory and context hub for AI harnesses. Codex, Claude Code, ChatGPT-style remote MCP clients, CoWorker, and other hosts can share one durable memory system without sharing one integration mechanism.
 
+Current release line: **v0.2.0**. See [CHANGELOG.md](CHANGELOG.md).
+
 ## Current memory model
 
 Memhub exposes four memory layers plus an orthogonal Skill layer:
@@ -65,6 +67,8 @@ The high-level MCP surface is intentionally small:
 - `memmy_project_list` — list/suggest canonical projects.
 - `memmy_project_manage` — controlled project create/update/delete/merge via plan then explicit authorization.
 - `memmy_project` — list/current/bind/unbind project context and read project architecture.
+
+`memmy_project action=current` uses a persistent conversation binding when the Harness exposes a stable `conversation_id`. If a transport cannot provide one, Memhub does not invent an ID: the tool reports `binding_available=false`, while `memmy_context.resolvedProjectId` and explicit current-turn project/workspace evidence remain authoritative for that request.
 
 A completed L2 job can enqueue L3. Completed L3 artifacts from at least two projects can form an L4 job. Memhub itself does not silently invoke an LLM.
 
@@ -142,6 +146,17 @@ powershell -ExecutionPolicy Bypass -File .\Memhub\editions\server\windows\instal
 ```
 
 Server Edition binds Memhub to loopback and does not create Cloudflare configuration. Public access should remain behind an authenticated reverse proxy such as Cloudflare Access; device/account authentication remains enforced by Memhub itself.
+
+## Release packages
+
+Every v0.2.x release is produced from one source commit and carries four platform/edition assets:
+
+- `memhub-vX.Y.Z-linux-local.tar.gz`
+- `memhub-vX.Y.Z-linux-server.tar.gz`
+- `memhub-vX.Y.Z-windows-local.zip`
+- `memhub-vX.Y.Z-windows-server.zip`
+
+`SHA256SUMS.txt` and `release-manifest.json` bind all four packages to the same commit. Maintainers can verify release inputs with `npm run release:check` and generate the four assets with `npm run release:package`.
 
 ## Repository status
 

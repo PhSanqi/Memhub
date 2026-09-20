@@ -4,6 +4,8 @@
 
 Memhub 是一个面向 AI Harness 的私有、项目感知型长期记忆与上下文中心。Codex、Claude Code、ChatGPT 类远程 MCP、CoWorker 等客户端可以共享同一套长期记忆，而不要求所有客户端使用同一种接入机制。
 
+当前发布线：**v0.2.0**。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 当前记忆模型
 
 Memhub 对外只暴露四层记忆，加一条正交的 Skill 层：
@@ -65,6 +67,8 @@ Local Edition 在单机运行 MCP、capture、SQLite 和处理流程。Server Ed
 - `memmy_project_list`：列出/匹配 canonical project。
 - `memmy_project_manage`：通过 plan → 明确授权管理项目 create/update/delete/merge。
 - `memmy_project`：list/current/bind/unbind 项目上下文，并读取项目架构。
+
+`memmy_project action=current` 在 Harness 能提供稳定 `conversation_id` 时读取持久 conversation binding；如果某个 transport 拿不到稳定会话 ID，Memhub 不会伪造 ID，而是返回 `binding_available=false`，当前请求继续以 `memmy_context.resolvedProjectId` 和本轮明确的 project/workspace 证据为准。
 
 完成 L2 后可以继续排 L3；当至少两个项目已有完成的 L3 后，才会形成 L4 任务。Memhub 后端不会偷偷调用大模型。
 
@@ -142,6 +146,17 @@ powershell -ExecutionPolicy Bypass -File .\Memhub\editions\server\windows\instal
 ```
 
 Server Edition 默认只监听 loopback，不会自动创建 Cloudflare 配置。公网入口应继续放在 Cloudflare Access 等认证反代后；Memhub 自身的 device/account 鉴权仍然保留。
+
+## Release 安装包
+
+每个 v0.2.x Release 都从同一个源码 commit 生成四个 Edition/平台安装包：
+
+- `memhub-vX.Y.Z-linux-local.tar.gz`
+- `memhub-vX.Y.Z-linux-server.tar.gz`
+- `memhub-vX.Y.Z-windows-local.zip`
+- `memhub-vX.Y.Z-windows-server.zip`
+
+`SHA256SUMS.txt` 与 `release-manifest.json` 会把四个包绑定到同一个 commit。维护者可以用 `npm run release:check` 检查发布输入，用 `npm run release:package` 一次生成四个平台包。
 
 ## 当前状态与上游
 
