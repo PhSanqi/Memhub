@@ -56,6 +56,7 @@ export async function upsertL1Turn(input: {
   runtime: MemhubRuntime;
   actorId: string;
   actorName: string;
+  bindConversation?: boolean;
   turn: L1TurnInput;
 }): Promise<{
   turn: L1TurnView;
@@ -84,9 +85,12 @@ export async function upsertL1Turn(input: {
     device_id: input.actorId
   }, event);
 
+  const bindConversation = input.bindConversation !== false;
   let projectId = stored.event.project_hint ??
-    await input.runtime.router.currentProject(input.runtime.accountId, stored.event.conversation_id);
-  if (!stored.event.project_hint && projectId) {
+    (bindConversation
+      ? await input.runtime.router.currentProject(input.runtime.accountId, stored.event.conversation_id)
+      : null);
+  if (bindConversation && !stored.event.project_hint && projectId) {
     const tagged = await storeCaptureEvent(input.stateRoot, {
       account_id: input.runtime.accountId,
       device_id: input.actorId
@@ -100,7 +104,7 @@ export async function upsertL1Turn(input: {
       event: tagged.event
     };
   }
-  if (stored.event.project_hint) {
+  if (bindConversation && stored.event.project_hint) {
     await input.runtime.router.bindProject(
       input.runtime.accountId,
       stored.event.conversation_id,

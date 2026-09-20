@@ -8,6 +8,11 @@ export interface ProjectDescriptor {
   projectId: string;
   name: string;
   description: string;
+  manualDescription?: string;
+  distilledDescription?: string;
+  descriptionSource?: "manual" | "distilled" | "legacy" | "empty";
+  descriptionEvidenceRefs?: string[];
+  descriptionUpdatedAt?: string;
   aliases: string[];
   state: ProjectState;
   mergedInto?: string;
@@ -80,6 +85,7 @@ export class JsonProjectRegistry {
           projectId,
           name: projectId,
           description: "",
+          descriptionSource: "empty",
           aliases: unique(ids.filter((value) => value !== projectId)),
           state: "active",
           createdAt: now,
@@ -189,6 +195,9 @@ export class JsonProjectRegistry {
         projectId,
         name,
         description,
+        manualDescription: description,
+        descriptionSource: "manual",
+        descriptionUpdatedAt: now,
         aliases,
         state: "active",
         createdAt: now,
@@ -212,7 +221,24 @@ export class JsonProjectRegistry {
       const file = await this.read();
       const project = requireActive(file, account, projectId);
       if (patch.name !== undefined) project.name = requireNonEmpty(patch.name, "name");
-      if (patch.description !== undefined) project.description = patch.description.trim();
+      if (patch.description !== undefined) {
+        const description = patch.description.trim();
+        if (description) {
+          project.manualDescription = description;
+          project.description = description;
+          project.descriptionSource = "manual";
+        } else {
+          delete project.manualDescription;
+          if (project.distilledDescription?.trim()) {
+            project.description = project.distilledDescription.trim();
+            project.descriptionSource = "distilled";
+          } else {
+            project.description = "";
+            project.descriptionSource = "empty";
+          }
+        }
+        project.descriptionUpdatedAt = new Date().toISOString();
+      }
       if (patch.aliases !== undefined) {
         const aliases = unique(patch.aliases.map((value) => value.trim()).filter(Boolean))
           .filter((value) => normalizeProjectKey(value) !== normalizeProjectKey(project.projectId));
@@ -224,6 +250,36 @@ export class JsonProjectRegistry {
           .filter((value) => value !== project.projectId);
       }
       project.updatedAt = new Date().toISOString();
+      await this.write(file);
+      return stripAccount(project);
+    });
+  }
+
+  async updateDistilledDescription(
+    accountId: string,
+    projectRef: string,
+    descriptionRaw: string,
+    evidenceRefs: readonly string[] = []
+  ): Promise<ProjectDescriptor> {
+    const account = requireNonEmpty(accountId, "accountId");
+    const projectId = await this.resolve(account, projectRef);
+    if (!projectId) throw new Error(`unknown or inactive project: ${projectRef}`);
+    const description = requireNonEmpty(descriptionRaw, "description");
+    return this.serialize(async () => {
+      const file = await this.read();
+      const project = requireActive(file, account, projectId);
+      const now = new Date().toISOString();
+      project.distilledDescription = description;
+      project.descriptionEvidenceRefs = unique(evidenceRefs.map((value) => value.trim()).filter(Boolean));
+      project.descriptionUpdatedAt = now;
+      if (!project.manualDescription?.trim()) {
+        project.description = description;
+        project.descriptionSource = "distilled";
+      } else {
+        project.description = project.manualDescription.trim();
+        project.descriptionSource = "manual";
+      }
+      project.updatedAt = now;
       await this.write(file);
       return stripAccount(project);
     });
@@ -249,7 +305,19 @@ export class JsonProjectRegistry {
         source.name,
         ...source.aliases
       ]).filter((value) => value !== target.projectId);
-      if (!target.description && source.description) target.description = source.description;
+      if (!target.manualDescription?.trim() && source.manualDescription?.trim()) {
+        target.manualDescription = source.manualDescription.trim();
+        target.description = target.manualDescription;
+        target.descriptionSource = "manual";
+        target.descriptionUpdatedAt = source.descriptionUpdatedAt ?? new Date().toISOString();
+      } else if (!target.description && source.description) {
+        target.description = source.description;
+        if (source.manualDescription) target.manualDescription = source.manualDescription;
+        if (source.distilledDescription) target.distilledDescription = source.distilledDescription;
+        if (source.descriptionSource) target.descriptionSource = source.descriptionSource;
+        if (source.descriptionEvidenceRefs) target.descriptionEvidenceRefs = [...source.descriptionEvidenceRefs];
+        if (source.descriptionUpdatedAt) target.descriptionUpdatedAt = source.descriptionUpdatedAt;
+      }
       const now = new Date().toISOString();
       target.updatedAt = now;
       source.state = "merged";
@@ -397,6 +465,11 @@ function isProjectRegistryFile(value: unknown): value is ProjectRegistryFile {
       (project.state === "active" || project.state === "merged" || project.state === "deleted") &&
       typeof project.createdAt === "string" &&
       typeof project.updatedAt === "string" &&
-      (project.mergedInto === undefined || typeof project.mergedInto === "string");
+      (project.mergedInto === undefined || typeof project.mergedInto === "string") &&
+      (project.manualDescription === undefined || typeof project.manualDescription === "string") &&
+      (project.distilledDescription === undefined || typeof project.distilledDescription === "string") &&
+      (project.descriptionSource === undefined || ["manual", "distilled", "legacy", "empty"].includes(String(project.descriptionSource))) &&
+      (project.descriptionEvidenceRefs === undefined || (Array.isArray(project.descriptionEvidenceRefs) && project.descriptionEvidenceRefs.every((ref) => typeof ref === "string"))) &&
+      (project.descriptionUpdatedAt === undefined || typeof project.descriptionUpdatedAt === "string");
   });
 }
