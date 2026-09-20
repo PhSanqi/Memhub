@@ -10,6 +10,8 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import Database from "better-sqlite3";
 import { MemhubBridgeQueue, saveBridgeConfig } from "../dist/bridge.js";
+import { FileProjectArchitectureSource } from "../dist/architecture-source.js";
+import { JsonProjectRegistry } from "../dist/project-registry.js";
 import { addAccount, ensureLocalAdminToken, setAccountRole } from "../dist/auth.js";
 import { createDevice, countCaptureEvents, listCaptureEvents } from "../dist/capture.js";
 import { defaultMemoryUserId } from "../dist/memory-source.js";
@@ -28,6 +30,8 @@ const bridgeEntry = resolve(here, "../dist/bridge.js");
 const root = await mkdtemp(join(tmpdir(), "memhub-mcp-"));
 const historyDbPath = join(root, "history.sqlite");
 const historyDb = new Database(historyDbPath);
+
+await testProjectDescriptionPrecedence();
 
 function assertInlineScriptsParse(html) {
   const open = "<scr" + "ipt>";
@@ -73,6 +77,7 @@ const idempotency = new Map();
 const memoryIdempotency = new Map();
 const memoryRecords = new Map();
 const memoryById = new Map();
+const rawTurnRecords = [];
 let memorySequence = 0;
 const memory = createServer(async (request, response) => {
   let raw = "";
@@ -139,6 +144,34 @@ const memory = createServer(async (request, response) => {
       return;
     }
     response.end(JSON.stringify(item));
+    return;
+  }
+  if (request.method === "GET" && viewerPath === "/api/v1/raw-turns") {
+    const userId = viewerUrl.searchParams.get("userId");
+    const projectId = viewerUrl.searchParams.get("projectId");
+    const page = Math.max(1, Number(viewerUrl.searchParams.get("page") ?? 1));
+    const limit = Math.max(1, Math.min(100, Number(viewerUrl.searchParams.get("limit") ?? 100)));
+    const filtered = rawTurnRecords
+      .filter((item) => !userId || item.userId === userId)
+      .filter((item) => !projectId || item.projectId === projectId)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+    const offset = (page - 1) * limit;
+    const items = filtered.slice(offset, offset + limit);
+    response.end(JSON.stringify({
+      items,
+      page,
+      pageSize: limit,
+      total: filtered.length,
+      totalPages: Math.max(1, Math.ceil(filtered.length / limit)),
+      hasNext: offset + items.length < filtered.length,
+      hasPrev: page > 1,
+      stats: {
+        total: filtered.length,
+        succeeded: filtered.filter((item) => item.status === "succeeded").length,
+        captureManaged: filtered.filter((item) => item.sessionSource === "memhub-capture").length,
+        captureManagedSucceeded: filtered.filter((item) => item.sessionSource === "memhub-capture" && item.status === "succeeded").length
+      }
+    }));
     return;
   }
   if (request.method === "GET" && [
@@ -264,6 +297,74 @@ async function testLocalAdmin(memoryPort) {
   const stateRoot = join(root, "local-admin");
   const account = await addAccount(stateRoot, "admin-test", "admin@example.com");
   await setAccountRole(stateRoot, account.account_id, "admin");
+  const device = await createDevice(stateRoot, account.account_id, "control-plane-l1-test");
+  const controlUserId = defaultMemoryUserId(account.account_id);
+  memoryById.set("legacy-control-l1", {
+    id: "legacy-control-l1",
+    memoryLayer: "L1",
+    status: "activated",
+    title: "Legacy Memmy L1",
+    summary: "Legacy Memory Core L1 must remain visible after the Capture/Turn Log migration.",
+    tags: ["project:ui-beta", "legacy-memmy"],
+    namespace: { userId: controlUserId, projectId: "ui-beta" },
+    createdAt: "2026-09-19T04:00:00.000Z",
+    updatedAt: "2026-09-19T04:30:00.000Z",
+    metadata: { source: "memhub:chatgpt:mcp" }
+  });
+  memoryById.set("legacy-linked-control-l1", {
+    id: "legacy-linked-control-l1",
+    memoryLayer: "L1",
+    status: "activated",
+    title: "Legacy Memmy L1 linked to raw turn",
+    summary: "This memory is a derived representation of the same legacy raw turn.",
+    body: "Summary: derived legacy trace\nRawTurn: raw_legacy_ui_beta\nUser:\nLegacy raw user turn for ui-beta.\nAssistant:\nLegacy raw assistant turn for ui-beta.",
+    tags: ["project:ui-beta", "legacy-memmy"],
+    namespace: { userId: controlUserId, projectId: "ui-beta" },
+    createdAt: "2026-09-18T03:01:00.000Z",
+    updatedAt: "2026-09-18T03:01:00.000Z",
+    metadata: { source: "legacy-codex" }
+  });
+  memoryById.set("capture-managed-control-l1", {
+    id: "capture-managed-control-l1",
+    memoryLayer: "L1",
+    status: "activated",
+    title: "Capture-managed L1",
+    summary: "This row belongs to the new capture pipeline and must not seed the legacy rebuild.",
+    tags: ["project:ui-beta", "memhub-capture"],
+    namespace: { userId: controlUserId, projectId: "ui-beta" },
+    createdAt: "2026-09-20T04:00:00.000Z",
+    updatedAt: "2026-09-20T04:30:00.000Z",
+    metadata: { source: "memhub-capture" }
+  });
+  rawTurnRecords.push({
+    rawTurnId: "raw_legacy_ui_beta",
+    sessionId: "legacy-session-ui-beta",
+    episodeId: "legacy-episode-ui-beta",
+    turnId: "legacy-turn-ui-beta",
+    userId: controlUserId,
+    conversationId: "legacy-conversation-ui-beta",
+    projectId: "ui-beta",
+    sessionSource: "codex",
+    userText: "Legacy raw user turn for ui-beta.",
+    assistantText: "Legacy raw assistant turn for ui-beta.",
+    reasoningSummary: "Legacy raw reasoning summary.",
+    status: "succeeded",
+    createdAt: "2026-09-18T03:00:00.000Z"
+  });
+  rawTurnRecords.push({
+    rawTurnId: "raw_legacy_unresolved",
+    sessionId: "legacy-session-unresolved",
+    episodeId: "legacy-episode-unresolved",
+    turnId: "legacy-turn-unresolved",
+    userId: controlUserId,
+    conversationId: "legacy-conversation-unresolved",
+    projectId: "ws_unresolved_hash",
+    sessionSource: "codex",
+    userText: "Legacy raw turn with unresolved workspace scope.",
+    assistantText: "Keep this visible account-wide without guessing a project.",
+    status: "succeeded",
+    createdAt: "2026-09-18T02:00:00.000Z"
+  });
   const token = await ensureLocalAdminToken(stateRoot);
   const child = spawn(process.execPath, [
     mcpEntry,
@@ -282,6 +383,19 @@ async function testLocalAdmin(memoryPort) {
     while (!stderr.includes("listening on http://127.0.0.1:") && Date.now() < deadline) {
       await new Promise((resolveWait) => setTimeout(resolveWait, 25));
     }
+    const partialCapture = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-memhub-device-token": device.token },
+      body: JSON.stringify({
+        event_id: "control-plane-live-turn",
+        host: "chatgpt",
+        conversation_id: "control-plane-live-chat",
+        timestamp: "2026-09-20T12:44:13.827Z",
+        user_text: "This live conversation has not reached assistant final yet.",
+        capture_status: "partial"
+      })
+    });
+    assert.equal(partialCapture.status, 201);
     const anonymous = await fetch(`http://127.0.0.1:${port}/memhub/admin`);
     assert.equal(anonymous.status, 401);
     assert.match(anonymous.headers.get("www-authenticate") ?? "", /Memhub local admin/);
@@ -299,7 +413,9 @@ async function testLocalAdmin(memoryPort) {
     assert.match(authenticatedHtml, /id="theme-toggle"/);
     assert.match(authenticatedHtml, /localStorage\.memhubTheme/);
     assert.match(authenticatedHtml, /localStorage\.memhubLang/);
-    assert.match(authenticatedHtml, /data-theme="dark"/);
+    assert.match(authenticatedHtml, /Intl\.DateTimeFormat/);
+    assert.match(authenticatedHtml, /L1 · MEMORY/);
+    assert.match(authenticatedHtml, /data-theme="light"/);
     assert.match(authenticatedHtml, /data-view="projects"/);
     assert.match(authenticatedHtml, /data-view="l1"/);
     assert.match(authenticatedHtml, /data-view="l2"/);
@@ -358,13 +474,21 @@ async function testLocalAdmin(memoryPort) {
     assert.match(workspaceHtml, /id="lang"/);
     assert.match(workspaceHtml, /localStorage\.memhubTheme/);
     assert.match(workspaceHtml, /localStorage\.memhubLang/);
-    assert.match(workspaceHtml, /data-theme="dark"/);
+    assert.match(workspaceHtml, /data-theme="light"/);
     assert.match(workspaceHtml, /class="site-header"/);
     assert.match(workspaceHtml, /class="site-brand"/);
     const projectView = await fetch(`http://127.0.0.1:${port}/memhub/admin/api?kind=projects`, { headers: { authorization } });
     assert.equal(projectView.status, 200);
     const projectPayload = await projectView.json();
     assert.equal(Array.isArray(projectPayload.items), true);
+    const l1View = await fetch(`http://127.0.0.1:${port}/memhub/admin/api?kind=l1`, { headers: { authorization } });
+    assert.equal(l1View.status, 200);
+    const l1Payload = await l1View.json();
+    assert.ok(l1Payload.items.some((item) => item.id === "legacy-control-l1" && item.source_kind === "memory-core"));
+    assert.ok(l1Payload.items.some((item) => item.event_id === "control-plane-live-turn" && item.source_kind === "capture"));
+    assert.ok(l1Payload.items.some((item) => item.rawTurnId === "raw_legacy_unresolved" && item.source_kind === "raw-turn" && item.project_unresolved === true));
+    assert.ok(l1Payload.total >= 2);
+    assert.equal(l1Payload.counts.incomplete >= 1, true);
     const adminAction = async (body) => fetch(`http://127.0.0.1:${port}/memhub/admin/action`, {
       method: "POST",
       headers: { authorization, "content-type": "application/json" },
@@ -386,6 +510,28 @@ async function testLocalAdmin(memoryPort) {
       aliases: []
     });
     assert.equal(createBeta.status, 200);
+    const rebuildBeta = await adminAction({ action: "queue-legacy-rebuild", project: "ui-beta" });
+    assert.equal(rebuildBeta.status, 200);
+    const rebuildPayload = await rebuildBeta.json();
+    assert.equal(rebuildPayload.rebuild.queued_jobs, 1);
+    assert.equal(rebuildPayload.rebuild.projects[0].project_id, "ui-beta");
+    assert.equal(rebuildPayload.rebuild.projects[0].evidence_count, 2);
+    assert.equal(rebuildPayload.rebuild.projects[0].raw_turn_count, 1);
+    assert.equal(rebuildPayload.rebuild.projects[0].memory_count, 1);
+    assert.equal(rebuildPayload.rebuild.projects[0].deduped_memory_count, 1);
+    assert.equal(rebuildPayload.rebuild.projects[0].excluded_capture_count, 1);
+    const migrationJob = (await listDistillationJobs(stateRoot, account.account_id))
+      .find((job) => job.reason === "migration" && job.project_id === "ui-beta");
+    assert.ok(migrationJob);
+    assert.equal(migrationJob.target, "l2");
+    assert.deepEqual(migrationJob.evidence_refs, ["raw-turn:raw_legacy_ui_beta", "l1-memory:legacy-control-l1"]);
+    assert.equal(migrationJob.evidence.some((item) => item.kind === "turn" && item.ref === "raw-turn:raw_legacy_ui_beta"), true);
+    assert.equal(migrationJob.evidence.some((item) => item.kind === "memory" && item.ref === "l1-memory:legacy-control-l1"), true);
+    const scopedL1 = await fetch(`http://127.0.0.1:${port}/memhub/admin/api?kind=l1&project=ui-beta`, { headers: { authorization } });
+    assert.equal(scopedL1.status, 200);
+    const scopedL1Payload = await scopedL1.json();
+    assert.ok(scopedL1Payload.items.some((item) => item.rawTurnId === "raw_legacy_ui_beta" && item.project_id === "ui-beta"));
+    assert.equal(scopedL1Payload.items.some((item) => item.rawTurnId === "raw_legacy_unresolved"), false);
     const updateAlpha = await adminAction({
       action: "update-project",
       project: "ui-alpha",
@@ -529,11 +675,30 @@ function rawHttp(port, path, headers = {}) {
 async function testStdio(memoryPort) {
   const stateRoot = join(root, "stdio-state");
   const architectureDir = join(root, "normify-aide", "modules", "aide");
+  const currentArchitectureDir = join(root, "Memhub", "docs");
   await mkdir(architectureDir, { recursive: true });
+  await mkdir(currentArchitectureDir, { recursive: true });
+  await writeFile(join(root, "Memhub", "package.json"), JSON.stringify({ name: "memhub-test-project" }) + "\n");
   await writeFile(
     join(architectureDir, "core.md"),
     "# AIDE Core Architecture\n\nBroker routes work to the harness router. Current constraint: preserve explicit workspace ownership.\n"
   );
+  await writeFile(
+    join(currentArchitectureDir, "ARCHITECTURE.md"),
+    "# Memhub Current Architecture\n\nL1 is authoritative source evidence. L2 and L3 are project-scoped, L4 is account-scoped.\n"
+  );
+  const architectureReader = new FileProjectArchitectureSource({ rootDir: root });
+  const discoveredArchitectureProjects = await architectureReader.listProjects("acct-test");
+  assert.ok(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "aide"));
+  assert.ok(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "memhub"));
+  assert.equal(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "docs"), false);
+  const currentDocs = await architectureReader.getProjectArchitecture({
+    accountId: "acct-test",
+    projectId: "memhub",
+    query: "L1 L2 L3 L4 scope"
+  });
+  assert.ok(currentDocs.some((item) => /Memhub Current Architecture/.test(item.content)));
+  assert.ok(currentDocs.some((item) => item.provenance?.format === "project-docs"));
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [mcpEntry, "--account", "acct-test", "--memory-url", `http://127.0.0.1:${memoryPort}`, "--state-root", stateRoot, "--bindings", join(root, "stdio-bindings.json"), "--normify-root", root],
@@ -1101,6 +1266,41 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(resumed.turns.at(-1).reasoning_summary, "Validated the project binding and memory boundary.");
   assert.equal(resumed.incomplete.length, 0);
 
+  const unboundOpen = JSON.parse((await client.callTool({
+    name: "memmy_turn",
+    arguments: {
+      action: "open",
+      project: "aide",
+      user_text: "Capture this turn even when the transport exposes no conversation id."
+    }
+  })).content[0].text);
+  assert.equal(unboundOpen.binding_available, false);
+  assert.equal(unboundOpen.transport_conversation_id, null);
+  assert.match(unboundOpen.turn.conversation_id, /^memhub-unbound:l1_/);
+  assert.equal(unboundOpen.turn.project_hint, "aide");
+  const unboundEventId = unboundOpen.turn.event_id;
+  const unboundCommit = JSON.parse((await client.callTool({
+    name: "memmy_turn",
+    arguments: {
+      action: "commit",
+      event_id: unboundEventId,
+      assistant_text: "The unbound transport turn still reaches complete L1 safely."
+    }
+  })).content[0].text);
+  assert.equal(unboundCommit.binding_available, false);
+  assert.equal(unboundCommit.turn.event_id, unboundEventId);
+  assert.equal(unboundCommit.turn.status, "complete");
+  assert.equal(unboundCommit.turn.ingested, true);
+  assert.equal(unboundCommit.project_id, "aide");
+  const syntheticBinding = JSON.parse((await client.callTool({
+    name: "memmy_project",
+    arguments: { action: "current", conversation_id: unboundCommit.turn.conversation_id }
+  })).content[0].text);
+  assert.equal(syntheticBinding.project, null);
+  const invalidResume = await client.callTool({ name: "memmy_turn", arguments: { action: "resume" } });
+  assert.equal(invalidResume.isError, true);
+  assert.match(invalidResume.content[0].text, /resume requires continuity_id or conversation_id/);
+
   const continuityContext = JSON.parse((await client.callTool({
     name: "memmy_context",
     arguments: { query: "continue", conversation_id: conversationId, continuity_id: conversationId }
@@ -1242,11 +1442,20 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
       action: "submit",
       job_id: aideNext.job.job_id,
       content: "AIDE timeline v1: the project binding was validated before memory changes.",
+      project_description: "AIDE is an AI development environment focused on project-scoped orchestration and safe routing of work between harnesses.",
       source_harness: harnessA
     }
   }));
   assert.equal(aideL2V1.kind, "l2");
   assert.equal(aideL2V1.next_layer_job.job.target, "l3");
+  const aideAfterDistilledDescription = parseTool(await client.callTool({
+    name: "memmy_project_list",
+    arguments: { query: "aide" }
+  })).projects.find((project) => project.project === "aide");
+  assert.ok(aideAfterDistilledDescription);
+  assert.equal(aideAfterDistilledDescription.description, "AIDE project used by MCP integration tests.");
+  assert.equal(aideAfterDistilledDescription.descriptionSource, "manual");
+  assert.match(aideAfterDistilledDescription.distilledDescription, /AI development environment focused on project-scoped orchestration/);
   const aideL2Id = aideL2V1.memory.id;
   const aideL2WriteV1 = [...requests].reverse().find((entry) =>
     entry.url === "/api/v1/memory/add" && entry.body?.layer === "L2" && entry.body?.namespace?.projectId === "aide"
@@ -1416,6 +1625,7 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
       action: "submit",
       job_id: aideL2NextV2.job.job_id,
       content: "AIDE timeline v2: preserve the original validation decision and append the second durable decision as current truth.",
+      project_description: "AIDE coordinates project-aware AI development work while preserving explicit workspace ownership, routing boundaries, and durable current state.",
       source_harness: harnessA
     }
   }));
@@ -1462,6 +1672,55 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
   assert.equal(memoryById.get(l4IdV1).version >= 2, true);
 
   return { aideL3Id, betaL3Id };
+}
+
+async function testProjectDescriptionPrecedence() {
+  const path = join(root, "project-description-registry.json");
+  const registry = new JsonProjectRegistry(path);
+  await registry.reconcile("acct-description", ["auto-project"]);
+  let project = (await registry.list("acct-description")).find((item) => item.projectId === "auto-project");
+  assert.ok(project);
+  assert.equal(project.description, "");
+  await registry.updateDistilledDescription(
+    "acct-description",
+    "auto-project",
+    "Auto Project is an evidence-backed project description derived from its L2 timeline.",
+    ["l1-memory:one", "l1-memory:two"]
+  );
+  project = (await registry.list("acct-description")).find((item) => item.projectId === "auto-project");
+  assert.equal(project.descriptionSource, "distilled");
+  assert.match(project.description, /evidence-backed project description/);
+  assert.deepEqual(project.descriptionEvidenceRefs, ["l1-memory:one", "l1-memory:two"]);
+  await registry.update("acct-description", "auto-project", {
+    description: "Manual project description set explicitly by the user."
+  });
+  await registry.updateDistilledDescription(
+    "acct-description",
+    "auto-project",
+    "A newer distilled description that must not overwrite the explicit manual description.",
+    ["l1-memory:three"]
+  );
+  project = (await registry.list("acct-description")).find((item) => item.projectId === "auto-project");
+  assert.equal(project.description, "Manual project description set explicitly by the user.");
+  assert.equal(project.descriptionSource, "manual");
+  assert.equal(project.distilledDescription, "A newer distilled description that must not overwrite the explicit manual description.");
+  assert.deepEqual(project.descriptionEvidenceRefs, ["l1-memory:three"]);
+
+  await registry.reconcile("acct-description", ["distilled-target"]);
+  await registry.updateDistilledDescription(
+    "acct-description",
+    "distilled-target",
+    "Distilled target description.",
+    ["l1-memory:target"]
+  );
+  await registry.create("acct-description", {
+    projectId: "manual-source",
+    description: "Manual source description that must win after merge."
+  });
+  const merged = await registry.merge("acct-description", "manual-source", "distilled-target");
+  assert.equal(merged.target.description, "Manual source description that must win after merge.");
+  assert.equal(merged.target.descriptionSource, "manual");
+  assert.equal(merged.target.distilledDescription, "Distilled target description.");
 }
 
 function hit(id, snippet, tags = []) {

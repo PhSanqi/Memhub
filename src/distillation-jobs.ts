@@ -13,7 +13,7 @@ export interface DistillationConfig {
 
 export interface DistillationEvidenceItem {
   ref: string;
-  kind: "turn" | "artifact";
+  kind: "turn" | "memory" | "artifact";
   timestamp: string;
   project_id?: string;
   conversation_id?: string;
@@ -33,7 +33,7 @@ export interface DistillationJob {
   project_id: string | null;
   conversation_id?: string;
   status: "pending" | "leased" | "completed" | "failed";
-  reason: "manual" | "turn_threshold" | "idle" | "upstream";
+  reason: "manual" | "turn_threshold" | "idle" | "upstream" | "migration";
   created_at: string;
   updated_at: string;
   leased_until?: string;
@@ -139,6 +139,39 @@ export async function enqueueDerivedDistillationJob(input: {
     projectId: input.projectId,
     evidence: input.evidence,
     reason: input.reason ?? "upstream"
+  });
+}
+
+export async function enqueueLegacyL1DistillationJob(input: {
+  stateRoot: string;
+  accountId: string;
+  projectId: string;
+  evidence: DistillationEvidenceItem[];
+}): Promise<{ created: boolean; job: DistillationJob }> {
+  const projectId = input.projectId.trim();
+  if (!projectId) throw new TypeError("legacy L1 rebuild requires projectId");
+  if (input.evidence.length === 0) throw new Error("legacy L1 rebuild requires evidence");
+  for (const item of input.evidence) {
+    if (item.layer !== "L1" || item.project_id !== projectId) {
+      throw new Error("legacy L1 rebuild evidence must be project-scoped L1");
+    }
+    if (item.kind === "turn") {
+      if (!item.user_text?.trim() || !item.assistant_text?.trim()) {
+        throw new Error("legacy L1 turn evidence must contain user and assistant text");
+      }
+      continue;
+    }
+    if (item.kind !== "memory" || !item.content?.trim()) {
+      throw new Error("legacy L1 rebuild evidence must contain raw turn or Memory Core L1 content");
+    }
+  }
+  return enqueueJob({
+    stateRoot: input.stateRoot,
+    accountId: input.accountId,
+    target: "l2",
+    projectId,
+    evidence: input.evidence,
+    reason: "migration"
   });
 }
 

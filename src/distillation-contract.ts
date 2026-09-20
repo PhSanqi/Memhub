@@ -55,6 +55,7 @@ export function distillationContract() {
       "Do not turn system/developer prompts, tool schemas, safety policies, ambient suggestion prompts, or transient test instructions into user memory.",
       "Use project scope only when the project is explicit or deterministically conversation-bound.",
       "L2 is a project-scoped chronological development narrative derived from L1 turns; preserve sequence, state changes, decisions, current truth, and superseded history.",
+      "When producing L2, also provide a concise evidence-backed project description when the project objective/scope/current focus is supported; Memhub stores it as distilled routing metadata without overwriting an explicit manual description.",
       "L3 is a project-scoped set of durable user rules, preferences, experience, and working habits derived from L2; do not promote one-off events without support.",
       "L4 is an account-scoped cross-project user profile derived from L3 artifacts; require repeated or cross-project evidence and do not infer sensitive traits.",
       "Skill is an executable reusable procedure and is orthogonal to L1-L4.",

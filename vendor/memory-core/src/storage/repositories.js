@@ -1389,6 +1389,44 @@ export class RuntimeRepository {
             .all(episodeId, limit);
         return rows.map(rawTurnFromSql);
     }
+    rawTurnStats(input = {}) {
+        const { where, params } = rawTurnPanelFilter(input);
+        const row = this.db
+            .prepare(`SELECT
+           COUNT(*) AS total,
+           SUM(CASE WHEN rt.status = 'succeeded' THEN 1 ELSE 0 END) AS succeeded,
+           SUM(CASE WHEN s.source = 'memhub-capture' THEN 1 ELSE 0 END) AS capture_managed,
+           SUM(CASE WHEN s.source = 'memhub-capture' AND rt.status = 'succeeded' THEN 1 ELSE 0 END) AS capture_managed_succeeded
+         FROM raw_turns rt
+         LEFT JOIN sessions s ON s.id = rt.session_id
+         WHERE ${where.join(" AND ")}`)
+            .get(...params);
+        return {
+            total: Number(row?.total ?? 0),
+            succeeded: Number(row?.succeeded ?? 0),
+            captureManaged: Number(row?.capture_managed ?? 0),
+            captureManagedSucceeded: Number(row?.capture_managed_succeeded ?? 0)
+        };
+    }
+    countRawTurns(input = {}) {
+        return this.rawTurnStats(input).total;
+    }
+    listRawTurns(input = {}, limit = 200, offset = 0) {
+        const { where, params } = rawTurnPanelFilter(input);
+        const rows = this.db
+            .prepare(`SELECT rt.*, s.project_id AS session_project_id, s.source AS session_source
+         FROM raw_turns rt
+         LEFT JOIN sessions s ON s.id = rt.session_id
+         WHERE ${where.join(" AND ")}
+         ORDER BY rt.created_at DESC, rt.rowid DESC
+         LIMIT ? OFFSET ?`)
+            .all(...params, limit, offset);
+        return rows.map((row) => ({
+            ...rawTurnFromSql(row),
+            projectId: row.session_project_id ?? undefined,
+            sessionSource: row.session_source ?? undefined
+        }));
+    }
     insertFeedback(feedback) {
         this.db
             .prepare(`INSERT INTO feedback (
@@ -3314,6 +3352,23 @@ function episodeFromSql(row) {
         closedAt: row.closed_at,
         updatedAt: row.updated_at
     };
+}
+function rawTurnPanelFilter(input) {
+    const where = ["rt.deleted_at IS NULL"];
+    const params = [];
+    if (input.userId) {
+        where.push("rt.user_id = ?");
+        params.push(input.userId);
+    }
+    if (Array.isArray(input.projectIds) && input.projectIds.length > 0) {
+        where.push(`s.project_id IN (${input.projectIds.map(() => "?").join(",")})`);
+        params.push(...input.projectIds);
+    }
+    if (input.sessionSource) {
+        where.push("s.source = ?");
+        params.push(input.sessionSource);
+    }
+    return { where, params };
 }
 function rawTurnFromSql(row) {
     return {

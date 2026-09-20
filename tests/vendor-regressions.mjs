@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLlmClient } from "../vendor/memory-core/src/model/llm.js";
 import { memoryAddKey } from "../vendor/memory-core/src/service/import/memory-import-pipeline.js";
+import { RuntimeRepository } from "../vendor/memory-core/src/storage/repositories.js";
 import { migrate } from "../vendor/memory-core/src/storage/schema.js";
 
 const root = await mkdtemp(join(tmpdir(), "memhub-vendor-regression-"));
@@ -12,9 +13,89 @@ try {
   testUnavailableAssignedModelIsNotConfigured();
   testStableArtifactMemoryKey();
   testV7ToV8Migration();
+  testRawTurnProjectFilter();
   console.log("memhub-vendor-regressions: ok");
 } finally {
   await rm(root, { recursive: true, force: true });
+}
+
+function testRawTurnProjectFilter() {
+  const db = new Database(join(root, "raw-turn-project-filter.sqlite"));
+  try {
+    migrate(db);
+    const runtime = new RuntimeRepository(db);
+    const at = "2026-09-20T00:00:00.000Z";
+    for (const projectId of ["aide", "memhub"]) {
+      const sessionId = `session-${projectId}`;
+      const episodeId = `episode-${projectId}`;
+      runtime.createSession({
+        id: sessionId,
+        userId: "user-a",
+        projectId,
+        source: "test",
+        profileId: "default",
+        status: "open",
+        meta: {},
+        openedAt: at,
+        lastSeenAt: at,
+        updatedAt: at
+      });
+      runtime.createEpisode({
+        id: episodeId,
+        sessionId,
+        userId: "user-a",
+        projectId,
+        conversationId: `conversation-${projectId}`,
+        status: "open",
+        l1MemoryIds: [],
+        rawTurnIds: [],
+        feedbackIds: [],
+        decisionRepairIds: [],
+        l2PolicyIds: [],
+        l3WorldModelIds: [],
+        skillMemoryIds: [],
+        turnCount: 0,
+        rewardDetail: {},
+        pipelineStatus: "idle",
+        meta: {},
+        openedAt: at,
+        updatedAt: at
+      });
+      runtime.insertRawTurn({
+        id: `raw-${projectId}`,
+        sessionId,
+        episodeId,
+        turnId: `turn-${projectId}`,
+        userId: "user-a",
+        conversationId: `conversation-${projectId}`,
+        userText: `user ${projectId}`,
+        assistantText: `assistant ${projectId}`,
+        toolCalls: [],
+        toolResults: [],
+        sourceMemoryIds: [],
+        usage: {},
+        messagePayload: {},
+        status: "succeeded",
+        createdAt: at
+      });
+    }
+    assert.equal(runtime.countRawTurns({ userId: "user-a" }), 2);
+    assert.equal(runtime.countRawTurns({ userId: "user-a", projectIds: ["aide"] }), 1);
+    assert.deepEqual(runtime.rawTurnStats({ userId: "user-a" }), {
+      total: 2,
+      succeeded: 2,
+      captureManaged: 0,
+      captureManagedSucceeded: 0
+    });
+    assert.equal(runtime.countRawTurns({ userId: "user-a", sessionSource: "test" }), 2);
+    const aideTurns = runtime.listRawTurns({ userId: "user-a", projectIds: ["aide"] }, 10, 0);
+    assert.equal(aideTurns.length, 1);
+    assert.equal(aideTurns[0].projectId, "aide");
+    assert.equal(aideTurns[0].sessionSource, "test");
+    assert.equal(aideTurns[0].userText, "user aide");
+  } finally {
+    db.close();
+  }
 }
 
 function testStableArtifactMemoryKey() {
