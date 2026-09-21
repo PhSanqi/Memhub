@@ -1,6 +1,6 @@
 {
   "name": "memhub",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -23,7 +23,9 @@
     "state:audit": "node scripts/state-hygiene.mjs",
     "state:tidy": "node scripts/state-hygiene.mjs --apply",
     "release:check": "node scripts/package-release.mjs --check",
-    "release:package": "node scripts/package-release.mjs"
+    "release:package": "node scripts/package-release.mjs",
+    "release:complete:check": "node scripts/package-complete-release.mjs --check",
+    "release:complete:package": "node scripts/package-complete-release.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.0",

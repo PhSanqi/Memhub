@@ -8,22 +8,38 @@ SERVER_STATE="$STATE_ROOT/server"
 MEMORY_DIR="$STATE_ROOT/memory"
 CONFIG_PATH="$STATE_ROOT/memory-config.yaml"
 ENV_PATH="$STATE_ROOT/server.env"
-NODE="${NODE:-$(command -v node || true)}"
+BUNDLED_NODE="$REPO_ROOT/runtime/node/bin/node"
+BUNDLED_NPM_CLI="$REPO_ROOT/runtime/node/lib/node_modules/npm/bin/npm-cli.js"
+if [[ -z "${NODE:-}" ]]; then
+  if [[ -x "$BUNDLED_NODE" ]]; then NODE="$BUNDLED_NODE"; else NODE="$(command -v node || true)"; fi
+fi
 NPM="${NPM:-$(command -v npm || true)}"
 USERNAME="${MEMHUB_USERNAME:-owner}"
 EMAIL="${MEMHUB_EMAIL:-}"
 PUBLIC_HOST="${MEMHUB_PUBLIC_HOST:-}"
 
 [[ -n "$NODE" ]] || { echo "Node.js 20+ is required" >&2; exit 2; }
-[[ -n "$NPM" ]] || { echo "npm is required" >&2; exit 2; }
+NODE_MAJOR="$("$NODE" -p 'process.versions.node.split(".")[0]')"
+[[ "$NODE_MAJOR" =~ ^[0-9]+$ ]] && (( NODE_MAJOR >= 20 )) || { echo "Node.js 20+ is required" >&2; exit 2; }
+
+run_npm() {
+  if [[ "$NODE" == "$BUNDLED_NODE" && -f "$BUNDLED_NPM_CLI" ]]; then
+    "$NODE" "$BUNDLED_NPM_CLI" "$@"
+  elif [[ -n "$NPM" ]]; then
+    "$NPM" "$@"
+  else
+    echo "npm is required when dependencies or build output are missing" >&2
+    return 2
+  fi
+}
 
 if [[ ! -d "$REPO_ROOT/node_modules" ]]; then
   echo "[memhub] dependencies missing; installing from lockfile"
-  (cd "$REPO_ROOT" && ONNXRUNTIME_NODE_INSTALL_CUDA=skip npm ci --workspaces=false)
+  (cd "$REPO_ROOT" && ONNXRUNTIME_NODE_INSTALL_CUDA=skip run_npm ci --workspaces=false)
 fi
 if [[ ! -f "$REPO_ROOT/vendor/memory-core/src/server/index.js" || ! -f "$REPO_ROOT/dist/mcp.js" ]]; then
   echo "[memhub] build output missing; building Memhub"
-  (cd "$REPO_ROOT" && npm run build)
+  (cd "$REPO_ROOT" && run_npm run build)
 fi
 
 mkdir -p "$STATE_ROOT" "$SERVER_STATE" "$MEMORY_DIR" "$HOME/.config/systemd/user"

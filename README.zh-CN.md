@@ -104,7 +104,14 @@ Web 界面会直接把 L2 展示成时间流，把 L3/L4 展示成可读条目�
 
 Memhub 提供 **Local Edition** 和 **Server Edition**，Linux / Windows 都支持。
 
-前置要求：**Node.js 20+ 与 npm**。Bootstrap 只负责 Memhub，本身不会修改系统里的 Node 安装。
+现在提供两种安装方式：
+
+| 安装方式 | 本机是否需要 Node/npm | 下载体积 | 适合场景 |
+| --- | --- | --- | --- |
+| **完整安装版** | **不需要** | 较大 | 大多数用户；第一次安装最省事 |
+| **便捷安装版** | 需要 Node.js 20+ 与 npm | 较小 | 已有开发环境、希望快速升级 |
+
+两种方式都支持 Local / Server。
 
 | 你想要的体验 | 推荐 |
 | --- | --- |
@@ -119,19 +126,37 @@ Memhub 提供 **Local Edition** 和 **Server Edition**，Linux / Windows 都支�
 
 所有内容都运行在本机，默认只监听 loopback。
 
-Linux 一键安装：
+#### 完整安装版 — 推荐
+
+Linux：
+
+~~~bash
+curl -fsSL https://github.com/PhSanqi/Memhub/releases/latest/download/install-complete.sh | bash
+~~~
+
+Windows PowerShell：
+
+~~~powershell
+$p=Join-Path $env:TEMP 'memhub-install-complete.ps1'; iwr https://github.com/PhSanqi/Memhub/releases/latest/download/install-complete.ps1 -OutFile $p; & $p; rm $p
+~~~
+
+完整安装版会下载包含 Node.js runtime 和生产依赖的自包含包，校验 SHA-256 后直接使用包内 Node 运行，不要求电脑提前安装 Node/npm。
+
+#### 便捷安装版 — 下载更小
+
+Linux：
 
 ~~~bash
 curl -fsSL https://github.com/PhSanqi/Memhub/releases/latest/download/install.sh | bash
 ~~~
 
-Windows PowerShell 一键安装：
+Windows PowerShell：
 
 ~~~powershell
 $p=Join-Path $env:TEMP 'memhub-install.ps1'; iwr https://github.com/PhSanqi/Memhub/releases/latest/download/install.ps1 -OutFile $p; & $p; rm $p
 ~~~
 
-Bootstrap 会自动解析最新稳定 Release、下载对应平台的完整包、校验 SHA-256、解压到持久目录，再调用正式安装器。无需先 clone 仓库。
+便捷安装版会自动解析最新稳定 Release、下载较小的平台/Edition 包并校验 SHA-256；目标机器需要已有 Node.js 20+ 和 npm。
 
 安装后，本地 MCP / Plugin 可以连接：
 
@@ -145,14 +170,31 @@ Local Edition 适合个人单机长期使用，不需要 VPS，也不需要 Clou
 
 Server Edition 把长期记忆集中到你自己的服务器，各设备通过自己的身份连接同一个账号。
 
-Linux Server 一键安装：
+#### 完整安装版 — 推荐
+
+Linux Server：
+
+~~~bash
+curl -fsSL https://github.com/PhSanqi/Memhub/releases/latest/download/install-complete.sh | \
+  bash -s -- --edition server --public-host memory.example.com
+~~~
+
+Windows Server：
+
+~~~powershell
+$p=Join-Path $env:TEMP 'memhub-install-complete.ps1'; iwr https://github.com/PhSanqi/Memhub/releases/latest/download/install-complete.ps1 -OutFile $p; & $p -Edition server -PublicHost memory.example.com; rm $p
+~~~
+
+#### 便捷安装版 — 下载更小
+
+Linux Server：
 
 ~~~bash
 curl -fsSL https://github.com/PhSanqi/Memhub/releases/latest/download/install.sh | \
   bash -s -- --edition server --public-host memory.example.com
 ~~~
 
-Windows Server 一键安装：
+Windows Server：
 
 ~~~powershell
 $p=Join-Path $env:TEMP 'memhub-install.ps1'; iwr https://github.com/PhSanqi/Memhub/releases/latest/download/install.ps1 -OutFile $p; & $p -Edition server -PublicHost memory.example.com; rm $p

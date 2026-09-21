@@ -16,7 +16,7 @@ const variants = [
   { id: "windows-server", os: "windows", edition: "server", format: "zip" }
 ];
 
-const bootstrapPaths = ["install.sh", "install.ps1"];
+const bootstrapPaths = ["install.sh", "install.ps1", "install-complete.sh", "install-complete.ps1"];
 
 const commonPaths = [
   "LICENSE",
