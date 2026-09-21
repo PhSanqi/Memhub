@@ -20,12 +20,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Build Windows Complete
-        run: node scripts/package-complete-release.mjs --worktree --only windows --output-root .complete-smoke
+        run: node scripts/package-complete-release.mjs --worktree --only windows --output-root complete-smoke
       - name: Upload Windows Complete
         uses: actions/upload-artifact@v4
         with:
           name: memhub-windows-complete-smoke
-          path: .complete-smoke/memhub-*-windows-complete.zip
+          path: complete-smoke/memhub-*-windows-complete.zip
           if-no-files-found: error
           retention-days: 1
 
