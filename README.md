@@ -2,175 +2,353 @@
 
 [简体中文](README.zh-CN.md)
 
-Memhub is a private, project-aware memory and context hub for AI harnesses. Codex, Claude Code, ChatGPT-style remote MCP clients, CoWorker, and other hosts can share one durable memory system without sharing one integration mechanism.
+![Release](https://img.shields.io/github/v/release/PhSanqi/Memhub?display_name=tag)
+![Node.js](https://img.shields.io/badge/Node.js-20%2B-339933?logo=node.js&logoColor=white)
+![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-5b67d6)
+![MCP](https://img.shields.io/badge/MCP-ready-7c3aed)
+![License](https://img.shields.io/github/license/PhSanqi/Memhub)
 
-Current release line: **v0.2.0**. See [CHANGELOG.md](CHANGELOG.md).
+**Give your AI continuity beyond a single chat: your projects, your work, and the way you work.**
 
-## Current memory model
+Memhub is a private, project-aware long-term memory hub for AI harnesses. Codex, MCP clients, and other AI hosts can share one person's durable memory across conversations and devices while keeping unrelated projects separated.
 
-Memhub exposes four memory layers plus an orthogonal Skill layer:
+It is more than a chat archive. Memhub turns raw conversations into readable project timelines, durable project rules and experience, and a cross-project user profile. It also provides first-class project Todos, a browser workspace, and reusable Skills.
 
-- **L1 — Original Conversation**: source user/assistant turns plus bounded, auditable reasoning/tool summaries. Raw Capture and Episode remain internal processing mechanisms.
-- **L2 — Project Timeline**: a human-readable chronological account of project development, decisions, state changes, superseded history, and current truth.
-- **L3 — Project Rules & Experience**: durable project-scoped rules, preferences, working habits, and experience distilled from L2.
-- **L4 — User Profile**: account-scoped cross-project traits and stable working patterns distilled from evidence across multiple project L3 artifacts.
-- **Skill**: reusable executable procedures. Skills are not another memory depth and may be project-scoped or explicitly reusable across projects.
+Current release line: **v0.2.x** · [View Releases](https://github.com/PhSanqi/Memhub/releases)
 
-L2 and L3 are always project-scoped. L4 is always account-scoped. Project business memory never silently crosses into another project.
+---
 
-## Architecture
+## What you get
 
-```text
-AI host / plugin / remote MCP
-            |
-            v
-      Memhub Bridge
-   queue + credentials
-            |
-            v
-       Memhub Server
-   +----------------------+
-   | Context Router       |
-   | L1 Turn Log          |
-   | Distillation Jobs    |
-   | Memory Core          |
-   | Project Registry     |
-   | Architecture Reader  |
-   +----------------------+
-```
+| Capability | What it feels like |
+| --- | --- |
+| **Memory across conversations** | Start a new chat and continue yesterday's project without re-explaining the background. |
+| **Memory across devices** | With Server Edition, Windows, Linux, and multiple AI clients can share one Memhub account and memory set. |
+| **Project-aware isolation** | Each project keeps its own timeline, rules, and experience instead of mixing everything you have ever discussed. |
+| **Project Todos** | Ask the AI to add, complete, reopen, or list Todos without hiding work items inside chat summaries or architecture docs. |
+| **Chronological project history** | L2 answers “what did I do, and when?” as a readable project timeline. |
+| **Durable project knowledge** | L3 keeps stable rules, preferences, lessons learned, and working conventions for each project. |
+| **Cross-project user profile** | L4 captures patterns that repeatedly hold across projects, helping new work start with better context. |
+| **Browser workspace** | Inspect Projects, Todos, L1/L2/L3/L4, Skills, and processing state from a web UI. |
+| **Local-first / self-hosted** | Run everything on one machine or host your own central Server. |
+| **MCP + Plugin support** | MCP clients work directly; hosts with lifecycle hooks can also automate recall and turn capture. |
 
-The architecture reader is deliberately small. It can read existing authoritative project architecture Markdown from legacy `normify-<project>` trees, but it does not execute or vendor the old Normify engine. New CLI/config naming is `architecture-root`; `--normify-root` remains a deprecated compatibility alias so existing service units can restart safely.
+---
 
-Memhub supports Local and Server editions from the same codebase:
+## The experience Memhub is built for
 
-```text
-editions/
-├── local/
-│   ├── linux/
-│   └── windows/
-└── server/
-    ├── linux/
-    └── windows/
-```
+You should not have to remember tool names. In normal use, prompts can stay natural:
 
-Local Edition keeps MCP, capture, SQLite and processing on one machine. Server Edition keeps the authoritative memory service on one server while device Bridges upload captured turns through authenticated transport.
+> “Continue the project from yesterday.”
 
-See [Memhub edition design](docs/EDITIONS.md).
+> “Add ‘update the Windows installer’ to this project's Todo list.”
 
-## MCP surface
+> “That Todo is finished. Mark it done.”
 
-The high-level MCP surface is intentionally small:
+> “Show me what I did on this project in chronological order.”
 
-- `memmy_turn` — open/checkpoint/commit/resume the L1 original-conversation turn log.
-- `memmy_context` — resolve the current project and recall L4, project L2/L3, reusable Skills, recent L1 continuity, and read-only project architecture.
-- `memhub_distill` — lease or submit L2/L3/L4/Skill distillation work. The connected Harness/model performs semantic synthesis; Memhub enforces evidence, scope, provenance and canonical artifact identity.
-- `memmy_project_list` — list/suggest canonical projects.
-- `memmy_project_manage` — controlled project create/update/delete/merge via plan then explicit authorization.
-- `memhub_todo` — first-class project todos: list, add, complete, and reopen. Todo state lives in the Project Registry, not project architecture prose.
-- `memmy_project` — list/current/bind/unbind project context and read project architecture.
+> “What long-term rules have we already established for this project?”
 
-`memmy_project action=current` uses a persistent conversation binding when the Harness exposes a stable `conversation_id`. If a transport cannot provide one, Memhub does not invent an ID: the tool reports `binding_available=false`, while `memmy_context.resolvedProjectId` and explicit current-turn project/workspace evidence remain authoritative for that request.
+> “I moved to another machine. Load the same account and continue.”
 
-A completed L2 job can enqueue L3. Completed L3 artifacts from at least two projects can form an L4 job. Memhub itself does not silently invoke an LLM.
+Memhub makes these interactions part of one durable context instead of making every chat start from zero.
 
-## Capture and Control Plane
+---
 
-Capture is a host capability, not an MCP side effect. A host plugin/hook can write complete or partial turns to the local Bridge, which queues them durably and uploads them when connectivity is available.
+## At a glance
 
-The browser routes are:
+~~~mermaid
+flowchart LR
+    A[ChatGPT / Codex / MCP Client] --> M[Memhub Account]
+    B[Linux Device] --> M
+    C[Windows Device] --> M
 
-- `/memhub` — public landing page.
-- `/memhub/user` — authenticated user workspace.
-- `/memhub/admin` — authenticated admin Control Plane.
+    M --> P1[Project A]
+    M --> P2[Project B]
+    M --> U[Cross-project Profile]
 
-The management model is intentionally the product taxonomy: Overview, Projects, L1, L2, L3, L4, Skills and Processing. Raw Capture and Episode are internal implementation details and are not management layers.
+    P1 --> T1[Timeline]
+    P1 --> R1[Rules & Experience]
+    P1 --> D1[Todos]
 
-Explicit current-turn project/workspace evidence overrides an older conversation binding. If project resolution is ambiguous, Memhub falls back to global-only recall rather than leaking project context.
+    P2 --> T2[Timeline]
+    P2 --> R2[Rules & Experience]
+    P2 --> D2[Todos]
+~~~
 
-## Data migration and maintenance
+One person can enter through different clients and devices while still resolving to the same Memhub account. The entry point is provenance; the memory belongs to the person. Project memory remains project-scoped.
 
-The current SQLite schema migration is v8. During v7 → v8 migration Memhub:
+---
 
-- changes the durable memory-layer constraint to L1/L2/L3/L4/Skill;
-- preserves old rows and archives legacy L2/L3 products instead of deleting them;
-- archives legacy `user_memories`;
-- dead-letters retired evolution jobs;
-- remaps embedding retry targets to the new artifact names.
+## How memory becomes useful
 
-Production cutover is guarded by:
+~~~mermaid
+flowchart TD
+    L1[L1 · Original conversations] --> L2[L2 · Project timeline]
+    L2 --> L3[L3 · Project rules & experience]
+    L3 --> L4[L4 · Cross-project user profile]
+    S[Skill · Reusable capability] -. separate plane .-> L3
+~~~
 
-```bash
-npm run core:preflight
-npm run core:verify -- --manifest <manifest>
-npm run core:preserved -- --manifest <manifest>
-```
+- **L1 · Original conversations** preserves what actually happened as traceable evidence.
+- **L2 · Project timeline** organizes project work chronologically: changes, decisions, milestones, and current state.
+- **L3 · Project rules & experience** keeps durable project preferences, conventions, lessons learned, and Current Truth.
+- **L4 · Cross-project user profile** keeps only stable patterns supported across multiple projects.
+- **Skill** is a reusable executable procedure, not another memory depth.
 
-`core:check` is the routine non-mutating runtime/integrity check. `core:preflight` performs the same boundary checks and additionally creates an online SQLite rollback snapshot, so reserve it for real migration/cutover windows. `core:preserved` is intended for schema-changing cutovers: schema/version changes are reported, while SQLite integrity, durable table presence and preservation of every baseline durable row identity are enforced.
+The Web Workspace renders L2 as a timeline and L3/L4 as readable items instead of forcing users to inspect internal JSON.
 
-Long-term cleanup remains read-first:
+---
 
-```bash
-npm run memory:audit
-npm run memory:repair
-```
+## Choose an edition
 
-`memory:repair` creates an online backup and report before applying changes.
+Memhub ships as **Local Edition** and **Server Edition**, with Linux and Windows support.
 
-For routine Server state-root hygiene, use:
+| What you want | Recommended |
+| --- | --- |
+| Use Memhub on one computer | **Local Edition** |
+| Avoid public networking and reverse proxies | **Local Edition** |
+| Share memory across multiple computers | **Server Edition** |
+| Use Windows and Linux with one memory account | **Server Edition** |
+| Share memory across multiple MCP clients | **Server Edition** |
+| Try Memhub first and self-host later | Start with **Local Edition** |
 
-```bash
-npm run state:audit
-npm run state:tidy
-```
+### Local Edition
 
-`state:audit` is read-only. `state:tidy` deletes nothing; it moves orphan/test captures, superseded migration/repair snapshots, and obsolete backups into a recoverable archive with a manifest. By default it keeps the newest three migration snapshots and newest repair snapshot active.
+Everything runs on one machine and listens on loopback by default.
 
-See [Core migration](docs/CORE_MIGRATION.md), [identity linking](docs/IDENTITY_LINKING.md), [architecture](docs/ARCHITECTURE.md), [memory scopes](docs/EVOLUTION_SCOPES.md), and [Control Plane / distillation](docs/CONTROL_PLANE_AND_DISTILLATION.md).
+Linux:
 
-## Install from source
-
-Node.js 20+ is required.
-
-Local Linux:
-
-```bash
+~~~bash
+git clone https://github.com/PhSanqi/Memhub.git
+cd Memhub
 bash editions/local/linux/install.sh
-```
+~~~
 
-Local Windows:
+Windows PowerShell:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\Memhub\editions\local\windows\install.ps1
-```
+~~~powershell
+git clone https://github.com/PhSanqi/Memhub.git
+cd Memhub
+powershell -ExecutionPolicy Bypass -File .\editions\local\windows\install.ps1
+~~~
 
-Server Linux:
+After installation, local MCP clients and plugins can connect to:
 
-```bash
-MEMHUB_USERNAME=owner bash editions/server/linux/install.sh
-```
+~~~text
+http://127.0.0.1:17861/mcp
+~~~
 
-Server Windows:
+Local Edition is the simplest way to get durable private memory without a VPS or Cloudflare.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\Memhub\editions\server\windows\install.ps1 -Username owner
-```
+### Server Edition
 
-Server Edition binds Memhub to loopback and does not create Cloudflare configuration. Public access should remain behind an authenticated reverse proxy such as Cloudflare Access; device/account authentication remains enforced by Memhub itself.
+Server Edition keeps durable memory on your own central server while multiple devices connect as authenticated clients.
+
+Linux Server:
+
+~~~bash
+git clone https://github.com/PhSanqi/Memhub.git
+cd Memhub
+MEMHUB_PUBLIC_HOST=memory.example.com bash editions/server/linux/install.sh
+~~~
+
+Windows Server:
+
+~~~powershell
+git clone https://github.com/PhSanqi/Memhub.git
+cd Memhub
+powershell -ExecutionPolicy Bypass -File .\editions\server\windows\install.ps1 -PublicHost memory.example.com
+~~~
+
+The Server still binds to loopback by default. Put public access behind an authenticated reverse proxy such as Cloudflare Access.
+
+Detailed setup:
+
+- [Local Edition](editions/local/README.md)
+- [Server Edition](editions/server/README.md)
+- [Release Packages](https://github.com/PhSanqi/Memhub/releases)
+
+---
+
+## Connect your AI client
+
+### MCP clients
+
+Any supported MCP host can connect to Memhub. Local Edition exposes the Bridge at:
+
+~~~text
+http://127.0.0.1:17861/mcp
+~~~
+
+Server Edition uses the authenticated remote MCP endpoint from your deployment.
+
+### Codex / Agent Plugin
+
+The repository includes <code>adapters/plugin/</code>. It contains the MCP configuration, the Memhub Skill, and lifecycle capture/recall support for hosts that register the bundled hooks.
+
+The currently tested Codex Agent Plugin path loads MCP and the Skill. Automatic hook registration depends on the host version; see the [Plugin README](adapters/plugin/README.md) for the current compatibility boundary.
+
+Even without automatic hooks, MCP still provides context recall, project routing, Todos, and distillation.
+
+---
+
+## Useful everyday workflows
+
+### 1. Continue work across chats
+
+In a fresh AI session:
+
+~~~text
+Load this project's Memhub Current Truth and continue from the previous work.
+~~~
+
+Memhub gives the model the relevant project timeline and durable rules instead of replaying every historical conversation.
+
+### 2. Project Todos
+
+~~~text
+Add “finish Windows installation tests” to this project's Todo list.
+~~~
+
+Later:
+
+~~~text
+What Todos are still pending?
+~~~
+
+Or:
+
+~~~text
+That Todo is finished. Mark it complete.
+~~~
+
+Todos are first-class project state, not prose hidden in README files, architecture documents, or chat summaries.
+
+### 3. Review work chronologically
+
+~~~text
+What did I do on this project over the last week, in chronological order?
+~~~
+
+The same L2 timeline is visible in the Web Workspace.
+
+### 4. Keep durable project rules
+
+~~~text
+This project is Linux-first, but Windows must keep the same product semantics.
+~~~
+
+Stable rules like this can become part of project L3 instead of disappearing inside an old conversation.
+
+### 5. Continue on another device
+
+With Server Edition, multiple entry points can resolve to one person:
+
+~~~text
+Windows Codex ─┐
+Linux Codex   ─┼─→ same Memhub account
+Remote MCP    ─┘
+~~~
+
+Memory belongs to the person, not to a specific browser tab, machine, or harness.
+
+---
+
+## Web Workspace
+
+Memhub includes a browser workspace for inspecting and governing long-term memory:
+
+- **Overview** — projects, memory layers, and current pending Todos;
+- **Projects** — project descriptions, Todos, and project state;
+- **L1** — original conversations;
+- **L2** — chronological “what I did” timeline across projects;
+- **L3** — durable project rules and experience;
+- **L4** — stable cross-project user profile;
+- **Skills** — reusable capabilities;
+- **Processing** — distillation work and runtime state.
+
+The Admin view adds governance actions. The normal User Workspace remains scoped to the current account.
+
+---
+
+## Privacy and boundaries
+
+Memhub follows a simple rule: **one person's memory can travel across devices, while unrelated project memory stays isolated.**
+
+- Local Edition can remain entirely on one machine.
+- Server Edition binds to loopback by default.
+- Public deployment is expected to sit behind an authenticated reverse proxy.
+- Human OAuth identity and machine Device identity both resolve to a stable Memhub account.
+- Project L2/L3 memory does not silently leak into another project.
+- L4 keeps only genuinely cross-project personal patterns.
+- Plugins do not need to know or choose the internal Memhub account_id.
+
+See [Identity Linking](docs/IDENTITY_LINKING.md) for remote account binding.
+
+---
+
+## Main MCP capabilities
+
+You do not need these names for everyday use, but harness integrations currently expose:
+
+- **memmy_context** — recall relevant account + current-project context;
+- **memmy_turn** — record one original conversation turn;
+- **memmy_project / memmy_project_list** — resolve and bind projects;
+- **memmy_project_manage** — controlled project management;
+- **memhub_todo** — list, add, complete, and reopen project Todos;
+- **memhub_distill** — turn L1 evidence into L2/L3/L4/Skill artifacts.
+
+Implementation details, migrations, and maintenance internals live under [docs/](docs/) rather than in the main README.
+
+---
+
+## Health checks
+
+Routine checks:
+
+~~~bash
+npm run core:check
+npm run memory:audit
+npm run state:audit
+~~~
+
+Full development test suite:
+
+~~~bash
+npm test
+~~~
+
+For real migration or repair work, read [Core Migration](docs/CORE_MIGRATION.md) first.
+
+---
 
 ## Release packages
 
-Every v0.2.x release is produced from one source commit and carries four platform/edition assets:
+Every formal release can publish the same source commit as four packages:
 
-- `memhub-vX.Y.Z-linux-local.tar.gz`
-- `memhub-vX.Y.Z-linux-server.tar.gz`
-- `memhub-vX.Y.Z-windows-local.zip`
-- `memhub-vX.Y.Z-windows-server.zip`
+~~~text
+Linux Local
+Linux Server
+Windows Local
+Windows Server
+~~~
 
-`SHA256SUMS.txt` and `release-manifest.json` bind all four packages to the same commit. Maintainers can verify release inputs with `npm run release:check` and generate the four assets with `npm run release:package`.
+Downloads:
 
-## Repository status
+**https://github.com/PhSanqi/Memhub/releases**
 
-Memhub is under active development. The embedded Memory Core originates from the open-source Memmy lineage and is maintained here as part of the Memhub runtime boundary. See [upstream notes](docs/UPSTREAM.md).
+---
+
+## Project status
+
+Memhub is under active development. The embedded Memory Core originates from the open-source Memmy lineage and is maintained as part of the Memhub runtime.
+
+- [Changelog](CHANGELOG.md)
+- [Edition Design](docs/EDITIONS.md)
+- [Plugin](adapters/plugin/README.md)
+- [Identity Linking](docs/IDENTITY_LINKING.md)
+- [Upstream Notes](docs/UPSTREAM.md)
 
 ## License
 
