@@ -3,6 +3,16 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 export type ProjectState = "active" | "merged" | "deleted";
+export type ProjectTodoStatus = "pending" | "done";
+
+export interface ProjectTodo {
+  id: string;
+  text: string;
+  status: ProjectTodoStatus;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
 
 export interface ProjectDescriptor {
   projectId: string;
@@ -13,6 +23,7 @@ export interface ProjectDescriptor {
   descriptionSource?: "manual" | "distilled" | "legacy" | "empty";
   descriptionEvidenceRefs?: string[];
   descriptionUpdatedAt?: string;
+  todos?: ProjectTodo[];
   aliases: string[];
   state: ProjectState;
   mergedInto?: string;
@@ -285,6 +296,57 @@ export class JsonProjectRegistry {
     });
   }
 
+  async addTodo(accountId: string, projectRef: string, textRaw: string): Promise<ProjectDescriptor> {
+    const account = requireNonEmpty(accountId, "accountId");
+    const projectId = await this.resolve(account, projectRef);
+    if (!projectId) throw new Error(`unknown or inactive project: ${projectRef}`);
+    const text = requireNonEmpty(textRaw, "todo text");
+    if (text.length > 2000) throw new TypeError("todo text must not exceed 2000 characters");
+    return this.serialize(async () => {
+      const file = await this.read();
+      const project = requireActive(file, account, projectId);
+      const now = new Date().toISOString();
+      const todo: ProjectTodo = {
+        id: randomUUID(),
+        text,
+        status: "pending",
+        createdAt: now,
+        updatedAt: now
+      };
+      project.todos = [...(project.todos ?? []), todo];
+      project.updatedAt = now;
+      await this.write(file);
+      return stripAccount(project);
+    });
+  }
+
+  async setTodoStatus(
+    accountId: string,
+    projectRef: string,
+    todoIdRaw: string,
+    status: ProjectTodoStatus
+  ): Promise<ProjectDescriptor> {
+    const account = requireNonEmpty(accountId, "accountId");
+    const projectId = await this.resolve(account, projectRef);
+    if (!projectId) throw new Error(`unknown or inactive project: ${projectRef}`);
+    const todoId = requireNonEmpty(todoIdRaw, "todoId");
+    if (status !== "pending" && status !== "done") throw new TypeError("todo status must be pending or done");
+    return this.serialize(async () => {
+      const file = await this.read();
+      const project = requireActive(file, account, projectId);
+      const todo = (project.todos ?? []).find((item) => item.id === todoId);
+      if (!todo) throw new Error(`project todo not found: ${todoId}`);
+      const now = new Date().toISOString();
+      todo.status = status;
+      todo.updatedAt = now;
+      if (status === "done") todo.completedAt = now;
+      else delete todo.completedAt;
+      project.updatedAt = now;
+      await this.write(file);
+      return stripAccount(project);
+    });
+  }
+
   async merge(accountId: string, sourceRef: string, targetRef: string): Promise<{
     source: ProjectDescriptor;
     target: ProjectDescriptor;
@@ -318,6 +380,7 @@ export class JsonProjectRegistry {
         if (source.descriptionEvidenceRefs) target.descriptionEvidenceRefs = [...source.descriptionEvidenceRefs];
         if (source.descriptionUpdatedAt) target.descriptionUpdatedAt = source.descriptionUpdatedAt;
       }
+      target.todos = mergeTodos(target.todos ?? [], source.todos ?? []);
       const now = new Date().toISOString();
       target.updatedAt = now;
       source.state = "merged";
@@ -449,6 +512,25 @@ function sameStringArray(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+function mergeTodos(target: readonly ProjectTodo[], source: readonly ProjectTodo[]): ProjectTodo[] {
+  const merged = new Map<string, ProjectTodo>();
+  for (const todo of [...target, ...source]) merged.set(todo.id, structuredClone(todo));
+  return [...merged.values()].sort((left, right) =>
+    left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)
+  );
+}
+
+function isProjectTodo(value: unknown): value is ProjectTodo {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const todo = value as Record<string, unknown>;
+  return typeof todo.id === "string" &&
+    typeof todo.text === "string" &&
+    (todo.status === "pending" || todo.status === "done") &&
+    typeof todo.createdAt === "string" &&
+    typeof todo.updatedAt === "string" &&
+    (todo.completedAt === undefined || typeof todo.completedAt === "string");
+}
+
 function isProjectRegistryFile(value: unknown): value is ProjectRegistryFile {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
@@ -470,6 +552,7 @@ function isProjectRegistryFile(value: unknown): value is ProjectRegistryFile {
       (project.distilledDescription === undefined || typeof project.distilledDescription === "string") &&
       (project.descriptionSource === undefined || ["manual", "distilled", "legacy", "empty"].includes(String(project.descriptionSource))) &&
       (project.descriptionEvidenceRefs === undefined || (Array.isArray(project.descriptionEvidenceRefs) && project.descriptionEvidenceRefs.every((ref) => typeof ref === "string"))) &&
-      (project.descriptionUpdatedAt === undefined || typeof project.descriptionUpdatedAt === "string");
+      (project.descriptionUpdatedAt === undefined || typeof project.descriptionUpdatedAt === "string") &&
+      (project.todos === undefined || (Array.isArray(project.todos) && project.todos.every(isProjectTodo)));
   });
 }

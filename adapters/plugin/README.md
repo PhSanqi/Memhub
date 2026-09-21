@@ -4,6 +4,15 @@ This is the canonical Memhub Agent Plugins package. Portable clients use its MCP
 components. OpenAI/Codex harnesses that support these lifecycle hook events can
 additionally use the bundled capture extension.
 
+Current Codex compatibility note (verified 2026-09-21): the portable Agent
+Plugin loads its Memhub MCP server and bundled Skill, but the tested Codex
+loader does not register hooks from AgentPlugin-format packages. The same hook
+bundle was verified through Codex's legacy plugin manifest path and through the
+real Memhub Bridge lifecycle, so this is a host-loader limitation rather than a
+hook-script limitation. Do not install both a legacy/user hook copy and a future
+native AgentPlugin hook implementation at the same time, or every lifecycle
+event will run twice.
+
 It uses the portable `mcp.json` to point the model at the local Memhub Bridge and OpenAI lifecycle hooks to recall context, capture turns, restore context after compaction and close Memory Core sessions cleanly.
 
 The hooks intentionally use only documented lifecycle fields:

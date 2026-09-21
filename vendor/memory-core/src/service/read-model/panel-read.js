@@ -240,6 +240,7 @@ export class PanelReadModel {
         const pageSize = normalizePanelItemsLimit(input.limit);
         const filter = {
             userId: input.userId ?? input.namespace?.userId,
+            projectIds: input.projectIds,
             memoryLayer: input.layer,
             status: input.status,
             tags: input.tags,

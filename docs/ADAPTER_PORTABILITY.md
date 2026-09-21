@@ -23,6 +23,7 @@ The stable model-facing tool surface is:
 - `memhub_distill`
 - `memmy_project_list`
 - `memmy_project_manage`
+- `memhub_todo`
 - `memmy_project`
 
 Tool names are compatibility contracts and are independent from the product/package name.

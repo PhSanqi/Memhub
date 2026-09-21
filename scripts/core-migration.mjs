@@ -33,7 +33,9 @@ const memoryVendor = resolve(args["memory-vendor"] ?? join(memhubDir, "vendor", 
 const agentSourceVendor = resolve(args["agent-source-vendor"] ?? join(memhubDir, "vendor", "agent-source-core"));
 const vendorManifestPath = resolve(args["vendor-manifest"] ?? join(memhubDir, "vendor", "manifest.json"));
 
-if (command === "preflight") {
+if (command === "check") {
+  await checkRuntime();
+} else if (command === "preflight") {
   await preflight();
 } else if (command === "verify") {
   await verify();
@@ -44,28 +46,27 @@ if (command === "preflight") {
   process.exitCode = 2;
 }
 
-async function preflight() {
-  requireFile(dbPath, "Memory database");
-  requireFile(configPath, "Memory config");
-  const vendorManifest = JSON.parse(await readFile(vendorManifestPath, "utf8"));
-  if (vendorManifest.format !== "memhub-vendor-manifest-v1") {
-    fail("unsupported vendor manifest", { format: vendorManifest.format });
-  }
-  const memoryParity = await verifyVendoredTree("memory-core", memoryVendor, vendorManifest.components?.memory);
-  const agentSourceParity = await verifyVendoredTree("agent-source-core", agentSourceVendor, vendorManifest.components?.agentSource);
-  if (!memoryParity.equal || !agentSourceParity.equal) {
-    fail("vendored core integrity check failed", {
-      memoryParity,
-      agentSourceParity
-    });
-  }
+async function checkRuntime() {
+  const checked = await inspectRuntime();
+  process.stdout.write(JSON.stringify({
+    ok: true,
+    phase: "check",
+    database: {
+      integrity: checked.fingerprint.integrity,
+      schemaHash: checked.fingerprint.schemaHash,
+      durableTables: Object.keys(checked.fingerprint.durableTables).length
+    },
+    runtimeParity: {
+      memory: checked.memoryParity.equal,
+      agentSource: checked.agentSourceParity.equal
+    }
+  }, null, 2) + "\n");
+}
 
+async function preflight() {
+  const checked = await inspectRuntime();
+  const { memoryParity, agentSourceParity } = checked;
   const live = openDatabase(dbPath);
-  const liveIntegrity = integrity(live);
-  if (liveIntegrity !== "ok") {
-    live.close();
-    fail("live database quick_check failed", { result: liveIntegrity });
-  }
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const snapshotDir = join(migrationRoot, stamp);
@@ -127,6 +128,27 @@ async function preflight() {
       agentSource: agentSourceParity.equal
     }
   }, null, 2) + "\n");
+}
+
+async function inspectRuntime() {
+  requireFile(dbPath, "Memory database");
+  requireFile(configPath, "Memory config");
+  const vendorManifest = JSON.parse(await readFile(vendorManifestPath, "utf8"));
+  if (vendorManifest.format !== "memhub-vendor-manifest-v1") {
+    fail("unsupported vendor manifest", { format: vendorManifest.format });
+  }
+  const memoryParity = await verifyVendoredTree("memory-core", memoryVendor, vendorManifest.components?.memory);
+  const agentSourceParity = await verifyVendoredTree("agent-source-core", agentSourceVendor, vendorManifest.components?.agentSource);
+  if (!memoryParity.equal || !agentSourceParity.equal) {
+    fail("vendored core integrity check failed", { memoryParity, agentSourceParity });
+  }
+  const live = openDatabase(dbPath);
+  const fingerprint = fingerprintDatabase(live);
+  live.close();
+  if (fingerprint.integrity !== "ok") {
+    fail("live database quick_check failed", { result: fingerprint.integrity });
+  }
+  return { memoryParity, agentSourceParity, fingerprint };
 }
 
 async function verify() {
@@ -523,11 +545,13 @@ function fail(message, details = undefined) {
 function usage() {
   process.stderr.write([
     "Usage:",
+    "  node scripts/core-migration.mjs check [--db PATH] [--config PATH]",
     "  node scripts/core-migration.mjs preflight [--db PATH] [--config PATH] [--state-root PATH]",
     "  node scripts/core-migration.mjs verify --manifest PATH [--db PATH]",
     "  node scripts/core-migration.mjs preserved --manifest PATH [--db PATH]",
     "",
-    "preflight performs runtime source/vendor parity checks, SQLite quick_check,",
+    "check performs runtime source/vendor parity checks and SQLite quick_check without creating a snapshot.",
+    "preflight performs the same checks plus",
     "an online SQLite backup, and a durable-table cryptographic fingerprint.",
     "verify is intended for a frozen exact cutover comparison. preserved checks",
     "that every durable record identity in a pre-cutover baseline still exists",

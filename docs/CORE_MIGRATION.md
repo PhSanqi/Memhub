@@ -37,6 +37,16 @@ During v7 -> v8 migration:
 
 ## Phase 1 — preflight
 
+For routine health checks that must not create another rollback snapshot, use:
+
+```bash
+npm run core:check
+```
+
+`core:check` verifies vendored runtime parity plus the live SQLite integrity/fingerprint and does not write under `core-migrations/`.
+
+Only run the snapshot-producing preflight when a real migration/cutover rollback boundary is needed:
+
 Run from the repository:
 
 ```bash
