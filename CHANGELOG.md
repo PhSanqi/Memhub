@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.2.1 — 2026-09-21
+
+Memhub 0.2.1 focuses on installation, first-run ergonomics, and the reliability improvements shipped on main after v0.2.0.
+
+### Installation
+
+- Adds stable `install.sh` and `install.ps1` bootstrap assets to every Release.
+- The bootstrap resolves the latest stable Release, selects the requested Local/Server package for the current OS, verifies SHA-256, installs the archive into a persistent application directory, and then runs the existing edition installer.
+- Linux and Windows both support Local and Server installs without cloning the repository first.
+- Manual Git clone installation remains available for development and troubleshooting.
+
+### Release packaging
+
+- Release manifests now include bootstrap installer checksums.
+- `SHA256SUMS.txt` covers the four platform archives plus both bootstrap installers.
+
+### Workspace and Todos
+
+- Adds `memhub_todo` as a first-class MCP surface for listing, adding, completing, and reopening project Todos.
+- The Web Workspace shows pending Todos directly and renders L2 as a chronological activity timeline, with readable L3 project rules/experience and L4 cross-project profile views.
+- Control Plane job summaries avoid repeatedly transferring large distillation evidence payloads during normal UI refreshes.
+
+### Bridge and Plugin reliability
+
+- Capture queue uploads use claim files so a concurrent Stop update cannot be deleted by an older flush.
+- PostCompact and SessionEnd drain pending capture work before closing lifecycle state.
+- Colon-bearing L1 evidence IDs are preserved end-to-end.
+- Codex Plugin Skill metadata uses the host-recognized `description` field.
+
 ## v0.2.0 — 2026-09-20
 
 Memhub 0.2.0 is the first unified L1-L4 release. The same source commit ships Server and Local editions on Linux and Windows.

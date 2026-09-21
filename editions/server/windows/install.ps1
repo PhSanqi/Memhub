@@ -82,9 +82,11 @@ $PublicEnv"$Node" "$McpEntry" --http 3001 --http-path /memhub/mcp --capture-path
 try { & icacls.exe $StateRoot /inheritance:r /grant:r "$env:USERNAME:(OI)(CI)F" | Out-Null } catch {}
 
 function Install-LogonTask([string]$Name, [string]$Launcher) {
+  & schtasks.exe /End /TN $Name 2>$null | Out-Null
   & schtasks.exe /Create /F /SC ONLOGON /TN $Name /TR ('"' + $Launcher + '"') | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Failed to create scheduled task $Name" }
   & schtasks.exe /Run /TN $Name | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Failed to start scheduled task $Name" }
 }
 Install-LogonTask "Memhub-Server-Memory" $MemoryLauncher
 Start-Sleep -Seconds 1

@@ -16,6 +16,8 @@ const variants = [
   { id: "windows-server", os: "windows", edition: "server", format: "zip" }
 ];
 
+const bootstrapPaths = ["install.sh", "install.ps1"];
+
 const commonPaths = [
   "LICENSE",
   "CHANGELOG.md",
@@ -52,6 +54,7 @@ for (const variant of variants) {
   const installer = `editions/${variant.edition}/${variant.os}/install.${variant.os === "windows" ? "ps1" : "sh"}`;
   assertTracked(installer);
 }
+for (const path of bootstrapPaths) assertTracked(path);
 
 if (CHECK_ONLY) {
   console.log(JSON.stringify({ ok: true, version, variants: variants.map((item) => item.id) }, null, 2));
@@ -79,18 +82,26 @@ for (const variant of variants) {
   assets.push({ ...variant, filename, sha256: digest });
 }
 
+const bootstraps = [];
+for (const filename of bootstrapPaths) {
+  const output = resolve(outputRoot, filename);
+  await writeFile(output, gitText("show", `${REF}:${filename}`), "utf8");
+  const digest = createHash("sha256").update(await readFile(output)).digest("hex");
+  bootstraps.push({ filename, sha256: digest });
+}
+
 await writeFile(
   resolve(outputRoot, "SHA256SUMS.txt"),
-  assets.map((asset) => `${asset.sha256}  ${asset.filename}`).join("\n") + "\n",
+  [...assets, ...bootstraps].map((asset) => `${asset.sha256}  ${asset.filename}`).join("\n") + "\n",
   "utf8"
 );
 await writeFile(
   resolve(outputRoot, "release-manifest.json"),
-  JSON.stringify({ format: "memhub-release-v1", version, commit, ref: REF, assets }, null, 2) + "\n",
+  JSON.stringify({ format: "memhub-release-v1", version, commit, ref: REF, assets, bootstraps }, null, 2) + "\n",
   "utf8"
 );
 
-console.log(JSON.stringify({ ok: true, version, commit, outputRoot, assets }, null, 2));
+console.log(JSON.stringify({ ok: true, version, commit, outputRoot, assets, bootstraps }, null, 2));
 
 function argumentValue(flag) {
   const index = process.argv.indexOf(flag);

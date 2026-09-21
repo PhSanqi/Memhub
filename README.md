@@ -104,6 +104,8 @@ The Web Workspace renders L2 as a timeline and L3/L4 as readable items instead o
 
 Memhub ships as **Local Edition** and **Server Edition**, with Linux and Windows support.
 
+Prerequisite: **Node.js 20+ with npm**. The bootstrap handles Memhub itself; it does not change your system Node installation.
+
 | What you want | Recommended |
 | --- | --- |
 | Use Memhub on one computer | **Local Edition** |
@@ -117,21 +119,19 @@ Memhub ships as **Local Edition** and **Server Edition**, with Linux and Windows
 
 Everything runs on one machine and listens on loopback by default.
 
-Linux:
+Linux one-line install:
 
 ~~~bash
-git clone https://github.com/PhSanqi/Memhub.git
-cd Memhub
-bash editions/local/linux/install.sh
+curl -fsSL https://github.com/PhSanqi/Memhub/releases/latest/download/install.sh | bash
 ~~~
 
-Windows PowerShell:
+Windows PowerShell one-line install:
 
 ~~~powershell
-git clone https://github.com/PhSanqi/Memhub.git
-cd Memhub
-powershell -ExecutionPolicy Bypass -File .\editions\local\windows\install.ps1
+$p=Join-Path $env:TEMP 'memhub-install.ps1'; iwr https://github.com/PhSanqi/Memhub/releases/latest/download/install.ps1 -OutFile $p; & $p; rm $p
 ~~~
+
+The bootstrap resolves the latest stable Release, downloads the correct full platform package, verifies SHA-256, extracts it into a persistent application directory, and then runs the normal edition installer. No repository clone is required.
 
 After installation, local MCP clients and plugins can connect to:
 
@@ -145,20 +145,17 @@ Local Edition is the simplest way to get durable private memory without a VPS or
 
 Server Edition keeps durable memory on your own central server while multiple devices connect as authenticated clients.
 
-Linux Server:
+Linux Server one-line install:
 
 ~~~bash
-git clone https://github.com/PhSanqi/Memhub.git
-cd Memhub
-MEMHUB_PUBLIC_HOST=memory.example.com bash editions/server/linux/install.sh
+curl -fsSL https://github.com/PhSanqi/Memhub/releases/latest/download/install.sh | \
+  bash -s -- --edition server --public-host memory.example.com
 ~~~
 
-Windows Server:
+Windows Server one-line install:
 
 ~~~powershell
-git clone https://github.com/PhSanqi/Memhub.git
-cd Memhub
-powershell -ExecutionPolicy Bypass -File .\editions\server\windows\install.ps1 -PublicHost memory.example.com
+$p=Join-Path $env:TEMP 'memhub-install.ps1'; iwr https://github.com/PhSanqi/Memhub/releases/latest/download/install.ps1 -OutFile $p; & $p -Edition server -PublicHost memory.example.com; rm $p
 ~~~
 
 The Server still binds to loopback by default. Put public access behind an authenticated reverse proxy such as Cloudflare Access.
@@ -168,6 +165,8 @@ Detailed setup:
 - [Local Edition](editions/local/README.md)
 - [Server Edition](editions/server/README.md)
 - [Release Packages](https://github.com/PhSanqi/Memhub/releases)
+
+For development, troubleshooting, or manual control over the checkout, you can still clone the repository and run `editions/<edition>/<platform>/install.*` directly.
 
 ---
 

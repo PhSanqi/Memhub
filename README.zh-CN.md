@@ -104,6 +104,8 @@ Web 界面会直接把 L2 展示成时间流，把 L3/L4 展示成可读条目�
 
 Memhub 提供 **Local Edition** 和 **Server Edition**，Linux / Windows 都支持。
 
+前置要求：**Node.js 20+ 与 npm**。Bootstrap 只负责 Memhub，本身不会修改系统里的 Node 安装。
+
 | 你想要的体验 | 推荐 |
 | --- | --- |
 | 只在这一台电脑使用 | **Local Edition** |
@@ -117,21 +119,19 @@ Memhub 提供 **Local Edition** 和 **Server Edition**，Linux / Windows 都支�
 
 所有内容都运行在本机，默认只监听 loopback。
 
-Linux：
+Linux 一键安装：
 
 ~~~bash
-git clone https://github.com/PhSanqi/Memhub.git
-cd Memhub
-bash editions/local/linux/install.sh
+curl -fsSL https://github.com/PhSanqi/Memhub/releases/latest/download/install.sh | bash
 ~~~
 
-Windows PowerShell：
+Windows PowerShell 一键安装：
 
 ~~~powershell
-git clone https://github.com/PhSanqi/Memhub.git
-cd Memhub
-powershell -ExecutionPolicy Bypass -File .\editions\local\windows\install.ps1
+$p=Join-Path $env:TEMP 'memhub-install.ps1'; iwr https://github.com/PhSanqi/Memhub/releases/latest/download/install.ps1 -OutFile $p; & $p; rm $p
 ~~~
+
+Bootstrap 会自动解析最新稳定 Release、下载对应平台的完整包、校验 SHA-256、解压到持久目录，再调用正式安装器。无需先 clone 仓库。
 
 安装后，本地 MCP / Plugin 可以连接：
 
@@ -145,20 +145,17 @@ Local Edition 适合个人单机长期使用，不需要 VPS，也不需要 Clou
 
 Server Edition 把长期记忆集中到你自己的服务器，各设备通过自己的身份连接同一个账号。
 
-Linux Server：
+Linux Server 一键安装：
 
 ~~~bash
-git clone https://github.com/PhSanqi/Memhub.git
-cd Memhub
-MEMHUB_PUBLIC_HOST=memory.example.com bash editions/server/linux/install.sh
+curl -fsSL https://github.com/PhSanqi/Memhub/releases/latest/download/install.sh | \
+  bash -s -- --edition server --public-host memory.example.com
 ~~~
 
-Windows Server：
+Windows Server 一键安装：
 
 ~~~powershell
-git clone https://github.com/PhSanqi/Memhub.git
-cd Memhub
-powershell -ExecutionPolicy Bypass -File .\editions\server\windows\install.ps1 -PublicHost memory.example.com
+$p=Join-Path $env:TEMP 'memhub-install.ps1'; iwr https://github.com/PhSanqi/Memhub/releases/latest/download/install.ps1 -OutFile $p; & $p -Edition server -PublicHost memory.example.com; rm $p
 ~~~
 
 Server 默认仍只监听 loopback。公网入口建议放在 Cloudflare Access 或其他经过认证的反向代理后。
@@ -168,6 +165,8 @@ Server 默认仍只监听 loopback。公网入口建议放在 Cloudflare Access 
 - [Local Edition](editions/local/README.zh-CN.md)
 - [Server Edition](editions/server/README.zh-CN.md)
 - [Release Packages](https://github.com/PhSanqi/Memhub/releases)
+
+如果需要开发、调试或手动控制安装目录，也可以 clone 仓库后直接运行 `editions/<edition>/<platform>/install.*`。
 
 ---
 
