@@ -57,7 +57,10 @@ if (-not $SkipBuild -and (!(Test-Path $MemoryEntry) -or !(Test-Path $McpEntry)))
 }
 if (!(Test-Path $MemoryEntry) -or !(Test-Path $McpEntry)) { throw "Build output is missing." }
 
-$MemoryToken = & $Node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))'
+$MemoryTokenBytes = New-Object byte[] 32
+$MemoryTokenRng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try { $MemoryTokenRng.GetBytes($MemoryTokenBytes) } finally { $MemoryTokenRng.Dispose() }
+$MemoryToken = -join ($MemoryTokenBytes | ForEach-Object { $_.ToString("x2") })
 $Config = @{
   memmyMemory = @{
     version = 1; userId = "local-user"; roleRouting = @{ summary = "follow"; evolution = "follow" }
@@ -95,10 +98,10 @@ set "MEMHUB_STATE_ROOT=$ServerState"
 set "MEMHUB_BINDINGS=$StateRoot\conversation-project-bindings.json"
 $PublicEnv"$Node" "$McpEntry" --http 3001 --http-path /memhub/mcp --capture-path /memhub/capture --state-root "$ServerState" --memory-url http://127.0.0.1:18960$PublicArg
 "@ | Set-Content -Encoding ASCII $GatewayLauncher
-try { & icacls.exe $StateRoot /inheritance:r /grant:r "$env:USERNAME:(OI)(CI)F" | Out-Null } catch {}
+try { & icacls.exe $StateRoot /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)F" | Out-Null } catch {}
 
 function Install-LogonTask([string]$Name, [string]$Launcher) {
-  & schtasks.exe /End /TN $Name 2>$null | Out-Null
+  & cmd.exe /c "schtasks.exe /End /TN $Name >NUL 2>&1" | Out-Null
   & schtasks.exe /Create /F /SC ONLOGON /TN $Name /TR ('"' + $Launcher + '"') | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Failed to create scheduled task $Name" }
   & schtasks.exe /Run /TN $Name | Out-Null

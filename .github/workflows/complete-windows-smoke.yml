@@ -58,8 +58,8 @@ jobs:
           }
           function Remove-TestTasks([string[]]$Names) {
             foreach ($name in $Names) {
-              & schtasks.exe /End /TN $name 2>$null | Out-Null
-              & schtasks.exe /Delete /F /TN $name 2>$null | Out-Null
+              & cmd.exe /c "schtasks.exe /End /TN $name >NUL 2>&1" | Out-Null
+              & cmd.exe /c "schtasks.exe /Delete /F /TN $name >NUL 2>&1" | Out-Null
             }
           }
           function Wait-PortClosed([int]$Port, [int]$Seconds = 20) {
