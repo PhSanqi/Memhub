@@ -1,0 +1,57 @@
+name: Complete Windows smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-complete:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.20.0
+          cache: npm
+      - name: Install packaging tools
+        run: sudo apt-get update && sudo apt-get install -y zip unzip xz-utils file
+      - name: Install dependencies
+        run: npm ci
+      - name: Build Windows Complete
+        run: node scripts/package-complete-release.mjs --worktree --only windows --output-root .complete-smoke
+      - name: Upload Windows Complete
+        uses: actions/upload-artifact@v4
+        with:
+          name: memhub-windows-complete-smoke
+          path: .complete-smoke/memhub-*-windows-complete.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  windows-runtime-smoke:
+    needs: build-windows-complete
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: memhub-windows-complete-smoke
+          path: ${{ runner.temp }}\memhub-complete-artifact
+      - name: Run Complete package with bundled Node only
+        shell: powershell
+        run: |
+          $zip = Get-ChildItem "$env:RUNNER_TEMP\memhub-complete-artifact\memhub-*-windows-complete.zip" | Select-Object -First 1
+          if (-not $zip) { throw "Windows Complete artifact missing" }
+          $extract = Join-Path $env:RUNNER_TEMP 'memhub-complete-extract'
+          Expand-Archive -Path $zip.FullName -DestinationPath $extract -Force
+          $root = Get-ChildItem $extract -Directory | Where-Object { $_.Name -like 'memhub-*-windows-complete' } | Select-Object -First 1
+          if (-not $root) { throw "Windows Complete root missing" }
+          $node = Join-Path $root.FullName 'runtime\node\node.exe'
+          if (-not (Test-Path $node)) { throw "Bundled node.exe missing" }
+          & $node --version
+          if ($LASTEXITCODE -ne 0) { throw "Bundled Node failed" }
+          $env:NODE = ''
+          $env:NPM = ''
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          & (Join-Path $root.FullName 'install-complete.ps1') -PrepareOnly
+          if ($LASTEXITCODE -ne 0) { throw "Complete prepare-only smoke failed" }

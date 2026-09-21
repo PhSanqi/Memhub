@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.2.2 — 2026-09-21
+
+Memhub 0.2.2 adds self-contained Complete installers alongside the existing lightweight bootstrap path.
+
+### Complete installation
+
+- Adds **Linux Complete** and **Windows Complete** packages with a bundled Node.js 22.20.0 runtime.
+- Complete packages include production dependencies and prebuilt native runtime components so users do not need a preinstalled Node/npm for normal installation.
+- Both Complete packages support Local and Server installation modes from the same archive.
+- Adds `install-complete.sh` and `install-complete.ps1` as stable Complete bootstrap assets.
+- Complete bootstraps verify SHA-256 before extraction and then use the bundled runtime from the package itself.
+
+### Quick installation
+
+- Existing `install.sh` / `install.ps1` remain the smaller **Quick Install** path.
+- Quick Install still expects Node.js 20+ and npm on the target machine, then downloads the smaller Local/Server package for that platform.
+
+### Release verification
+
+- Release metadata now distinguishes Quick packages, Quick/Complete bootstraps, and Complete packages in one manifest/checksum set.
+- Linux Complete is smoke-tested without relying on the user's Node/npm installation.
+- Windows Complete has a dedicated GitHub Windows runner smoke that executes `install-complete.ps1 -PrepareOnly` against the generated Windows package and bundled Node runtime.
+
 ## v0.2.1 — 2026-09-21
 
 Memhub 0.2.1 focuses on installation, first-run ergonomics, and the reliability improvements shipped on main after v0.2.0.
