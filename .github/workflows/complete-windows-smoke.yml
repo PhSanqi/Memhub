@@ -74,6 +74,19 @@ jobs:
             }
             throw "Port $Port remained open after cleanup"
           }
+          function Remove-PathWithRetry([string]$Path, [int]$Seconds = 20) {
+            if (-not (Test-Path $Path)) { return }
+            $deadline = (Get-Date).AddSeconds($Seconds)
+            do {
+              try {
+                Remove-Item -Recurse -Force $Path -ErrorAction Stop
+                return
+              } catch {
+                if ((Get-Date) -ge $deadline) { throw }
+                Start-Sleep -Milliseconds 500
+              }
+            } while ($true)
+          }
 
           $zip = Get-ChildItem "$env:RUNNER_TEMP\memhub-complete-artifact\memhub-*-windows-complete.zip" | Select-Object -First 1
           if (-not $zip) { throw "Windows Complete artifact missing" }
@@ -102,12 +115,11 @@ jobs:
             Write-Host '[memhub] Windows Complete Local install smoke PASS'
           } finally {
             Remove-TestTasks @('Memhub-Bridge','Memhub-Local','Memhub-Memory')
-            Start-Sleep -Seconds 2
-            if (Test-Path $localState) { Remove-Item -Recurse -Force $localState }
+            Wait-PortClosed 17861
+            Wait-PortClosed 3001
+            Wait-PortClosed 18960
+            Remove-PathWithRetry $localState
           }
-          Wait-PortClosed 17861
-          Wait-PortClosed 3001
-          Wait-PortClosed 18960
 
           $serverState = Join-Path $env:RUNNER_TEMP 'memhub-complete-server-state'
           try {
@@ -117,10 +129,9 @@ jobs:
             Write-Host '[memhub] Windows Complete Server install smoke PASS'
           } finally {
             Remove-TestTasks @('Memhub-Server','Memhub-Server-Memory')
-            Start-Sleep -Seconds 2
-            if (Test-Path $serverState) { Remove-Item -Recurse -Force $serverState }
+            Wait-PortClosed 3001
+            Wait-PortClosed 18960
+            Remove-PathWithRetry $serverState
           }
-          Wait-PortClosed 3001
-          Wait-PortClosed 18960
 
-          if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
+          Remove-PathWithRetry $extract
