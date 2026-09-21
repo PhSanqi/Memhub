@@ -5,8 +5,26 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
-$Node = (Get-Command node -ErrorAction Stop).Source
-$Npm = (Get-Command npm -ErrorAction Stop).Source
+$BundledNode = Join-Path $RepoRoot "runtime\node\node.exe"
+$BundledNpmCli = Join-Path $RepoRoot "runtime\node\node_modules\npm\bin\npm-cli.js"
+if ($env:NODE) { $Node = $env:NODE }
+elseif (Test-Path $BundledNode) { $Node = $BundledNode }
+else { $Node = (Get-Command node -ErrorAction Stop).Source }
+$NpmCommand = Get-Command npm -ErrorAction SilentlyContinue
+$Npm = if ($NpmCommand) { $NpmCommand.Source } else { "" }
+$NodeMajor = [int](& $Node -p "process.versions.node.split('.')[0]")
+if ($NodeMajor -lt 20) { throw "Node.js 20+ is required" }
+
+function Invoke-Npm([string[]]$Arguments) {
+  if ($Node -eq $BundledNode -and (Test-Path $BundledNpmCli)) {
+    & $Node $BundledNpmCli @Arguments
+  } elseif ($Npm) {
+    & $Npm @Arguments
+  } else {
+    throw "npm is required when dependencies or build output are missing"
+  }
+  if ($LASTEXITCODE -ne 0) { throw "npm $($Arguments -join ' ') failed" }
+}
 $ServerState = Join-Path $StateRoot "server"
 $MemoryDir = Join-Path $StateRoot "memory"
 $ConfigPath = Join-Path $StateRoot "memory-config.yaml"
@@ -23,8 +41,7 @@ if (-not (Test-Path $NodeModules)) {
   try {
     $PreviousCudaInstall = $env:ONNXRUNTIME_NODE_INSTALL_CUDA
     $env:ONNXRUNTIME_NODE_INSTALL_CUDA = "skip"
-    & $Npm ci --workspaces=false
-    if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
+    Invoke-Npm @("ci", "--workspaces=false")
   } finally {
     if ($null -eq $PreviousCudaInstall) { Remove-Item Env:ONNXRUNTIME_NODE_INSTALL_CUDA -ErrorAction SilentlyContinue }
     else { $env:ONNXRUNTIME_NODE_INSTALL_CUDA = $PreviousCudaInstall }
@@ -34,8 +51,7 @@ if (-not (Test-Path $NodeModules)) {
 if (-not $SkipBuild -and (!(Test-Path $MemoryEntry) -or !(Test-Path $McpEntry) -or !(Test-Path $BridgeEntry))) {
   Push-Location $RepoRoot
   try {
-    & $Npm run build
-    if ($LASTEXITCODE -ne 0) { throw "Memhub build failed" }
+    Invoke-Npm @("run", "build")
   } finally { Pop-Location }
 }
 if (!(Test-Path $MemoryEntry) -or !(Test-Path $McpEntry) -or !(Test-Path $BridgeEntry)) {
