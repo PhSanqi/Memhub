@@ -66,6 +66,7 @@ Local Edition 在单机运行 MCP、capture、SQLite 和处理流程。Server Ed
 - `memhub_distill`：领取或提交 L2/L3/L4/Skill 蒸馏任务。真正的语义整理由当前已登录 Harness/模型完成；Memhub 负责 evidence、scope、provenance 和 canonical artifact 校验。
 - `memmy_project_list`：列出/匹配 canonical project。
 - `memmy_project_manage`：通过 plan → 明确授权管理项目 create/update/delete/merge。
+- `memhub_todo`：项目待办的一等工具，支持查看、新增、完成和重开；Todo 状态保存在 Project Registry，不再依赖项目架构文本表达。
 - `memmy_project`：list/current/bind/unbind 项目上下文，并读取项目架构。
 
 `memmy_project action=current` 在 Harness 能提供稳定 `conversation_id` 时读取持久 conversation binding；如果某个 transport 拿不到稳定会话 ID，Memhub 不会伪造 ID，而是返回 `binding_available=false`，当前请求继续以 `memmy_context.resolvedProjectId` 和本轮明确的 project/workspace 证据为准。
@@ -104,7 +105,7 @@ npm run core:verify -- --manifest <manifest>
 npm run core:preserved -- --manifest <manifest>
 ```
 
-`core:preflight` 会检查 vendored runtime 完整性，并生成在线 SQLite 回滚快照。`core:preserved` 专门用于允许 schema 变化的 cutover：schema/version 变化只作为审计信息；真正强制的是 SQLite integrity、durable table 不丢失，以及 baseline 中每一个 durable row identity 都仍存在。
+`core:check` 用于日常非写入的 runtime/integrity 检查。`core:preflight` 在同样的边界检查之外还会生成在线 SQLite 回滚快照，因此只应在真实 migration/cutover 窗口使用。`core:preserved` 专门用于允许 schema 变化的 cutover：schema/version 变化只作为审计信息；真正强制的是 SQLite integrity、durable table 不丢失，以及 baseline 中每一个 durable row identity 都仍存在。
 
 长期内容治理保持 read-first：
 
@@ -115,7 +116,16 @@ npm run memory:repair
 
 `memory:repair` 在 apply 前生成在线备份和报告。
 
-详见 [Core 迁移](docs/CORE_MIGRATION.md)、[架构](docs/ARCHITECTURE.md)、[记忆 Scope](docs/EVOLUTION_SCOPES.md) 和 [Control Plane / Distillation](docs/CONTROL_PLANE_AND_DISTILLATION.md)。
+Server state-root 的日常整理使用：
+
+```bash
+npm run state:audit
+npm run state:tidy
+```
+
+`state:audit` 只报告候选；`state:tidy` 不删除数据，而是把 orphan/test capture、旧 migration/repair 快照和失效备份移动到带 manifest 的可恢复 archive。默认保留最近 3 份 migration snapshot 和最近 1 份 repair snapshot。
+
+详见 [Core 迁移](docs/CORE_MIGRATION.md)、[身份绑定](docs/IDENTITY_LINKING.md)、[架构](docs/ARCHITECTURE.md)、[记忆 Scope](docs/EVOLUTION_SCOPES.md) 和 [Control Plane / Distillation](docs/CONTROL_PLANE_AND_DISTILLATION.md)。
 
 ## 源码安装
 

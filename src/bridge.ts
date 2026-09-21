@@ -59,10 +59,18 @@ export class MemhubBridgeQueue {
     let sent = 0;
     for (const name of files) {
       const path = join(this.queueDir(), name);
-      const event = normalizeCaptureEvent(JSON.parse(await readFile(path, "utf8")) as unknown);
+      const key = name.slice(0, 64);
+      const claim = join(this.queueDir(), `${key}.sending-${randomUUID()}.json`);
+      try {
+        await rename(path, claim);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code === "ENOENT") continue;
+        throw error;
+      }
+      const event = normalizeCaptureEvent(JSON.parse(await readFile(claim, "utf8")) as unknown);
       try {
         await uploadCapture(config, event);
-        await rm(path, { force: true });
+        await rm(claim, { force: true });
         sent += 1;
       } catch (error) {
         return {
@@ -127,19 +135,22 @@ export async function serveBridge(options: { stateRoot: string; host?: string; p
   if (host !== "127.0.0.1" && host !== "::1" && host !== "localhost") throw new Error("Memhub Bridge only supports loopback bind");
   const port = options.port ?? 17861;
   const queue = new MemhubBridgeQueue(options.stateRoot);
-  let flushPromise: Promise<unknown> | null = null;
-  const flushInBackground = () => {
-    if (flushPromise) return;
+  let flushPromise: Promise<{ sent: number; pending: number; stopped_on_error?: string }> | null = null;
+  const flushQueue = () => {
+    if (flushPromise) return flushPromise;
     flushPromise = (async () => {
-      try {
-        const config = await loadBridgeConfig(options.stateRoot);
-        await queue.flush(config);
-      } catch {
-        // Offline/unconfigured is expected; the durable queue is retried later.
-      } finally {
-        flushPromise = null;
+      const config = await loadBridgeConfig(options.stateRoot);
+      let sent = 0;
+      for (;;) {
+        const result = await queue.flush(config);
+        sent += result.sent;
+        if (result.pending === 0 || result.stopped_on_error) return { ...result, sent };
       }
-    })();
+    })().finally(() => { flushPromise = null; });
+    return flushPromise;
+  };
+  const flushInBackground = () => {
+    void flushQueue().catch(() => undefined);
   };
   const server = createServer((request, response) => {
     void (async () => {
@@ -160,11 +171,21 @@ export async function serveBridge(options: { stateRoot: string; host?: string; p
       }
       if (request.method === "POST" && url.pathname === "/lifecycle") {
         const config = await loadBridgeConfig(options.stateRoot);
-        await proxyLifecycle(request, response, config);
+        const body = await readJsonBody(request);
+        const event = body && typeof body === "object" && !Array.isArray(body)
+          ? String((body as Record<string, unknown>).event ?? "").toLowerCase()
+          : "";
+        if (event === "postcompact" || event === "sessionend") {
+          const flushed = await flushQueue();
+          if (flushed.pending > 0) {
+            return json(response, 503, { error: "capture_flush_pending", ...flushed });
+          }
+        }
+        await proxyLifecycle(response, config, body);
         return;
       }
       if (request.method === "POST" && url.pathname === "/flush") {
-        return json(response, 200, await queue.flush(await loadBridgeConfig(options.stateRoot)));
+        return json(response, 200, await flushQueue());
       }
       if (request.method === "POST" && url.pathname === "/capture") {
         const event = await queue.enqueue(await readJsonBody(request));
@@ -340,11 +361,11 @@ async function proxyContext(
 }
 
 async function proxyLifecycle(
-  request: import("node:http").IncomingMessage,
   response: import("node:http").ServerResponse,
-  config: BridgeConfig
+  config: BridgeConfig,
+  payload: unknown
 ): Promise<void> {
-  const body = JSON.stringify(await readJsonBody(request));
+  const body = JSON.stringify(payload);
   const headers: Record<string, string> = {
     "content-type": "application/json",
     authorization: `Bearer ${config.device_token}`

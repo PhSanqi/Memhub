@@ -66,6 +66,7 @@ The high-level MCP surface is intentionally small:
 - `memhub_distill` — lease or submit L2/L3/L4/Skill distillation work. The connected Harness/model performs semantic synthesis; Memhub enforces evidence, scope, provenance and canonical artifact identity.
 - `memmy_project_list` — list/suggest canonical projects.
 - `memmy_project_manage` — controlled project create/update/delete/merge via plan then explicit authorization.
+- `memhub_todo` — first-class project todos: list, add, complete, and reopen. Todo state lives in the Project Registry, not project architecture prose.
 - `memmy_project` — list/current/bind/unbind project context and read project architecture.
 
 `memmy_project action=current` uses a persistent conversation binding when the Harness exposes a stable `conversation_id`. If a transport cannot provide one, Memhub does not invent an ID: the tool reports `binding_available=false`, while `memmy_context.resolvedProjectId` and explicit current-turn project/workspace evidence remain authoritative for that request.
@@ -104,7 +105,7 @@ npm run core:verify -- --manifest <manifest>
 npm run core:preserved -- --manifest <manifest>
 ```
 
-`core:preflight` verifies vendored runtime integrity and creates an online SQLite rollback snapshot. `core:preserved` is intended for schema-changing cutovers: schema/version changes are reported, while SQLite integrity, durable table presence and preservation of every baseline durable row identity are enforced.
+`core:check` is the routine non-mutating runtime/integrity check. `core:preflight` performs the same boundary checks and additionally creates an online SQLite rollback snapshot, so reserve it for real migration/cutover windows. `core:preserved` is intended for schema-changing cutovers: schema/version changes are reported, while SQLite integrity, durable table presence and preservation of every baseline durable row identity are enforced.
 
 Long-term cleanup remains read-first:
 
@@ -115,7 +116,16 @@ npm run memory:repair
 
 `memory:repair` creates an online backup and report before applying changes.
 
-See [Core migration](docs/CORE_MIGRATION.md), [architecture](docs/ARCHITECTURE.md), [memory scopes](docs/EVOLUTION_SCOPES.md), and [Control Plane / distillation](docs/CONTROL_PLANE_AND_DISTILLATION.md).
+For routine Server state-root hygiene, use:
+
+```bash
+npm run state:audit
+npm run state:tidy
+```
+
+`state:audit` is read-only. `state:tidy` deletes nothing; it moves orphan/test captures, superseded migration/repair snapshots, and obsolete backups into a recoverable archive with a manifest. By default it keeps the newest three migration snapshots and newest repair snapshot active.
+
+See [Core migration](docs/CORE_MIGRATION.md), [identity linking](docs/IDENTITY_LINKING.md), [architecture](docs/ARCHITECTURE.md), [memory scopes](docs/EVOLUTION_SCOPES.md), and [Control Plane / distillation](docs/CONTROL_PLANE_AND_DISTILLATION.md).
 
 ## Install from source
 
