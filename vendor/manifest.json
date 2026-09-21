@@ -5,7 +5,7 @@
     "memory": {
       "path": "memory-core/src",
       "files": 193,
-      "sha256": "a21c5a216b6b7fe3661c26910989745d5a37cc10ad900cb3e12c016bbbacb5ea"
+      "sha256": "0c57f9b48e1e1120e8e3021e33de697546efea94b2b51a91a8718285a3d158ad"
     },
     "agentSource": {
       "path": "agent-source-core",

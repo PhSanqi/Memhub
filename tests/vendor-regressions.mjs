@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLlmClient } from "../vendor/memory-core/src/model/llm.js";
 import { memoryAddKey } from "../vendor/memory-core/src/service/import/memory-import-pipeline.js";
+import { PanelReadModel } from "../vendor/memory-core/src/service/read-model/panel-read.js";
 import { RuntimeRepository } from "../vendor/memory-core/src/storage/repositories.js";
 import { migrate } from "../vendor/memory-core/src/storage/schema.js";
 
@@ -14,9 +15,28 @@ try {
   testStableArtifactMemoryKey();
   testV7ToV8Migration();
   testRawTurnProjectFilter();
+  testPanelItemsProjectFilterPropagation();
   console.log("memhub-vendor-regressions: ok");
 } finally {
   await rm(root, { recursive: true, force: true });
+}
+
+function testPanelItemsProjectFilterPropagation() {
+  const seen = [];
+  const model = new PanelReadModel({
+    repos: {
+      memories: {
+        count(filter) { seen.push({ phase: "count", filter }); return 0; },
+        list(filter) { seen.push({ phase: "list", filter }); return []; }
+      },
+      processing: { get() { return undefined; } },
+      runtime: { latestChangeSeq() { return 0; } }
+    },
+    now: () => "2026-09-20T00:00:00.000Z"
+  });
+  const result = model.panelItems({ userId: "user-a", layer: "L1", projectIds: ["memhub"] });
+  assert.equal(result.total, 0);
+  assert.deepEqual(seen.map((entry) => entry.filter.projectIds), [["memhub"], ["memhub"]]);
 }
 
 function testRawTurnProjectFilter() {
