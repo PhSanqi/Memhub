@@ -58,7 +58,10 @@ if (!(Test-Path $MemoryEntry) -or !(Test-Path $McpEntry) -or !(Test-Path $Bridge
   throw "Build output is missing. Run without -SkipBuild or build Memory and Memhub first."
 }
 
-$MemoryToken = & $Node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))'
+$MemoryTokenBytes = New-Object byte[] 32
+$MemoryTokenRng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try { $MemoryTokenRng.GetBytes($MemoryTokenBytes) } finally { $MemoryTokenRng.Dispose() }
+$MemoryToken = -join ($MemoryTokenBytes | ForEach-Object { $_.ToString("x2") })
 $Config = @{
   memmyMemory = @{
     version = 1
@@ -122,10 +125,10 @@ set "MEMHUB_BRIDGE_HOME=$StateRoot"
 "$Node" "$BridgeEntry" serve --port 17861
 "@ | Set-Content -Encoding ASCII $BridgeLauncher
 
-try { & icacls.exe $StateRoot /inheritance:r /grant:r "$env:USERNAME:(OI)(CI)F" | Out-Null } catch {}
+try { & icacls.exe $StateRoot /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)F" | Out-Null } catch {}
 
 function Install-LogonTask([string]$Name, [string]$Launcher) {
-  & schtasks.exe /End /TN $Name 2>$null | Out-Null
+  & cmd.exe /c "schtasks.exe /End /TN $Name >NUL 2>&1" | Out-Null
   & schtasks.exe /Create /F /SC ONLOGON /TN $Name /TR ('"' + $Launcher + '"') | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Failed to create scheduled task $Name" }
   & schtasks.exe /Run /TN $Name | Out-Null

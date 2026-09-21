@@ -39,6 +39,10 @@ for (const edition of editions) {
   if (edition.path.endsWith(".sh")) {
     assert.match(source, /systemctl --user restart/, edition.path + ": reinstall must restart services onto the new runtime");
   } else {
+    assert.doesNotMatch(source, /\$Node -e .*randomBytes/, edition.path + ": Windows token generation must not depend on native node -e quoting");
+    assert.match(source, /RandomNumberGenerator/, edition.path + ": Windows token generation must use PowerShell/.NET crypto");
+    assert.match(source, /\$\(\$env:USERNAME\):\(OI\)\(CI\)F/, edition.path + ": Windows ACL grant must preserve the username");
+    assert.match(source, /cmd\.exe \/c ["']?schtasks\.exe \/End/, edition.path + ": missing prior scheduled tasks must be ignored idempotently");
     assert.match(source, /schtasks\.exe \/End/, edition.path + ": reinstall must stop an existing scheduled task before replacement");
     assert.match(source, /Failed to start scheduled task/, edition.path + ": scheduled-task restart failures must be surfaced");
   }
