@@ -151,7 +151,8 @@ WantedBy=default.target
 EOF_UNIT
 
 systemctl --user daemon-reload
-systemctl --user enable --now memhub-core.service memhub-local.service memhub-bridge.service
+systemctl --user enable memhub-core.service memhub-local.service memhub-bridge.service >/dev/null
+systemctl --user restart memhub-core.service memhub-local.service memhub-bridge.service
 
 echo "[memhub] Local Edition installed"
 echo "[memhub] MCP for plugins: http://127.0.0.1:17861/mcp"
