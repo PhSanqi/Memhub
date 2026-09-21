@@ -1,4 +1,6 @@
-import { getDistillationConfig, listDistillationJobs } from "./distillation-jobs.js";
+import { stat } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { getDistillationConfig, listDistillationJobs, type DistillationJob } from "./distillation-jobs.js";
 import { captureIndexStats } from "./capture.js";
 import { listL1Turns } from "./turn-log.js";
 import type { MemhubRuntime } from "./runtime.js";
@@ -21,6 +23,17 @@ export interface MemoryControlRequest {
   projects: ProjectDescriptor[];
   projectId?: string;
 }
+
+type ControlPlaneJob = Omit<DistillationJob, "evidence" | "result_content"> & {
+  evidence_count: number;
+};
+
+interface JobSummaryCacheEntry {
+  fingerprint: string;
+  items: ControlPlaneJob[];
+}
+
+const jobSummaryCache = new Map<string, JobSummaryCacheEntry>();
 
 export async function readMemoryControlData(input: MemoryControlRequest): Promise<unknown> {
   switch (input.kind) {
@@ -47,16 +60,23 @@ export async function readMemoryControlData(input: MemoryControlRequest): Promis
 async function overviewPayload(input: MemoryControlRequest): Promise<unknown> {
   const [l1, l2, l3, l4, skills, jobs] = await Promise.all([
     l1OverviewStats(input),
-    coreLayerPayload(input, "l2"),
-    coreLayerPayload(input, "l3"),
-    coreLayerPayload(input, "l4"),
+    coreLayerPayload(input, "l2", false),
+    coreLayerPayload(input, "l3", false),
+    coreLayerPayload(input, "l4", false),
     coreLayerPayload(input, "skills"),
-    listDistillationJobs(input.stateRoot, input.runtime.accountId)
+    listControlPlaneJobs(input.stateRoot, input.runtime.accountId)
   ]);
   const scopedProjects = input.projectId
     ? input.projects.filter((project) => project.projectId === input.projectId)
     : input.projects;
   const relevantJobs = jobs.filter((job) => !input.projectId || job.project_id === input.projectId);
+  const pendingTodos = scopedProjects.flatMap((project) => (project.todos ?? [])
+    .filter((todo) => todo.status === "pending")
+    .map((todo) => ({
+      ...todo,
+      project_id: project.projectId,
+      project_name: project.name || project.projectId
+    })));
   return {
     counts: {
       projects: scopedProjects.length,
@@ -64,7 +84,13 @@ async function overviewPayload(input: MemoryControlRequest): Promise<unknown> {
       L2: totalValue(l2),
       L3: totalValue(l3),
       L4: totalValue(l4),
-      Skill: totalValue(skills)
+      Skill: totalValue(skills),
+      pendingTodo: pendingTodos.length
+    },
+    todos: {
+      pending: pendingTodos,
+      total: pendingTodos.length,
+      projects: new Set(pendingTodos.map((todo) => todo.project_id)).size
     },
     l1: {
       complete: l1.counts.complete,
@@ -409,19 +435,39 @@ async function coreRawTurnStats(input: MemoryControlRequest, projectId: string |
 
 async function coreLayerPayload(
   input: MemoryControlRequest,
-  kind: "l2" | "l3" | "l4" | "skills"
+  kind: "l2" | "l3" | "l4" | "skills",
+  hydrateBody = true
 ): Promise<unknown> {
   const params = new URLSearchParams({
     limit: "100",
     userId: input.runtime.userId
   });
   if (input.projectId && kind !== "l4") params.set("projectId", input.projectId);
-  return input.runtime.memoryClient.viewerGet(`/api/v1/${kind}?${params.toString()}`);
+  const payload = objectRecord(await input.runtime.memoryClient.viewerGet(`/api/v1/${kind}?${params.toString()}`));
+  if (kind === "skills" || !hydrateBody) return payload;
+
+  const items = Array.isArray(payload.items) ? payload.items.map(objectRecord) : [];
+  const hydrated = await Promise.all(items.map(async (item) => {
+    const id = stringValue(item.id);
+    if (!id) return item;
+    try {
+      const detail = objectRecord(await input.runtime.memoryClient.viewerGet(`/api/v1/memory/${encodeURIComponent(id)}`));
+      const body = stringValue(detail.body);
+      return {
+        ...item,
+        ...(body ? { body } : {})
+      };
+    } catch {
+      // List metadata is still useful if a single detail read is temporarily unavailable.
+      return item;
+    }
+  }));
+  return { ...payload, items: hydrated };
 }
 
 async function processingPayload(input: MemoryControlRequest): Promise<unknown> {
   const [allJobs, config] = await Promise.all([
-    listDistillationJobs(input.stateRoot, input.runtime.accountId),
+    listControlPlaneJobs(input.stateRoot, input.runtime.accountId),
     getDistillationConfig(input.stateRoot)
   ]);
   const items = allJobs
@@ -439,6 +485,34 @@ async function processingPayload(input: MemoryControlRequest): Promise<unknown> 
   };
 }
 
+async function listControlPlaneJobs(stateRoot: string, accountId: string): Promise<ControlPlaneJob[]> {
+  const root = resolve(stateRoot);
+  const path = join(root, "distillation", "jobs.json");
+  let fingerprint = "missing";
+  try {
+    const info = await stat(path);
+    fingerprint = `${info.ino}:${info.size}:${info.mtimeMs}`;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+  }
+
+  const cacheKey = `${root}:${accountId}`;
+  const cached = jobSummaryCache.get(cacheKey);
+  if (cached?.fingerprint === fingerprint) return cached.items;
+
+  const jobs = await listDistillationJobs(stateRoot, accountId);
+  const items = jobs.map((job) => {
+    const { evidence: _evidence, result_content: _resultContent, ...rest } = job;
+    return {
+      ...rest,
+      evidence_refs: [...job.evidence_refs],
+      evidence_count: job.evidence_refs.length
+    };
+  });
+  jobSummaryCache.set(cacheKey, { fingerprint, items });
+  return items;
+}
+
 function projectPayload(projects: ProjectDescriptor[]): unknown {
   const items = projects.map((project) => ({
     id: project.projectId,
@@ -449,6 +523,9 @@ function projectPayload(projects: ProjectDescriptor[]): unknown {
     distilled_description: project.distilledDescription ?? null,
     description_evidence_refs: project.descriptionEvidenceRefs ?? [],
     description_updated_at: project.descriptionUpdatedAt ?? null,
+    todos: project.todos ?? [],
+    pending_todos: (project.todos ?? []).filter((todo) => todo.status === "pending"),
+    pending_todo_count: (project.todos ?? []).filter((todo) => todo.status === "pending").length,
     aliases: project.aliases,
     status: project.state,
     updated_at: project.updatedAt

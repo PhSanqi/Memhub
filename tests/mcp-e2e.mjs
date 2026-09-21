@@ -474,6 +474,10 @@ async function testLocalAdmin(memoryPort) {
     assert.match(workspaceHtml, /id="lang"/);
     assert.match(workspaceHtml, /localStorage\.memhubTheme/);
     assert.match(workspaceHtml, /localStorage\.memhubLang/);
+    assert.match(workspaceHtml, /function artifactBodyHtml/);
+    assert.match(workspaceHtml, /class="timeline-event"/);
+    assert.match(workspaceHtml, /__memhubAutoRefresh/);
+    assert.match(workspaceHtml, /load\(current,true\)/);
     assert.match(workspaceHtml, /data-theme="light"/);
     assert.match(workspaceHtml, /class="site-header"/);
     assert.match(workspaceHtml, /class="site-brand"/);
@@ -510,6 +514,24 @@ async function testLocalAdmin(memoryPort) {
       aliases: []
     });
     assert.equal(createBeta.status, 200);
+    const addAlphaTodo = await adminAction({ action: "add-project-todo", project: "ui-alpha", text: "Finish the pending Alpha task." });
+    assert.equal(addAlphaTodo.status, 200);
+    const alphaTodoPayload = await addAlphaTodo.json();
+    const alphaTodo = alphaTodoPayload.result.todos.find((todo) => todo.text === "Finish the pending Alpha task.");
+    assert.ok(alphaTodo);
+    assert.equal(alphaTodo.status, "pending");
+    const addBetaTodo = await adminAction({ action: "add-project-todo", project: "ui-beta", text: "Completed Beta history item." });
+    assert.equal(addBetaTodo.status, 200);
+    const betaTodoPayload = await addBetaTodo.json();
+    const betaTodo = betaTodoPayload.result.todos.find((todo) => todo.text === "Completed Beta history item.");
+    assert.ok(betaTodo);
+    const completeBetaTodo = await adminAction({ action: "set-project-todo-status", project: "ui-beta", todo_id: betaTodo.id, status: "done" });
+    assert.equal(completeBetaTodo.status, 200);
+    const reopenBetaTodo = await adminAction({ action: "set-project-todo-status", project: "ui-beta", todo_id: betaTodo.id, status: "pending" });
+    assert.equal(reopenBetaTodo.status, 200);
+    assert.equal((await reopenBetaTodo.json()).result.todos.find((todo) => todo.id === betaTodo.id)?.completedAt, undefined);
+    const recompleteBetaTodo = await adminAction({ action: "set-project-todo-status", project: "ui-beta", todo_id: betaTodo.id, status: "done" });
+    assert.equal(recompleteBetaTodo.status, 200);
     const rebuildBeta = await adminAction({ action: "queue-legacy-rebuild", project: "ui-beta" });
     assert.equal(rebuildBeta.status, 200);
     const rebuildPayload = await rebuildBeta.json();
@@ -556,6 +578,11 @@ async function testLocalAdmin(memoryPort) {
     const mergedTarget = projectsAfterPayload.items.find((item) => item.project_id === "ui-beta");
     assert.ok(mergedTarget);
     assert.ok(mergedTarget.aliases.includes("ui-alpha"));
+    assert.equal(mergedTarget.pending_todo_count, 1);
+    assert.deepEqual(mergedTarget.pending_todos.map((todo) => todo.text), ["Finish the pending Alpha task."]);
+    assert.equal(mergedTarget.todos.length, 2);
+    assert.equal(mergedTarget.todos.find((todo) => todo.id === betaTodo.id)?.status, "done");
+    assert.ok(mergedTarget.todos.find((todo) => todo.id === betaTodo.id)?.completedAt);
     assert.equal(projectsAfterPayload.items.some((item) => item.project_id === "ui-alpha"), false);
     assert.equal(projectsAfterPayload.items.some((item) => item.project_id === "ui-delete"), false);
     const userProjectMutation = await fetch(`http://127.0.0.1:${port}/memhub/user/action`, {
@@ -564,6 +591,12 @@ async function testLocalAdmin(memoryPort) {
       body: JSON.stringify({ action: "create-project", project: "forbidden-user-project", description: "must fail" })
     });
     assert.equal(userProjectMutation.status, 403);
+    const userTodoMutation = await fetch(`http://127.0.0.1:${port}/memhub/user/action`, {
+      method: "POST",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({ action: "add-project-todo", project: "ui-beta", text: "must fail" })
+    });
+    assert.equal(userTodoMutation.status, 403);
     const nonJsonAdminMutation = await fetch(`http://127.0.0.1:${port}/memhub/admin/action`, {
       method: "POST",
       headers: { authorization, "content-type": "text/plain" },
@@ -572,14 +605,24 @@ async function testLocalAdmin(memoryPort) {
     assert.equal(nonJsonAdminMutation.status, 415);
     const processingBefore = await fetch(`http://127.0.0.1:${port}/memhub/admin/api?kind=processing`, { headers: { authorization } });
     assert.equal(processingBefore.status, 200);
-    assert.deepEqual((await processingBefore.json()).config, { auto_enabled: false, turn_threshold: 8, idle_minutes: 30 });
+    const processingBeforePayload = await processingBefore.json();
+    assert.deepEqual(processingBeforePayload.config, { auto_enabled: false, turn_threshold: 8, idle_minutes: 30 });
+    assert.ok(processingBeforePayload.items.length >= 1);
+    assert.equal("evidence" in processingBeforePayload.items[0], false);
+    assert.equal("result_content" in processingBeforePayload.items[0], false);
+    assert.equal(typeof processingBeforePayload.items[0].evidence_count, "number");
     const updatePolicy = await adminAction({ action: "set-distillation-config", auto_enabled: true, turn_threshold: 12, idle_minutes: 45 });
     assert.equal(updatePolicy.status, 200);
     const processingAfter = await fetch(`http://127.0.0.1:${port}/memhub/admin/api?kind=processing`, { headers: { authorization } });
     assert.deepEqual((await processingAfter.json()).config, { auto_enabled: true, turn_threshold: 12, idle_minutes: 45 });
     const userOverview = await fetch(`http://127.0.0.1:${port}/memhub/user/api?kind=overview`, { headers: { authorization } });
     assert.equal(userOverview.status, 200);
-    assert.equal((await userOverview.json()).account.account_id, account.account_id);
+    const userOverviewPayload = await userOverview.json();
+    assert.equal(userOverviewPayload.account.account_id, account.account_id);
+    assert.equal(userOverviewPayload.counts.pendingTodo, 1);
+    assert.equal(userOverviewPayload.todos.total, 1);
+    assert.equal(userOverviewPayload.todos.projects, 1);
+    assert.deepEqual(userOverviewPayload.todos.pending.map((todo) => todo.text), ["Finish the pending Alpha task."]);
     const hiddenLegacyView = await fetch(`http://127.0.0.1:${port}/memhub/admin/api?kind=captures`, { headers: { authorization } });
     assert.equal(hiddenLegacyView.status, 400);
     const accountsView = await fetch(`http://127.0.0.1:${port}/memhub/admin/api?kind=accounts`, { headers: { authorization } });
@@ -923,6 +966,54 @@ async function testHttp(memoryPort) {
     assert.equal(replay.pending, 0);
     assert.equal(await countCaptureEvents(stateRoot), captureCountBaseline + 3);
 
+    const raceRoot = join(root, "bridge-race");
+    const raceQueue = new MemhubBridgeQueue(raceRoot);
+    const raceRequests = [];
+    let releaseFirstUpload;
+    let markFirstUploadStarted;
+    const firstUploadStarted = new Promise((resolveStarted) => { markFirstUploadStarted = resolveStarted; });
+    const firstUploadRelease = new Promise((resolveRelease) => { releaseFirstUpload = resolveRelease; });
+    const raceServer = createServer(async (request, response) => {
+      let raw = "";
+      for await (const chunk of request) raw += chunk;
+      raceRequests.push(JSON.parse(raw));
+      if (raceRequests.length === 1) {
+        markFirstUploadStarted();
+        await firstUploadRelease;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    const racePort = await freePort();
+    await new Promise((resolveListen) => raceServer.listen(racePort, "127.0.0.1", resolveListen));
+    try {
+      await saveBridgeConfig(raceRoot, {
+        captureEndpoint: `http://127.0.0.1:${racePort}/capture`,
+        deviceToken: createdDevice.token
+      });
+      const raceConfig = await (await import("../dist/bridge.js")).loadBridgeConfig(raceRoot);
+      const raceBase = {
+        event_id: "capture-queue-race",
+        host: "codex",
+        conversation_id: "capture-queue-race",
+        continuity_id: "capture-queue-race",
+        turn_id: "turn-race",
+        timestamp: "2026-09-18T08:00:00.000Z"
+      };
+      await raceQueue.enqueue({ ...raceBase, user_text: "user half", capture_status: "open" });
+      const firstFlush = raceQueue.flush(raceConfig);
+      await firstUploadStarted;
+      await raceQueue.enqueue({ ...raceBase, assistant_text: "assistant half", capture_status: "open" });
+      releaseFirstUpload();
+      assert.deepEqual(await firstFlush, { sent: 1, pending: 1 });
+      assert.deepEqual(await raceQueue.flush(raceConfig), { sent: 1, pending: 0 });
+      assert.equal(raceRequests.length, 2);
+      assert.equal(raceRequests[0].user_text, "user half");
+      assert.equal(raceRequests[1].assistant_text, "assistant half");
+    } finally {
+      await new Promise((resolveClose) => raceServer.close(resolveClose));
+    }
+
     await saveBridgeConfig(bridgeRoot, {
       mcpEndpoint: `http://127.0.0.1:${port}/mcp`,
       captureEndpoint: `http://127.0.0.1:${port}/memhub/capture`,
@@ -947,7 +1038,7 @@ async function testHttp(memoryPort) {
       try {
         await bridgeClient.connect(bridgeTransport);
         const bridgeTools = await bridgeClient.listTools();
-        assert.deepEqual(bridgeTools.tools.map((tool) => tool.name).sort(), ["memhub_distill", "memmy_context", "memmy_project", "memmy_project_list", "memmy_project_manage", "memmy_turn"]);
+        assert.deepEqual(bridgeTools.tools.map((tool) => tool.name).sort(), ["memhub_distill", "memhub_todo", "memmy_context", "memmy_project", "memmy_project_list", "memmy_project_manage", "memmy_turn"]);
         const bridgeContext = await bridgeClient.callTool({
           name: "memmy_context",
           arguments: { query: "continue through local bridge", project: "aide", conversation_id: "bridge-proxy-chat" }
@@ -1095,11 +1186,12 @@ function acceptIdempotent(body, operation, response) {
 
 async function exerciseClient(client, conversationId, stateRoot) {
   const listed = await client.listTools();
-  assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["memhub_distill", "memmy_context", "memmy_project", "memmy_project_list", "memmy_project_manage", "memmy_turn"]);
+  assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["memhub_distill", "memhub_todo", "memmy_context", "memmy_project", "memmy_project_list", "memmy_project_manage", "memmy_turn"]);
   assert.match(listed.tools.find((tool) => tool.name === "memmy_context")?.description ?? "", /conversation_id.*不要伪造|不要伪造.*conversation_id/);
   assert.match(listed.tools.find((tool) => tool.name === "memmy_project")?.description ?? "", /action=current.*没有 conversation_id 时不会报错/);
   assert.match(listed.tools.find((tool) => tool.name === "memmy_project_list")?.description ?? "", /description.*禁止盲目新建/);
   assert.match(listed.tools.find((tool) => tool.name === "memmy_project_manage")?.description ?? "", /action=plan.*明确授权.*action=execute/);
+  assert.match(listed.tools.find((tool) => tool.name === "memhub_todo")?.description ?? "", /Project Registry.*唯一事实源|唯一事实源.*Project Registry/);
   let projectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "AIDE" } })).content[0].text);
   if (!projectList.projects.some((project) => project.project === "aide")) {
     const createPlan = JSON.parse((await client.callTool({
@@ -1121,6 +1213,54 @@ async function exerciseClient(client, conversationId, stateRoot) {
   }
   assert.ok(projectList.projects.some((project) => project.project === "aide"));
   assert.equal(projectList.matches[0]?.project, "aide");
+  const baselineTodos = JSON.parse((await client.callTool({
+    name: "memhub_todo",
+    arguments: { action: "list", project: "aide", status: "all" }
+  })).content[0].text);
+  assert.equal(baselineTodos.project, "aide");
+  const baselinePendingCount = baselineTodos.pending_count;
+  const baselineTotalCount = baselineTodos.total;
+  const addedTodo = JSON.parse((await client.callTool({
+    name: "memhub_todo",
+    arguments: { action: "add", project: "AIDE", text: "Verify the dedicated MCP todo lifecycle." }
+  })).content[0].text);
+  assert.equal(addedTodo.ok, true);
+  assert.equal(addedTodo.project, "aide");
+  assert.equal(addedTodo.todo.status, "pending");
+  assert.equal(addedTodo.pending_count, baselinePendingCount + 1);
+  const pendingTodos = JSON.parse((await client.callTool({
+    name: "memhub_todo",
+    arguments: { action: "list", project: "aide" }
+  })).content[0].text);
+  assert.equal(pendingTodos.pending_count, baselinePendingCount + 1);
+  assert.ok(pendingTodos.todos.some((todo) => todo.id === addedTodo.todo.id));
+  const allTodosAfterAdd = JSON.parse((await client.callTool({
+    name: "memhub_todo",
+    arguments: { action: "list", project: "aide", status: "all" }
+  })).content[0].text);
+  assert.equal(allTodosAfterAdd.total, baselineTotalCount + 1);
+  const completedTodo = JSON.parse((await client.callTool({
+    name: "memhub_todo",
+    arguments: { action: "complete", project: "aide", todo_id: addedTodo.todo.id }
+  })).content[0].text);
+  assert.equal(completedTodo.todo.status, "done");
+  assert.ok(completedTodo.todo.completedAt);
+  assert.equal(completedTodo.pending_count, baselinePendingCount);
+  const reopenedTodo = JSON.parse((await client.callTool({
+    name: "memhub_todo",
+    arguments: { action: "reopen", project: "aide", todo_id: addedTodo.todo.id }
+  })).content[0].text);
+  assert.equal(reopenedTodo.todo.status, "pending");
+  assert.equal(reopenedTodo.todo.completedAt, undefined);
+  assert.equal(reopenedTodo.pending_count, baselinePendingCount + 1);
+  const accountTodos = JSON.parse((await client.callTool({
+    name: "memhub_todo",
+    arguments: { action: "list" }
+  })).content[0].text);
+  assert.equal(accountTodos.scope, "account");
+  assert.ok(accountTodos.projects.some((project) => project.project === "aide" && project.todos.some((todo) => todo.id === addedTodo.todo.id)));
+  const projectListWithTodo = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "AIDE" } })).content[0].text);
+  assert.equal(projectListWithTodo.projects.find((project) => project.project === "aide")?.pendingTodoCount, baselinePendingCount + 1);
   const currentWithoutConversation = JSON.parse((await client.callTool({
     name: "memmy_project",
     arguments: { action: "current" }
@@ -1292,6 +1432,40 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(unboundCommit.turn.status, "complete");
   assert.equal(unboundCommit.turn.ingested, true);
   assert.equal(unboundCommit.project_id, "aide");
+  const colonEventId = `codex:${conversationId}:colon-turn`;
+  await client.callTool({
+    name: "memmy_turn",
+    arguments: {
+      action: "open",
+      event_id: colonEventId,
+      conversation_id: conversationId,
+      continuity_id: conversationId,
+      project: "aide",
+      user_text: "Verify L1 evidence ids containing colons remain intact."
+    }
+  });
+  await client.callTool({
+    name: "memmy_turn",
+    arguments: {
+      action: "commit",
+      event_id: colonEventId,
+      conversation_id: conversationId,
+      continuity_id: conversationId,
+      assistant_text: "Colon-bearing L1 evidence remains resolvable."
+    }
+  });
+  const colonEvidenceDryRun = await client.callTool({
+    name: "memhub_distill",
+    arguments: {
+      kind: "l2",
+      scope: "project",
+      project: "aide",
+      content: "Colon-bearing L1 evidence is accepted without truncating its event id.",
+      evidence_refs: [`l1:${colonEventId}`],
+      dry_run: true
+    }
+  });
+  assert.equal(JSON.parse(colonEvidenceDryRun.content[0].text).dryRun, true);
   const syntheticBinding = JSON.parse((await client.callTool({
     name: "memmy_project",
     arguments: { action: "current", conversation_id: unboundCommit.turn.conversation_id }

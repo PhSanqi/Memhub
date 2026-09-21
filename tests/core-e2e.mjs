@@ -228,6 +228,10 @@ try {
   const owner = await addAccount(state, "owner", "owner@example.com");
   await assert.rejects(() => resolveCloudflareAccount(state, { sub: "unknown", email: "unknown@example.com" }), /允许列表/);
   assert.equal((await resolveCloudflareAccount(state, { sub: "owner-sub", email: "owner@example.com" })).account_id, owner.account_id);
+  const linkedStore = JSON.parse(await readFile(join(state, "accounts.json"), "utf8"));
+  assert.equal(linkedStore.accounts.owner.cloudflare.sub, "owner-sub");
+  assert.equal((await resolveCloudflareAccount(state, { sub: "owner-sub", email: "owner-renamed@example.com" })).account_id, owner.account_id);
+  assert.equal((await listAccounts(state)).find((item) => item.account_id === owner.account_id)?.cloudflare_email, "owner-renamed@example.com");
   await setAccountRole(state, owner.account_id, "admin");
   assert.equal((await listAccounts(state)).find((item) => item.account_id === owner.account_id)?.role, "admin");
 
