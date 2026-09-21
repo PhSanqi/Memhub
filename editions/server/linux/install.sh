@@ -107,7 +107,8 @@ WantedBy=default.target
 EOF_UNIT
 
 systemctl --user daemon-reload
-systemctl --user enable --now memhub-core.service memhub-server.service
+systemctl --user enable memhub-core.service memhub-server.service >/dev/null
+systemctl --user restart memhub-core.service memhub-server.service
 
 echo "[memhub] Server Edition installed on loopback"
 echo "[memhub] Origin MCP:     http://127.0.0.1:3001/memhub/mcp"
