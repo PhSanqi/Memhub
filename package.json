@@ -22,8 +22,10 @@
     "memory:repair": "node scripts/long-term-repair.mjs --apply",
     "state:audit": "node scripts/state-hygiene.mjs",
     "state:tidy": "node scripts/state-hygiene.mjs --apply",
-    "release:check": "node scripts/package-release.mjs --check",
-    "release:package": "node scripts/package-release.mjs",
+    "release:check": "node scripts/package-all-release.mjs --check",
+    "release:package": "node scripts/package-all-release.mjs",
+    "release:quick:check": "node scripts/package-release.mjs --check",
+    "release:quick:package": "node scripts/package-release.mjs",
     "release:complete:check": "node scripts/package-complete-release.mjs --check",
     "release:complete:package": "node scripts/package-complete-release.mjs"
   },

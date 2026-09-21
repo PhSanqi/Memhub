@@ -40,6 +40,41 @@ jobs:
       - name: Run Complete package with bundled Node only
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Stop'
+          function Wait-Port([int]$Port, [int]$Seconds = 30) {
+            $deadline = (Get-Date).AddSeconds($Seconds)
+            while ((Get-Date) -lt $deadline) {
+              $client = New-Object System.Net.Sockets.TcpClient
+              try {
+                $iar = $client.BeginConnect('127.0.0.1', $Port, $null, $null)
+                if ($iar.AsyncWaitHandle.WaitOne(500) -and $client.Connected) {
+                  $client.EndConnect($iar)
+                  return
+                }
+              } catch {} finally { $client.Dispose() }
+              Start-Sleep -Milliseconds 500
+            }
+            throw "Port $Port did not become ready"
+          }
+          function Remove-TestTasks([string[]]$Names) {
+            foreach ($name in $Names) {
+              & schtasks.exe /End /TN $name 2>$null | Out-Null
+              & schtasks.exe /Delete /F /TN $name 2>$null | Out-Null
+            }
+          }
+          function Wait-PortClosed([int]$Port, [int]$Seconds = 20) {
+            $deadline = (Get-Date).AddSeconds($Seconds)
+            while ((Get-Date) -lt $deadline) {
+              $client = New-Object System.Net.Sockets.TcpClient
+              try {
+                $iar = $client.BeginConnect('127.0.0.1', $Port, $null, $null)
+                if (-not ($iar.AsyncWaitHandle.WaitOne(300) -and $client.Connected)) { return }
+              } catch { return } finally { $client.Dispose() }
+              Start-Sleep -Milliseconds 500
+            }
+            throw "Port $Port remained open after cleanup"
+          }
+
           $zip = Get-ChildItem "$env:RUNNER_TEMP\memhub-complete-artifact\memhub-*-windows-complete.zip" | Select-Object -First 1
           if (-not $zip) { throw "Windows Complete artifact missing" }
           $extract = Join-Path $env:RUNNER_TEMP 'memhub-complete-extract'
@@ -55,3 +90,37 @@ jobs:
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
           & (Join-Path $root.FullName 'install-complete.ps1') -PrepareOnly
           if ($LASTEXITCODE -ne 0) { throw "Complete prepare-only smoke failed" }
+
+          $localState = Join-Path $env:RUNNER_TEMP 'memhub-complete-local-state'
+          try {
+            & (Join-Path $root.FullName 'install-complete.ps1') -Edition local -StateRoot $localState
+            Wait-Port 18960
+            Wait-Port 3001
+            Wait-Port 17861
+            $status = Invoke-RestMethod -Uri 'http://127.0.0.1:17861/status' -TimeoutSec 10
+            if (-not $status) { throw 'Bridge status endpoint returned no data' }
+            Write-Host '[memhub] Windows Complete Local install smoke PASS'
+          } finally {
+            Remove-TestTasks @('Memhub-Bridge','Memhub-Local','Memhub-Memory')
+            Start-Sleep -Seconds 2
+            if (Test-Path $localState) { Remove-Item -Recurse -Force $localState }
+          }
+          Wait-PortClosed 17861
+          Wait-PortClosed 3001
+          Wait-PortClosed 18960
+
+          $serverState = Join-Path $env:RUNNER_TEMP 'memhub-complete-server-state'
+          try {
+            & (Join-Path $root.FullName 'install-complete.ps1') -Edition server -StateRoot $serverState -Username owner
+            Wait-Port 18960
+            Wait-Port 3001
+            Write-Host '[memhub] Windows Complete Server install smoke PASS'
+          } finally {
+            Remove-TestTasks @('Memhub-Server','Memhub-Server-Memory')
+            Start-Sleep -Seconds 2
+            if (Test-Path $serverState) { Remove-Item -Recurse -Force $serverState }
+          }
+          Wait-PortClosed 3001
+          Wait-PortClosed 18960
+
+          if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
