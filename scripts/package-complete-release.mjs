@@ -319,7 +319,9 @@ function portableInvocation(command, args) {
 }
 
 function runPowerShell(script, args = []) {
-  run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, ...args]);
+  const encodedArgs = args.map((value) => `'${String(value).replaceAll("'", "''")}'`).join(" ");
+  const command = `& { ${script} }${encodedArgs ? ` ${encodedArgs}` : ""}`;
+  run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command]);
 }
 
 async function hashFile(path) {
