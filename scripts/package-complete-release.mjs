@@ -311,7 +311,8 @@ function run(command, args, options = {}) {
 
 function portableInvocation(command, args) {
   if (process.platform === "win32" && command === "npm") {
-    const npmExecPath = process.env.npm_execpath?.trim();
+    const bundledNpmCli = join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+    const npmExecPath = process.env.npm_execpath?.trim() || (existsSync(bundledNpmCli) ? bundledNpmCli : "");
     if (npmExecPath) return { command: process.execPath, args: [npmExecPath, ...args] };
   }
   return { command, args };
