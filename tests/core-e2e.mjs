@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   addAccount,
   listAccounts,
@@ -15,12 +17,32 @@ import { ContextRouter } from "../dist/context-router.js";
 import { assertLoopbackMemoryEndpoint } from "../dist/local-memory-client.js";
 import { MemoryRestContextSource } from "../dist/memory-source.js";
 import { resolveProjectScope } from "../dist/project-scope.js";
-import { createDevice, normalizeCaptureEvent } from "../dist/capture.js";
+import { countCaptureEvents, createDevice, listCaptureEvents, normalizeCaptureEvent } from "../dist/capture.js";
+import { enqueueDerivedDistillationJob, listDistillationJobs } from "../dist/distillation-jobs.js";
 import { EmbeddedMemoryCore } from "../dist/embedded-memory-core.js";
 import { JsonProjectRegistry, projectSimilarity } from "../dist/project-registry.js";
 
 const root = await mkdtemp(join(tmpdir(), "memhub-core-"));
 const state = join(root, "state");
+const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
+
+function runNodeEval(code, args) {
+  return new Promise((resolveRun, rejectRun) => {
+    const child = spawn(process.execPath, ["--input-type=module", "-e", code, ...args], {
+      cwd: repoRoot,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.once("error", rejectRun);
+    child.once("exit", (code) => {
+      if (code === 0) resolveRun(stdout.trim());
+      else rejectRun(new Error(stderr || `child process exited with ${code}`));
+    });
+  });
+}
 
 try {
   assert.equal(resolveProjectScope({}).recallScope, "global_only");
@@ -39,6 +61,61 @@ try {
   assert.equal(capsule.globalMemory.length, 1);
   assert.equal(capsule.projectMemory.length, 0);
   assert.equal(capsule.reusableSkills.length, 1);
+  assert.equal(capsule.contextBudget.truncatedItems, 0);
+
+  const provenanceSource = new MemoryRestContextSource({
+    async search(request) {
+      if (request.layers?.includes("L4")) {
+        return {
+          debug: {
+            hits: [{
+              id: "provenance-cap",
+              kind: "user_profile",
+              memoryLayer: "L4",
+              status: "activated",
+              snippet: "bounded provenance",
+              score: 0.9,
+              tags: ["global", ...Array.from({ length: 80 }, (_, index) => `evidence:${index}`)],
+              source: "search",
+              retrievalRoutes: Array.from({ length: 40 }, (_, index) => `route-${index}`)
+            }]
+          }
+        };
+      }
+      return { debug: { hits: [] } };
+    }
+  });
+  const provenanceRecall = await provenanceSource.recall({
+    accountId: "acct",
+    userId: "user",
+    query: "bounded provenance",
+    projectId: null,
+    limit: 4
+  });
+  assert.equal(provenanceRecall.globalMemory[0].provenance.tags.length, 32);
+  assert.equal(provenanceRecall.globalMemory[0].provenance.tagsTruncated, true);
+  assert.equal(provenanceRecall.globalMemory[0].provenance.originalTagCount, 81);
+  assert.equal(provenanceRecall.globalMemory[0].provenance.retrievalRoutes.length, 16);
+
+  const largeCapsule = buildContextCapsule({
+    accountId: "acct",
+    resolution: resolveProjectScope({ workspaceProjectId: "aide" }),
+    maxContentBytes: 24_000,
+    maxItemContentBytes: 8_000,
+    globalMemory: [{ id: "large-global", content: "全".repeat(20_000), authority: "remembered", scope: "global", source: "test" }],
+    projectMemory: [{ id: "large-project", content: "项".repeat(20_000), authority: "remembered", scope: "project", source: "test", projectId: "aide" }],
+    reusableSkills: [{ id: "large-skill", content: "技".repeat(20_000), authority: "remembered", scope: "capability", source: "test", projectId: "aide" }],
+    projectArchitecture: [{ id: "large-arch", content: "架".repeat(20_000), authority: "authoritative", scope: "project", source: "test", projectId: "aide" }]
+  });
+  assert.ok(largeCapsule.globalMemory.length >= 1);
+  assert.ok(largeCapsule.projectMemory.length >= 1);
+  assert.ok(largeCapsule.reusableSkills.length >= 1);
+  assert.ok(largeCapsule.contextBudget.emittedContentBytes <= largeCapsule.contextBudget.maxContentBytes);
+  assert.ok(largeCapsule.contextBudget.truncatedItems >= 3);
+  for (const item of [...largeCapsule.globalMemory, ...largeCapsule.projectMemory, ...largeCapsule.reusableSkills]) {
+    assert.equal(item.provenance?.contextTruncated, true);
+    assert.match(item.content, /truncated by Memhub context budget/);
+  }
 
   assert.doesNotThrow(() => assertLoopbackMemoryEndpoint("http://127.0.0.1:18960"));
   assert.doesNotThrow(() => assertLoopbackMemoryEndpoint("http://[::1]:18960"));
@@ -171,6 +248,108 @@ try {
   assert.equal((await router.context({ accountId: "acct", userId: "user", query: "转到 memmy", conversationId: "chat", projectId: "memmy", knownProjectIds: ["aide", "memmy"] })).resolvedProjectId, "memmy");
   assert.deepEqual(calls, ["aide", "aide", "memmy", "memmy", "aide", "memmy"]);
 
+  const concurrentBindingPath = join(root, "concurrent-bindings.json");
+  const concurrentBindingStores = Array.from(
+    { length: 32 },
+    () => new JsonConversationProjectBindingStore(concurrentBindingPath)
+  );
+  await Promise.all(concurrentBindingStores.map((store, index) =>
+    store.bind("acct", `parallel-chat-${index}`, `parallel-project-${index}`)
+  ));
+  const concurrentBindings = JSON.parse(await readFile(concurrentBindingPath, "utf8"));
+  assert.equal(concurrentBindings.bindings.length, 32);
+
+  const crossProcessBindingPath = join(root, "cross-process-bindings.json");
+  await Promise.all(Array.from({ length: 8 }, (_, index) => runNodeEval(
+    "import { JsonConversationProjectBindingStore } from './dist/binding-store.js'; await new JsonConversationProjectBindingStore(process.argv[1]).bind('acct', process.argv[2], process.argv[3]);",
+    [crossProcessBindingPath, `cross-chat-${index}`, `cross-project-${index}`]
+  )));
+  const crossProcessBindings = JSON.parse(await readFile(crossProcessBindingPath, "utf8"));
+  assert.equal(crossProcessBindings.bindings.length, 8);
+
+  const crashedRegistryPath = join(root, "crashed-project-registry.json");
+  await writeFile(`${crashedRegistryPath}.lock`, JSON.stringify({
+    token: "crashed-owner",
+    pid: 99999999,
+    host: hostname(),
+    createdAt: new Date().toISOString()
+  }) + "\n");
+  const crashedRegistry = new JsonProjectRegistry(crashedRegistryPath);
+  await crashedRegistry.create("acct", { projectId: "recovered", description: "Dead local lock recovery regression." });
+  assert.equal((await crashedRegistry.list("acct"))[0]?.projectId, "recovered");
+
+  const concurrentCaptureRoot = join(root, "cross-process-captures");
+  await Promise.all(Array.from({ length: 8 }, (_, index) => runNodeEval(
+    "import { storeCaptureEvent } from './dist/capture.js'; const i=process.argv[2]; await storeCaptureEvent(process.argv[1], { device_id:'probe-device', account_id:'acct' }, { event_id:'capture-'+i, host:'probe', conversation_id:'capture-conv-'+i, continuity_id:'capture-conv-'+i, timestamp:'2026-09-22T00:00:00.000Z', project_hint:'memhub', user_text:'user-'+i, assistant_text:'assistant-'+i, capture_status:'complete' });",
+    [concurrentCaptureRoot, String(index)]
+  )));
+  assert.equal(await countCaptureEvents(concurrentCaptureRoot), 8);
+
+  const sameCaptureRoot = join(root, "cross-process-same-capture");
+  const sameCaptureArgs = [sameCaptureRoot, "same-event", "same-conversation"];
+  await Promise.all([
+    runNodeEval(
+      "import { storeCaptureEvent } from './dist/capture.js'; await storeCaptureEvent(process.argv[1], { device_id:'probe-device', account_id:'acct' }, { event_id:process.argv[2], host:'probe', conversation_id:process.argv[3], continuity_id:process.argv[3], timestamp:'2026-09-22T00:00:00.000Z', project_hint:'memhub', user_text:'user-half', capture_status:'partial' });",
+      sameCaptureArgs
+    ),
+    runNodeEval(
+      "import { storeCaptureEvent } from './dist/capture.js'; await storeCaptureEvent(process.argv[1], { device_id:'probe-device', account_id:'acct' }, { event_id:process.argv[2], host:'probe', conversation_id:process.argv[3], continuity_id:process.argv[3], timestamp:'2026-09-22T00:00:00.000Z', project_hint:'memhub', assistant_text:'assistant-half', capture_status:'partial' });",
+      sameCaptureArgs
+    )
+  ]);
+  const sameCapture = (await listCaptureEvents(sameCaptureRoot, "acct", { limit: 2 }))[0];
+  assert.equal(sameCapture.user_text, "user-half");
+  assert.equal(sameCapture.assistant_text, "assistant-half");
+  assert.equal(sameCapture.capture_status, "complete");
+
+  const concurrentDistillationRoot = join(root, "cross-process-distillation");
+  await Promise.all(Array.from({ length: 8 }, (_, index) => runNodeEval(
+    "import { enqueueDerivedDistillationJob } from './dist/distillation-jobs.js'; const i=process.argv[2]; await enqueueDerivedDistillationJob({ stateRoot:process.argv[1], accountId:'acct', target:'l3', projectId:'memhub', evidence:[{ ref:'artifact:'+i, kind:'artifact', timestamp:'2026-09-22T00:00:00.000Z', project_id:'memhub', layer:'L2', content:'evidence-'+i }] });",
+    [concurrentDistillationRoot, String(index)]
+  )));
+  assert.equal((await listDistillationJobs(concurrentDistillationRoot, "acct")).length, 8);
+
+  const leaseRoot = join(root, "cross-process-lease");
+  const seededLeaseJob = await enqueueDerivedDistillationJob({
+    stateRoot: leaseRoot,
+    accountId: "acct",
+    target: "l3",
+    projectId: "memhub",
+    evidence: [{
+      ref: "artifact:lease-one",
+      kind: "artifact",
+      timestamp: "2026-09-22T00:00:00.000Z",
+      project_id: "memhub",
+      layer: "L2",
+      content: "single lease evidence"
+    }]
+  });
+  const leaseResults = await Promise.all(Array.from({ length: 8 }, (_, index) => runNodeEval(
+    "import { leaseDistillationJob } from './dist/distillation-jobs.js'; const job=await leaseDistillationJob(process.argv[1], 'acct', { projectId:'memhub', target:'l3', harness:process.argv[2] }); console.log(job?.job_id ?? 'null');",
+    [leaseRoot, `lease-harness-${index}`]
+  )));
+  const leasedIds = leaseResults.filter((value) => value !== "null");
+  assert.deepEqual(leasedIds, [seededLeaseJob.job.job_id]);
+
+  const concurrentBridgeRoot = join(root, "cross-process-bridge");
+  const bridgeBaseArgs = [concurrentBridgeRoot, "bridge-race-event", "bridge-race-conv"];
+  await Promise.all([
+    runNodeEval(
+      "import { MemhubBridgeQueue } from './dist/bridge.js'; await new MemhubBridgeQueue(process.argv[1]).enqueue({ event_id:process.argv[2], host:'probe', conversation_id:process.argv[3], continuity_id:process.argv[3], timestamp:'2026-09-22T00:00:00.000Z', user_text:'user-half', capture_status:'partial' });",
+      bridgeBaseArgs
+    ),
+    runNodeEval(
+      "import { MemhubBridgeQueue } from './dist/bridge.js'; await new MemhubBridgeQueue(process.argv[1]).enqueue({ event_id:process.argv[2], host:'probe', conversation_id:process.argv[3], continuity_id:process.argv[3], timestamp:'2026-09-22T00:00:00.000Z', assistant_text:'assistant-half', capture_status:'partial' });",
+      bridgeBaseArgs
+    )
+  ]);
+  const bridgeQueueFiles = (await readdir(join(concurrentBridgeRoot, "queue"))).filter((name) => name.endsWith(".json"));
+  assert.equal(bridgeQueueFiles.length, 1);
+  const bridgedRaceEvent = JSON.parse(await readFile(join(concurrentBridgeRoot, "queue", bridgeQueueFiles[0]), "utf8"));
+  assert.equal(bridgedRaceEvent.user_text, "user-half");
+  assert.equal(bridgedRaceEvent.assistant_text, "assistant-half");
+  assert.equal(bridgedRaceEvent.capture_status, "complete");
+
   const projectRegistry = new JsonProjectRegistry(join(state, "project-registry.json"));
   const reconciled = await projectRegistry.reconcile("acct", [
     "oursmemory", "OursMemory", "Memhub", "memhub", "DevSpaceControl"
@@ -195,6 +374,16 @@ try {
   await projectRegistry.create("acct", { projectId: "throwaway", description: "Disposable test project." });
   await projectRegistry.delete("acct", "throwaway");
   assert.equal(await projectRegistry.resolve("acct", "throwaway"), null);
+
+  const concurrentRegistryPath = join(root, "concurrent-project-registry.json");
+  const concurrentRegistry = new JsonProjectRegistry(concurrentRegistryPath);
+  await concurrentRegistry.create("acct", { projectId: "memhub", description: "Concurrency regression fixture." });
+  const concurrentRegistries = Array.from({ length: 32 }, () => new JsonProjectRegistry(concurrentRegistryPath));
+  await Promise.all(concurrentRegistries.map((registry, index) =>
+    registry.addTodo("acct", "memhub", `parallel-todo-${index}`)
+  ));
+  const concurrentProject = (await concurrentRegistry.list("acct")).find((item) => item.projectId === "memhub");
+  assert.equal(concurrentProject?.todos?.length, 32);
 
   const aliasCalls = [];
   const aliasMemory = {

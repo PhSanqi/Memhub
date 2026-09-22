@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.2.2 — 2026-09-22
+
+Memhub 0.2.2 focuses on runtime stability, concurrent-state safety, bounded long-context transport, and self-contained installation packages.
+
+### Stability and concurrency
+
+- Shared JSON read-modify-write stores now use path-scoped in-process and cross-process locks; project bindings, todos, device/account state, capture metadata, distillation jobs, and Bridge queue updates have concurrent regression coverage.
+- L1 checkpoint summaries can advance while a turn is incomplete, while completed source evidence remains immutable.
+- Project/workspace scope is explicit across the primary project-scoped MCP tools; current workspace evidence outranks stale conversation bindings and conflicting scope is rejected.
+- Project merge/delete now respects distillation-job lifecycle. Pending, leased, or failed jobs prevent project deletion; historical project aliases remain valid provenance after merge.
+- `npm run stability:check` records typecheck, full tests, state audit, core check, and release checks under the private Memhub diagnostics directory.
+
+### Long content and network transport
+
+- JSON HTTP bodies are limited by UTF-8 byte size with explicit `400 invalid_json_body` and `413 request_body_too_large` errors.
+- Bridge MCP/context/lifecycle responses stream with backpressure; upstream timeout and connection failures are classified separately.
+- `memmy_context` now exposes a bounded host-facing view instead of allowing one oversized memory or architecture document to expand the tool response without limit.
+- Large distillation evidence supports incremental `evidence_offset` / `evidence_chunk_chars` reads under the same job lease.
+- Memhub and Bridge HTTP origins use longer keepalive intervals aligned with Cloudflare Tunnel origin connection reuse, and Memhub exposes a minimal health endpoint.
+- `npm run network:check` inspects origin/public health plus available cloudflared Prometheus metrics without requiring Cloudflare account API access.
+
+### Complete packages
+
+- Linux Complete and Windows Complete packages bundle the target-OS Node.js runtime, production `node_modules`, and prebuilt Memhub output.
+- One Complete archive supports both Local and Server installation and does not require Node/npm on the destination host.
+- Complete artifacts are built natively on their target operating system so native modules such as `better-sqlite3` match the host ABI.
+- Existing `install.sh` / `install.ps1` remain the convenience/source installation path.
+
 ## v0.2.0 — 2026-09-20
 
 Memhub 0.2.0 is the first unified L1-L4 release. The same source commit ships Server and Local editions on Linux and Windows.

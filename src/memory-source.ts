@@ -267,6 +267,9 @@ function dedupeHits(hits: readonly RecallHit[]): RecallHit[] {
 
 function contextItemFromHit(hit: RecallHit, scope: "global" | "project" | "capability", projectId?: string): ContextItem {
   const content = hit.title?.trim() ? `${hit.title.trim()}\n${hit.snippet}` : hit.snippet;
+  const tags = hit.tags.slice(0, 32);
+  const allRetrievalRoutes = hit.retrievalRoutes ?? [];
+  const retrievalRoutes = allRetrievalRoutes.slice(0, 16);
   return {
     id: hit.id,
     content,
@@ -280,9 +283,13 @@ function contextItemFromHit(hit: RecallHit, scope: "global" | "project" | "capab
       kind: hit.kind,
       memoryLayer: hit.memoryLayer,
       score: hit.score,
-      tags: hit.tags,
+      tags,
+      ...(hit.tags.length > tags.length ? { tagsTruncated: true, originalTagCount: hit.tags.length } : {}),
       retrievalSource: hit.source,
-      retrievalRoutes: hit.retrievalRoutes
+      retrievalRoutes,
+      ...(allRetrievalRoutes.length > retrievalRoutes.length
+        ? { retrievalRoutesTruncated: true, originalRetrievalRouteCount: allRetrievalRoutes.length }
+        : {})
     }
   };
 }

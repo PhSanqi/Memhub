@@ -1,6 +1,6 @@
 {
   "name": "memhub",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -22,8 +22,14 @@
     "memory:repair": "node scripts/long-term-repair.mjs --apply",
     "state:audit": "node scripts/state-hygiene.mjs",
     "state:tidy": "node scripts/state-hygiene.mjs --apply",
+    "stability:check": "node scripts/stability-check.mjs",
+    "network:check": "node scripts/cloudflare-health.mjs",
     "release:check": "node scripts/package-release.mjs --check",
-    "release:package": "node scripts/package-release.mjs"
+    "release:package": "node scripts/package-release.mjs",
+    "release:complete:check": "node scripts/package-complete-release.mjs --check --worktree",
+    "release:complete": "node scripts/package-complete-release.mjs --worktree",
+    "release:all": "node scripts/package-all-release.mjs --worktree",
+    "review:web": "node scripts/render-web-review.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.0",

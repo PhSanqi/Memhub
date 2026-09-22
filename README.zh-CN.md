@@ -104,6 +104,11 @@ Web 界面会直接把 L2 展示成时间流，把 L3/L4 展示成可读条目�
 
 Memhub 提供 **Local Edition** 和 **Server Edition**，Linux / Windows 都支持。
 
+Release 同时提供两条安装路径：
+
+- **完整安装版（Complete）**：内置目标系统对应的 Node.js runtime、生产依赖和预构建 Memhub，不要求预先安装 Node/npm。
+- **便捷/源码安装版**：使用仓库里的 `install.sh` / `install.ps1`，必要时在目标机器安装依赖并完成 build。
+
 | 你想要的体验 | 推荐 |
 | --- | --- |
 | 只在这一台电脑使用 | **Local Edition** |
@@ -116,6 +121,20 @@ Memhub 提供 **Local Edition** 和 **Server Edition**，Linux / Windows 都支�
 ### Local Edition
 
 所有内容都运行在本机，默认只监听 loopback。
+
+Linux Complete：
+
+~~~bash
+bash install-complete.sh --edition local
+~~~
+
+Windows Complete：
+
+~~~powershell
+powershell -ExecutionPolicy Bypass -File .\install-complete.ps1 -Edition local
+~~~
+
+便捷/源码安装：
 
 Linux：
 
@@ -145,6 +164,20 @@ Local Edition 适合个人单机长期使用，不需要 VPS，也不需要 Clou
 
 Server Edition 把长期记忆集中到你自己的服务器，各设备通过自己的身份连接同一个账号。
 
+Linux Complete：
+
+~~~bash
+bash install-complete.sh --edition server --public-host memory.example.com
+~~~
+
+Windows Complete：
+
+~~~powershell
+powershell -ExecutionPolicy Bypass -File .\install-complete.ps1 -Edition server -PublicHost memory.example.com
+~~~
+
+便捷/源码安装：
+
 Linux Server：
 
 ~~~bash
@@ -167,6 +200,7 @@ Server 默认仍只监听 loopback。公网入口建议放在 Cloudflare Access 
 
 - [Local Edition](editions/local/README.zh-CN.md)
 - [Server Edition](editions/server/README.zh-CN.md)
+- [Release 与 Complete 包](docs/EDITIONS.md)
 - [Release Packages](https://github.com/PhSanqi/Memhub/releases)
 
 ---

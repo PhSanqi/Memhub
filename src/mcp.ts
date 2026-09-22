@@ -65,8 +65,9 @@ import {
 } from "./memory-control-plane.js";
 import { queueLegacyLayerRebuild } from "./legacy-rebuild.js";
 import { recentL1Continuity, upsertL1Turn } from "./turn-log.js";
+import { asHttpJsonBodyError, readJsonBody } from "./http-json.js";
 
-const VERSION = "0.2.0";
+const VERSION = "0.2.2";
 const projectMutationAuthorizations = new Map<string, {
   accountId: string;
   operation: "create" | "update" | "delete" | "merge";
@@ -85,7 +86,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   const server = new McpServer({
     name: "memhub",
     version: VERSION,
-    description: "Private account/project-scoped long-term memory and project routing. Whenever Memhub is explicitly mentioned or invoked, first call memmy_context with the current request and a stable conversation_id when the Harness exposes one. If a stable conversation_id is available, memmy_project action=current may verify the persisted conversation binding; if the transport does not expose one, do not invent an ID—use memmy_context.resolvedProjectId plus current-turn explicit project/workspace evidence. If a project name is unknown, case-variant, or merely similar, call memmy_project_list and compare canonical slug, aliases, and description before creating/binding; never guess a project. Project mutations use memmy_project_manage plan -> explicit user authorization -> execute. Project todos are first-class state: use memhub_todo to list/add/complete/reopen them instead of encoding todo state in architecture text or project descriptions. Current-turn explicit project/workspace evidence overrides stale conversation binding. Before the final answer, persist only genuinely durable new facts/decisions/preferences/corrections rather than raw chat noise."
+    description: "Private account/project-scoped long-term memory and project routing. Whenever Memhub is explicitly mentioned or invoked, first call memmy_context with the current request and the current workspace_project/project evidence; include a stable conversation_id when the Harness exposes one. Project-scoped tools should carry workspace_project or project from the current turn. A conversation binding is only a fallback when current-turn workspace/project evidence is unavailable. If explicit project and workspace_project disagree after canonical resolution, Memhub rejects the operation instead of guessing. If the transport does not expose a stable conversation_id, do not invent one. If a project name is unknown, case-variant, or merely similar, call memmy_project_list and compare canonical slug, aliases, and description before creating/binding. Project mutations use memmy_project_manage plan -> explicit user authorization -> execute. Project todos are first-class state. Before the final answer, persist only genuinely durable new facts/decisions/preferences/corrections rather than raw chat noise."
   });
 
   server.registerTool("memmy_turn", {
@@ -100,6 +101,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         turn_id: { type: "string", description: "Harness 原生 turn id；有稳定 turn id 时可替代 event_id 做幂等定位" },
         previous_event_id: { type: "string", description: "显式前序 L1 event id" },
         project: { type: "string", description: "明确 canonical project；省略时使用 conversation binding" },
+        workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 不一致时拒绝写入" },
         user_text: { type: "string" },
         assistant_text: { type: "string" },
         reasoning_summary: { type: "string", description: "可公开审计的简短推理/决策摘要，不得包含隐藏 chain-of-thought" },
@@ -129,13 +131,11 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       });
     }
 
-    const explicitProject = optionalString(args.project);
-    let projectId: string | undefined;
-    if (explicitProject) {
-      await knownProjectRecords(runtime);
-      projectId = await runtime.projects.resolve(runtime.accountId, explicitProject) ?? undefined;
-      if (!projectId) throw new Error(`unknown project: ${explicitProject}`);
-    }
+    const projectEvidence = await resolveExplicitProjectEvidence(runtime, {
+      project: optionalString(args.project),
+      workspaceProject: optionalString(args.workspace_project)
+    });
+    const projectId = projectEvidence.projectId ?? undefined;
 
     const eventId = optionalString(args.event_id);
     const turnId = optionalString(args.turn_id);
@@ -321,6 +321,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         content: { type: "string", description: "完整目标层内容" },
         scope: { type: "string", enum: ["account", "project"], description: "L2/L3 必须 project；L4 必须 account；Skill 可两者。" },
         project: { type: "string", description: "project scope 的明确项目 slug" },
+        workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 不一致时拒绝项目级操作" },
         conversation_id: { type: "string", description: "可继承已绑定项目；不会跨项目猜测" },
         title: { type: "string", description: "可选标题；Skill 必填" },
         tags: { type: "array", items: { type: "string" } },
@@ -333,6 +334,8 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         ,confidence: { type: "number", minimum: 0, maximum: 1 }
         ,job_id: { type: "string", description: "提交通过 next 或 Control Plane 领取的 distillation job" }
         ,lease_seconds: { type: "integer", minimum: 30, maximum: 900 }
+        ,evidence_offset: { type: "integer", minimum: 0, description: "大 evidence job 分片读取偏移；action=next + job_id 时继续读取同一 lease" }
+        ,evidence_chunk_chars: { type: "integer", minimum: 10000, maximum: 200000, description: "大 evidence 每次最多返回字符数；默认 120000" }
         ,inspect_contract: { type: "boolean", description: "只返回 Memhub 蒸馏规则，不写入任何内容" }
         ,dry_run: { type: "boolean", description: "按当前契约校验候选与 scope，但不写入 Memory Core" }
       },
@@ -344,6 +347,23 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     const action = optionalString(args.action);
     const sourceHarness = optionalString(args.source_harness) ?? runtime.source.platform ?? "mcp-harness";
     if (action === "next") {
+      const requestedJobId = optionalString(args.job_id);
+      const evidenceOffset = optionalInteger(args.evidence_offset) ?? 0;
+      const evidenceChunkChars = optionalInteger(args.evidence_chunk_chars) ?? 120_000;
+      if (evidenceOffset < 0) throw new TypeError("evidence_offset must be non-negative");
+      if (evidenceChunkChars < 10_000 || evidenceChunkChars > 200_000) {
+        throw new TypeError("evidence_chunk_chars must be between 10000 and 200000");
+      }
+      if (requestedJobId) {
+        const job = (await listDistillationJobs(stateRoot, runtime.accountId)).find((item) => item.job_id === requestedJobId);
+        if (!job) throw new Error("distillation job not found for account");
+        assertActiveDistillationLease(job, sourceHarness);
+        const requestedKind = optionalString(args.kind);
+        if (requestedKind && requestedKind !== job.target) throw new Error(`distillation target mismatch: job expects ${job.target}`);
+        const requestedScope = optionalString(args.scope);
+        if (requestedScope && requestedScope !== job.scope) throw new Error(`distillation scope mismatch: job expects ${job.scope}`);
+        return jsonResult(distillationNextPayload(job, evidenceOffset, evidenceChunkChars));
+      }
       const requestedScope = optionalString(args.scope);
       let projectFilter: string | null | undefined;
       if (requestedScope === "account") projectFilter = null;
@@ -351,6 +371,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         projectFilter = (await resolveToolScope(runtime, {
           scope: "project",
           project: optionalString(args.project),
+          workspaceProject: optionalString(args.workspace_project),
           conversationId: optionalString(args.conversation_id)
         })).projectId;
       }
@@ -360,13 +381,12 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         harness: sourceHarness,
         leaseSeconds: optionalInteger(args.lease_seconds)
       });
-      return jsonResult({
-        job,
+      if (!job) return jsonResult({
+        job: null,
         contract: distillationContract(),
-        instructions: job
-          ? `Produce only the requested ${job.target.toUpperCase()} artifact from the supplied evidence. Read current Memhub context first so the result updates the canonical artifact rather than duplicating it. If evidence is insufficient for this layer, call action=skip with job_id.`
-          : "No pending distillation job for this account/scope."
+        instructions: "No pending distillation job for this account/scope."
       });
+      return jsonResult(distillationNextPayload(job, evidenceOffset, evidenceChunkChars));
     }
     if (action === "skip") {
       const jobId = requiredString(args.job_id, "job_id");
@@ -400,10 +420,16 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     const { projectId, conversationId } = await resolveToolScope(runtime, {
       scope: scope === "account" ? "global" : "project",
       project: optionalString(args.project) ?? job?.project_id ?? undefined,
+      workspaceProject: optionalString(args.workspace_project),
       conversationId: optionalString(args.conversation_id) ?? job?.conversation_id
     });
     if (kind === "l4" && projectId !== null) throw new Error("L4 cannot be project-scoped");
-    if (job && (job.scope !== scope || job.project_id !== projectId)) throw new Error("distillation job scope mismatch");
+    const canonicalJobProjectId = job?.project_id
+      ? await runtime.projects.resolve(runtime.accountId, job.project_id)
+      : job?.project_id ?? null;
+    if (job && (job.scope !== scope || canonicalJobProjectId !== projectId)) {
+      throw new Error("distillation job scope mismatch");
+    }
     const explicitEvidenceRefs = stringArray(args.evidence_refs) ?? [];
     if (job && explicitEvidenceRefs.some((ref) => !job.evidence_refs.includes(ref))) {
       throw new Error("job-backed distillation cannot add evidence outside the leased job");
@@ -615,6 +641,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       properties: {
         action: { type: "string", enum: ["list", "add", "complete", "reopen"] },
         project: { type: "string", description: "明确项目 slug/name/alias；写操作建议显式提供。" },
+        workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 不一致时拒绝项目级操作。" },
         conversation_id: { type: "string", description: "可选稳定会话 ID；project 省略时可使用其持久项目 binding。" },
         text: { type: "string", description: "add 时必填的待办内容，最长 2000 字符。" },
         todo_id: { type: "string", description: "complete/reopen 时必填。" },
@@ -628,7 +655,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     if (!["list", "add", "complete", "reopen"].includes(action)) throw new TypeError("unsupported todo action");
     await knownProjectRecords(runtime);
 
-    if (action === "list" && !optionalString(args.project) && !optionalString(args.conversation_id)) {
+    if (action === "list" && !optionalString(args.project) && !optionalString(args.workspace_project) && !optionalString(args.conversation_id)) {
       const status = optionalString(args.status) ?? "pending";
       if (!["pending", "done", "all"].includes(status)) throw new TypeError("todo list status must be pending, done, or all");
       const projects = await runtime.projects.list(runtime.accountId);
@@ -653,6 +680,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     const { projectId } = await resolveToolScope(runtime, {
       scope: "project",
       project: optionalString(args.project),
+      workspaceProject: optionalString(args.workspace_project),
       conversationId: optionalString(args.conversation_id)
     });
     if (!projectId) throw new Error("todo operation requires a resolved project");
@@ -761,10 +789,16 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
             changesMetadataOnly: true
           };
         } else if (operation === "delete") {
+          const blockers = await unfinishedDistillationJobsForProject(stateRoot, runtime, canonical);
           impact = {
             project: canonical,
             logicalDelete: true,
             memoryPurged: false,
+            blockedByDistillationJobs: blockers.map((job) => ({
+              job_id: job.job_id,
+              status: job.status,
+              target: job.target
+            })),
             note: "Existing durable evidence is retained; the project becomes unavailable for new routing/writes."
           };
         } else {
@@ -824,6 +858,10 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         ...(Array.isArray(authorization.payload.aliases) ? { aliases: stringArray(authorization.payload.aliases) ?? [] } : {})
       });
     } else if (authorization.operation === "delete") {
+      const blockers = await unfinishedDistillationJobsForProject(stateRoot, runtime, project);
+      if (blockers.length > 0) {
+        throw new Error(`project has ${blockers.length} unfinished distillation job(s); complete, skip, or resolve them before delete`);
+      }
       result = await runtime.projects.delete(runtime.accountId, project);
     } else {
       result = await runtime.projects.merge(
@@ -843,6 +881,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         action: { type: "string", enum: ["list", "current", "bind", "unbind", "architecture"] },
         conversation_id: { type: "string" },
         project: { type: "string" },
+        workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 不一致时拒绝操作" },
         query: { type: "string", description: "architecture 时用于选择最相关的架构模块" }
       },
       required: ["action"],
@@ -857,28 +896,26 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     const conversationId = optionalString(args.conversation_id);
     if (action === "current") {
       await knownProjectRecords(runtime);
+      const explicitEvidence = await resolveExplicitProjectEvidence(runtime, {
+        project: optionalString(args.project),
+        workspaceProject: optionalString(args.workspace_project)
+      });
+      if (explicitEvidence.projectId) {
+        return jsonResult({
+          project: explicitEvidence.projectId,
+          conversation_id: conversationId ?? null,
+          binding_available: Boolean(conversationId),
+          resolution_source: explicitEvidence.resolutionSource,
+          persisted: false,
+          note: "Current-turn project/workspace evidence takes priority over an older conversation binding."
+        });
+      }
       if (conversationId) {
         return jsonResult({
           project: await runtime.router.currentProject(runtime.accountId, conversationId),
           conversation_id: conversationId,
           binding_available: true,
           resolution_source: "conversation_binding"
-        });
-      }
-      const explicitProject = optionalString(args.project);
-      if (explicitProject) {
-        const canonical = await runtime.projects.resolve(runtime.accountId, explicitProject);
-        if (!canonical) {
-          const matches = await runtime.projects.suggest(runtime.accountId, explicitProject, 6);
-          throw new Error(`unknown project "${explicitProject}". Use memmy_project_list before current. Similar: ${matches.map((item) => item.projectId).join(", ") || "none"}`);
-        }
-        return jsonResult({
-          project: canonical,
-          conversation_id: null,
-          binding_available: false,
-          resolution_source: "explicit_project",
-          persisted: false,
-          note: "Transport did not provide a stable conversation_id; project was canonicalized for this request only."
         });
       }
       return jsonResult({
@@ -893,12 +930,11 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     if (action === "bind") {
       if (!conversationId) throw new TypeError("conversation_id is required for bind");
       const projectId = requiredString(args.project, "project");
-      await knownProjectRecords(runtime);
-      const canonical = await runtime.projects.resolve(runtime.accountId, projectId);
-      if (!canonical) {
-        const matches = await runtime.projects.suggest(runtime.accountId, projectId, 6);
-        throw new Error(`unknown project "${projectId}". Use memmy_project_list before binding. Similar: ${matches.map((item) => item.projectId).join(", ") || "none"}`);
-      }
+      const explicitEvidence = await resolveExplicitProjectEvidence(runtime, {
+        project: projectId,
+        workspaceProject: optionalString(args.workspace_project)
+      });
+      const canonical = explicitEvidence.projectId!;
       await runtime.router.bindProject(runtime.accountId, conversationId, canonical);
       return jsonResult({ ok: true, project: canonical, requested: projectId });
     }
@@ -907,10 +943,12 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       return jsonResult({ ok: true, removed: await runtime.router.unbindProject(runtime.accountId, conversationId) });
     }
     if (action === "architecture") {
-      const projectId = requiredString(args.project, "project");
-      await knownProjectRecords(runtime);
-      const canonical = await runtime.projects.resolve(runtime.accountId, projectId);
-      if (!canonical) throw new Error(`unknown project: ${projectId}`);
+      const explicitEvidence = await resolveExplicitProjectEvidence(runtime, {
+        project: optionalString(args.project),
+        workspaceProject: optionalString(args.workspace_project)
+      });
+      if (!explicitEvidence.projectId) throw new TypeError("architecture requires project or workspace_project");
+      const canonical = explicitEvidence.projectId;
       const query = optionalString(args.query) ?? "project architecture, ownership, dependencies and current constraints";
       return jsonResult({
         project: canonical,
@@ -1065,6 +1103,7 @@ async function serveHttp(
   const validateOrigin = options.publicHost === undefined
     ? localhostOriginValidation()
     : originValidation(["localhost", "127.0.0.1", "[::1]", options.publicHost]);
+  const healthPath = options.basePath === "/" ? "/health" : `${options.basePath}/health`;
 
   const runtimeFor = (accountId: string, source = runtimeOptions.source): MemhubRuntime => {
     const sourceKey = source
@@ -1098,6 +1137,19 @@ async function serveHttp(
     void (async () => {
       const url = new URL(request.url ?? "/", "http://localhost");
       if (!validateHost(request, response) || !validateOrigin(request, response)) return;
+      if (url.pathname === healthPath) {
+        if (request.method !== "GET" && request.method !== "HEAD") {
+          response.writeHead(405, { allow: "GET, HEAD" }).end();
+          return;
+        }
+        response.writeHead(200, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          ...webSecurityHeaders()
+        });
+        response.end(request.method === "HEAD" ? undefined : JSON.stringify({ ok: true, service: "memhub", uptime_seconds: Math.floor(process.uptime()) }));
+        return;
+      }
       if (options.basePath === "/" && url.pathname !== options.path && url.pathname !== options.capturePath) {
         url.pathname = url.pathname === "/" ? "/memhub" : `/memhub${url.pathname}`;
       }
@@ -1274,9 +1326,10 @@ async function serveHttp(
         try {
           incomingCapture = normalizeCaptureEvent(await readJsonBody(request));
         } catch (error) {
-          response.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
+          const bodyError = asHttpJsonBodyError(error);
+          response.writeHead(bodyError?.statusCode ?? 400, { "content-type": "application/json", "cache-control": "no-store" });
           response.end(JSON.stringify({
-            error: "invalid_capture",
+            error: bodyError?.code ?? "invalid_capture",
             message: error instanceof Error ? error.message : String(error)
           }));
           return;
@@ -1576,6 +1629,22 @@ async function serveHttp(
                 ...(Array.isArray(body.aliases) ? { aliases: stringArrayAllowEmpty(body.aliases) } : {})
               });
             } else if (action === "delete-project") {
+              const canonical = await runtime.projects.resolve(runtime.accountId, projectRef);
+              if (!canonical) {
+                response.writeHead(404, { "content-type": "application/json" })
+                  .end(JSON.stringify({ error: "project_not_found" }));
+                return;
+              }
+              const blockers = await unfinishedDistillationJobsForProject(options.stateRoot, runtime, canonical);
+              if (blockers.length > 0) {
+                response.writeHead(409, { "content-type": "application/json", "cache-control": "no-store" })
+                  .end(JSON.stringify({
+                    error: "unfinished_distillation_jobs",
+                    project: canonical,
+                    jobs: blockers.map((job) => ({ job_id: job.job_id, status: job.status, target: job.target }))
+                  }));
+                return;
+              }
               result = await runtime.projects.delete(runtime.accountId, projectRef);
             } else {
               result = await runtime.projects.merge(runtime.accountId, projectRef, requiredString(body.target, "target"));
@@ -1666,21 +1735,37 @@ async function serveHttp(
         response.end(JSON.stringify({ error: "missing_cloudflare_access_jwt" }));
         return;
       }
-      const identity = await verifyCloudflareAccessJwt(options.stateRoot, options.publicHost, assertion);
-      const account = await resolveCloudflareAccount(options.stateRoot, identity, { allowJit: options.allowJit });
-      handlerFor(account.account_id, {
-        platform: "chatgpt",
-        transport: "mcp",
-        principalId: identity.sub ? `cloudflare:${identity.sub}` : `cloudflare-email:${identity.email}`,
-        connectionId: "cloudflare-managed-oauth",
-        authenticatedAccount: identity.email
-      })(request, response);
+      try {
+        const identity = await verifyCloudflareAccessJwt(options.stateRoot, options.publicHost, assertion);
+        const account = await resolveCloudflareAccount(options.stateRoot, identity, { allowJit: options.allowJit });
+        handlerFor(account.account_id, {
+          platform: "chatgpt",
+          transport: "mcp",
+          principalId: identity.sub ? `cloudflare:${identity.sub}` : `cloudflare-email:${identity.email}`,
+          connectionId: "cloudflare-managed-oauth",
+          authenticatedAccount: identity.email
+        })(request, response);
+      } catch (error) {
+        console.error("[memhub] HTTP identity error:", error);
+        if (!response.headersSent) {
+          response.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
+          response.end(JSON.stringify({
+            error: "identity_rejected",
+            message: error instanceof Error ? error.message : String(error)
+          }));
+        } else {
+          response.end();
+        }
+      }
     })().catch((error) => {
-      console.error("[memhub] HTTP identity error:", error);
+      const bodyError = asHttpJsonBodyError(error);
+      const status = bodyError?.statusCode ?? (error instanceof TypeError ? 400 : 500);
+      const code = bodyError?.code ?? (error instanceof TypeError ? "invalid_request" : "request_failed");
+      console.error("[memhub] HTTP request error:", error);
       if (!response.headersSent) {
-        response.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
+        response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
         response.end(JSON.stringify({
-          error: "identity_rejected",
+          error: code,
           message: error instanceof Error ? error.message : String(error)
         }));
       } else {
@@ -1689,6 +1774,9 @@ async function serveHttp(
     });
   });
 
+  http.keepAliveTimeout = 95_000;
+  http.headersTimeout = 100_000;
+  http.on("connection", (socket) => socket.setKeepAlive(true, 30_000));
   await new Promise<void>((resolveReady, reject) => {
     http.once("error", reject);
     http.listen(options.port, "127.0.0.1", () => resolveReady());
@@ -1871,15 +1959,6 @@ async function runAccountCommand(argv: string[]): Promise<void> {
 
 function defaultStateRoot(): string {
   return resolve(process.env.MEMHUB_STATE_ROOT ?? join(homedir(), ".memmy", "memhub"));
-}
-
-async function readJsonBody(request: import("node:http").IncomingMessage): Promise<unknown> {
-  let raw = "";
-  for await (const chunk of request) {
-    raw += chunk;
-    if (raw.length > 1_000_000) throw new Error("request body too large");
-  }
-  return JSON.parse(raw || "{}");
 }
 
 function isJsonRequest(request: import("node:http").IncomingMessage): boolean {
@@ -2264,9 +2343,12 @@ async function validateDistillationEvidenceChain(input: {
     if (input.job.evidence.length === 0 || input.job.evidence.some((item) => item.layer !== expectedLayer)) {
       throw new Error(`${input.kind.toUpperCase()} job evidence must come from ${expectedLayer}`);
     }
+    const projectStorageIds = input.projectId
+      ? new Set(await input.runtime.projects.storageIds(input.runtime.accountId, input.projectId))
+      : null;
     if (input.kind === "l2") {
       if (!input.projectId || input.job.evidence.some((item) => {
-        if (item.project_id !== input.projectId || item.layer !== "L1") return true;
+        if (!item.project_id || !projectStorageIds?.has(item.project_id) || item.layer !== "L1") return true;
         if (item.kind === "turn") return !item.user_text?.trim() || !item.assistant_text?.trim();
         if (item.kind === "memory") return !item.content?.trim();
         return true;
@@ -2277,7 +2359,7 @@ async function validateDistillationEvidenceChain(input: {
       return;
     }
     if (input.kind === "l3") {
-      if (!input.projectId || input.job.evidence.some((item) => item.project_id !== input.projectId)) {
+      if (!input.projectId || input.job.evidence.some((item) => !item.project_id || !projectStorageIds?.has(item.project_id))) {
         throw new Error("L3 job evidence must be L2 from the same project");
       }
       return;
@@ -2289,6 +2371,7 @@ async function validateDistillationEvidenceChain(input: {
 
   if (input.kind === "l2") {
     if (!input.projectId) throw new Error("L2 evidence requires a resolved project");
+    const projectStorageIds = new Set(await input.runtime.projects.storageIds(input.runtime.accountId, input.projectId));
     const captures = await listCaptureEvents(input.stateRoot, input.runtime.accountId);
     const byId = new Map(captures.map((item) => [item.event_id, item]));
     for (const ref of input.evidenceRefs) {
@@ -2297,7 +2380,7 @@ async function validateDistillationEvidenceChain(input: {
       if (!event || !event.ingested || event.capture_status !== "complete" || !event.user_text?.trim() || !event.assistant_text?.trim()) {
         throw new Error(`L2 evidence does not resolve to a complete ingested L1 turn: ${ref}`);
       }
-      if (event.project_hint !== input.projectId) {
+      if (!event.project_hint || !projectStorageIds.has(event.project_hint)) {
         throw new Error(`L2 evidence belongs to another or unresolved project: ${ref}`);
       }
     }
@@ -2306,18 +2389,25 @@ async function validateDistillationEvidenceChain(input: {
 
   const expectedLayer = input.kind === "l3" ? "L2" : "L3";
   const expectedPrefix = input.kind === "l3" ? "l2" : "l3";
-  const params = new URLSearchParams({ limit: "500", userId: input.runtime.userId });
-  if (input.kind === "l3" && input.projectId) params.set("projectId", input.projectId);
-  const layerPayload = objectRecord(await input.runtime.memoryClient.viewerGet(
-    `/api/v1/${input.kind === "l3" ? "l2" : "l3"}?${params.toString()}`
-  ));
-  const layerItems = Array.isArray(layerPayload.items)
-    ? layerPayload.items.map(objectRecord)
-    : [];
+  const layerItems: Array<Record<string, unknown>> = [];
+  const storageProjectIds = input.kind === "l3" && input.projectId
+    ? await input.runtime.projects.storageIds(input.runtime.accountId, input.projectId)
+    : [undefined];
+  for (const storageProjectId of storageProjectIds) {
+    const params = new URLSearchParams({ limit: "500", userId: input.runtime.userId });
+    if (storageProjectId) params.set("projectId", storageProjectId);
+    const layerPayload = objectRecord(await input.runtime.memoryClient.viewerGet(
+      `/api/v1/${input.kind === "l3" ? "l2" : "l3"}?${params.toString()}`
+    ));
+    if (Array.isArray(layerPayload.items)) layerItems.push(...layerPayload.items.map(objectRecord));
+  }
   const byId = new Map(layerItems
     .filter((item) => typeof item.id === "string")
     .map((item) => [String(item.id), item] as const));
   const projects = new Set<string>();
+  const projectStorageIds = input.kind === "l3" && input.projectId
+    ? new Set(await input.runtime.projects.storageIds(input.runtime.accountId, input.projectId))
+    : null;
   for (const ref of input.evidenceRefs) {
     const memoryId = parseLayerEvidenceRef(ref, expectedPrefix);
     const detail = byId.get(memoryId);
@@ -2331,7 +2421,7 @@ async function validateDistillationEvidenceChain(input: {
     const projectTag = tags.find((tag) => tag.startsWith("project:"));
     const project = projectTag?.slice("project:".length).trim();
     if (!project) throw new Error(`${expectedLayer} evidence is missing project provenance: ${ref}`);
-    if (input.kind === "l3" && project !== input.projectId) {
+    if (input.kind === "l3" && !projectStorageIds?.has(project)) {
       throw new Error(`L3 evidence belongs to another project: ${ref}`);
     }
     projects.add(project);
@@ -2339,6 +2429,96 @@ async function validateDistillationEvidenceChain(input: {
   if (input.kind === "l4" && projects.size < 2) {
     throw new Error("L4 requires L3 evidence from at least two distinct projects");
   }
+}
+
+function distillationNextPayload(
+  job: DistillationJob,
+  evidenceOffset: number,
+  evidenceChunkChars: number
+): Record<string, unknown> {
+  const evidenceDocument = distillationEvidenceDocument(job);
+  if (evidenceOffset > evidenceDocument.length) {
+    throw new TypeError(`evidence_offset exceeds evidence length ${evidenceDocument.length}`);
+  }
+  const inline = evidenceOffset === 0 && evidenceDocument.length <= 120_000;
+  if (inline) {
+    return {
+      job,
+      contract: distillationContract(),
+      evidence_transport: {
+        mode: "inline",
+        total_chars: evidenceDocument.length,
+        complete: true
+      },
+      instructions: `Produce only the requested ${job.target.toUpperCase()} artifact from the supplied evidence. Read current Memhub context first so the result updates the canonical artifact rather than duplicating it. If evidence is insufficient for this layer, call action=skip with job_id.`
+    };
+  }
+
+  const end = Math.min(evidenceDocument.length, evidenceOffset + evidenceChunkChars);
+  const nextOffset = end < evidenceDocument.length ? end : null;
+  const manifest = job.evidence.map((item) => {
+    const { content, user_text, assistant_text, reasoning_summary, ...metadata } = item;
+    return {
+      ...metadata,
+      text_chars: {
+        ...(content !== undefined ? { content: content.length } : {}),
+        ...(user_text !== undefined ? { user_text: user_text.length } : {}),
+        ...(assistant_text !== undefined ? { assistant_text: assistant_text.length } : {}),
+        ...(reasoning_summary !== undefined ? { reasoning_summary: reasoning_summary.length } : {})
+      }
+    };
+  });
+  return {
+    job: { ...job, evidence: manifest },
+    contract: distillationContract(),
+    evidence_transport: {
+      mode: "chunked",
+      offset: evidenceOffset,
+      next_offset: nextOffset,
+      total_chars: evidenceDocument.length,
+      chunk_chars: end - evidenceOffset,
+      complete: nextOffset === null
+    },
+    evidence_chunk: evidenceDocument.slice(evidenceOffset, end),
+    instructions: nextOffset === null
+      ? `All evidence chunks for ${job.job_id} have been read. Produce only the requested ${job.target.toUpperCase()} artifact, or call action=skip if the evidence is insufficient.`
+      : `This job uses chunked evidence. Keep the same lease owner and call action=next with job_id=${job.job_id}, source_harness=${job.leased_by ?? "<same-harness>"}, evidence_offset=${nextOffset}. Do not submit until evidence_transport.complete=true.`
+  };
+}
+
+function distillationEvidenceDocument(job: DistillationJob): string {
+  return job.evidence.map((item, index) => {
+    const lines = [
+      `--- evidence ${index + 1}/${job.evidence.length} ---`,
+      `ref: ${item.ref}`,
+      `kind: ${item.kind}`,
+      `timestamp: ${item.timestamp}`,
+      ...(item.layer ? [`layer: ${item.layer}`] : []),
+      ...(item.project_id ? [`project_id: ${item.project_id}`] : []),
+      ...(item.conversation_id ? [`conversation_id: ${item.conversation_id}`] : []),
+      ...(item.title ? [`title: ${item.title}`] : [])
+    ];
+    if (item.content !== undefined) lines.push("content:", item.content);
+    if (item.user_text !== undefined) lines.push("user_text:", item.user_text);
+    if (item.assistant_text !== undefined) lines.push("assistant_text:", item.assistant_text);
+    if (item.reasoning_summary !== undefined) lines.push("reasoning_summary:", item.reasoning_summary);
+    return lines.join("\n");
+  }).join("\n\n");
+}
+
+async function unfinishedDistillationJobsForProject(
+  stateRoot: string,
+  runtime: MemhubRuntime,
+  projectId: string
+): Promise<DistillationJob[]> {
+  const jobs = await listDistillationJobs(stateRoot, runtime.accountId);
+  const blockers: DistillationJob[] = [];
+  for (const job of jobs) {
+    if (job.scope !== "project" || !job.project_id || job.status === "completed") continue;
+    const canonical = await runtime.projects.resolve(runtime.accountId, job.project_id);
+    if (job.project_id === projectId || canonical === projectId) blockers.push(job);
+  }
+  return blockers;
 }
 
 async function validateMigrationL1EvidenceScope(
@@ -2506,31 +2686,66 @@ function objectValue(value: unknown, field: string): Record<string, unknown> {
 
 async function resolveToolScope(
   runtime: MemhubRuntime,
-  input: { scope: string; project?: string; conversationId?: string }
-): Promise<{ projectId: string | null; conversationId?: string }> {
+  input: { scope: string; project?: string; workspaceProject?: string; conversationId?: string }
+): Promise<{ projectId: string | null; conversationId?: string; resolutionSource: string }> {
   if (input.scope !== "global" && input.scope !== "project") {
     throw new TypeError("scope must be global or project");
   }
-  let projectId = input.project ?? null;
-  if (input.scope === "project") await knownProjectRecords(runtime);
-  if (input.scope === "project" && projectId !== null) {
-    const requestedProject = projectId;
-    projectId = await runtime.projects.resolve(runtime.accountId, requestedProject);
-    if (projectId === null) {
-      const candidates = await runtime.projects.suggest(runtime.accountId, requestedProject, 5);
-      throw new Error(`unknown project "${requestedProject}". Use memmy_project_list before project-scoped operations. Similar: ${candidates.map((item) => item.projectId).join(", ") || "none"}`);
-    }
+  if (input.scope === "global") {
+    return {
+      projectId: null,
+      ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+      resolutionSource: "global"
+    };
   }
+  const explicitEvidence = await resolveExplicitProjectEvidence(runtime, {
+    project: input.project,
+    workspaceProject: input.workspaceProject
+  });
+  let projectId = explicitEvidence.projectId;
+  let resolutionSource = explicitEvidence.resolutionSource ?? "unresolved";
   if (input.scope === "project" && projectId === null && input.conversationId) {
     projectId = await runtime.router.currentProject(runtime.accountId, input.conversationId);
+    if (projectId) resolutionSource = "conversation_binding";
   }
   if (input.scope === "project" && projectId === null) {
-    throw new Error("project scope requires an explicit or conversation-bound project");
+    throw new Error("project scope requires current workspace_project/project evidence or a stable conversation-bound project");
   }
-  if (input.scope === "global") projectId = null;
   return {
     projectId,
-    ...(input.conversationId ? { conversationId: input.conversationId } : {})
+    ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+    resolutionSource
+  };
+}
+
+async function resolveExplicitProjectEvidence(
+  runtime: MemhubRuntime,
+  input: { project?: string; workspaceProject?: string }
+): Promise<{ projectId: string | null; resolutionSource: string | null }> {
+  const projectRef = input.project?.trim() || undefined;
+  const workspaceRef = input.workspaceProject?.trim() || undefined;
+  if (!projectRef && !workspaceRef) return { projectId: null, resolutionSource: null };
+  await knownProjectRecords(runtime);
+
+  const resolveOne = async (reference: string, field: string): Promise<string> => {
+    const canonical = await runtime.projects.resolve(runtime.accountId, reference);
+    if (canonical) return canonical;
+    const candidates = await runtime.projects.suggest(runtime.accountId, reference, 5);
+    throw new Error(`unknown ${field} "${reference}". Use memmy_project_list before project-scoped operations. Similar: ${candidates.map((item) => item.projectId).join(", ") || "none"}`);
+  };
+
+  const explicit = projectRef ? await resolveOne(projectRef, "project") : null;
+  const workspace = workspaceRef ? await resolveOne(workspaceRef, "workspace_project") : null;
+  if (explicit && workspace && explicit !== workspace) {
+    throw new Error(`project/workspace conflict: project resolves to "${explicit}" but workspace_project resolves to "${workspace}"`);
+  }
+  return {
+    projectId: workspace ?? explicit,
+    resolutionSource: workspace && explicit
+      ? "workspace_and_project"
+      : workspace
+        ? "workspace_project"
+        : "explicit_project"
   };
 }
 

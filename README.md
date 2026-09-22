@@ -104,6 +104,11 @@ The Web Workspace renders L2 as a timeline and L3/L4 as readable items instead o
 
 Memhub ships as **Local Edition** and **Server Edition**, with Linux and Windows support.
 
+Release assets provide two installation paths:
+
+- **Complete**: target-OS Node.js runtime, production dependencies, and prebuilt Memhub are already bundled; Node/npm do not need to be preinstalled.
+- **Convenience/source**: use the repository `install.sh` / `install.ps1`; these install/build dependencies on the target host when needed.
+
 | What you want | Recommended |
 | --- | --- |
 | Use Memhub on one computer | **Local Edition** |
@@ -116,6 +121,20 @@ Memhub ships as **Local Edition** and **Server Edition**, with Linux and Windows
 ### Local Edition
 
 Everything runs on one machine and listens on loopback by default.
+
+Complete Linux:
+
+~~~bash
+bash install-complete.sh --edition local
+~~~
+
+Complete Windows:
+
+~~~powershell
+powershell -ExecutionPolicy Bypass -File .\install-complete.ps1 -Edition local
+~~~
+
+Convenience/source install:
 
 Linux:
 
@@ -145,6 +164,20 @@ Local Edition is the simplest way to get durable private memory without a VPS or
 
 Server Edition keeps durable memory on your own central server while multiple devices connect as authenticated clients.
 
+Complete Linux:
+
+~~~bash
+bash install-complete.sh --edition server --public-host memory.example.com
+~~~
+
+Complete Windows:
+
+~~~powershell
+powershell -ExecutionPolicy Bypass -File .\install-complete.ps1 -Edition server -PublicHost memory.example.com
+~~~
+
+Convenience/source install:
+
 Linux Server:
 
 ~~~bash
@@ -167,6 +200,7 @@ Detailed setup:
 
 - [Local Edition](editions/local/README.md)
 - [Server Edition](editions/server/README.md)
+- [Release and Complete packages](docs/EDITIONS.md)
 - [Release Packages](https://github.com/PhSanqi/Memhub/releases)
 
 ---

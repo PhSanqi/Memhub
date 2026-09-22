@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createHash, randomUUID } from "node:crypto";
+import { once } from "node:events";
 import { createServer } from "node:http";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -7,6 +8,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { mergeCaptureEvent, normalizeCaptureEvent, type MemhubCaptureEvent } from "./capture.js";
+import { withFileMutationLock } from "./file-mutation-lock.js";
+import { asHttpJsonBodyError, HttpJsonBodyError, readJsonBody } from "./http-json.js";
 
 interface BridgeConfig {
   version: 1;
@@ -25,18 +28,20 @@ export class MemhubBridgeQueue {
     const key = createHash("sha256").update(event.event_id, "utf8").digest("hex");
     const path = join(this.queueDir(), `${key}.json`);
     await mkdir(this.queueDir(), { recursive: true, mode: 0o700 });
-    try {
-      const existing = normalizeCaptureEvent(JSON.parse(await readFile(path, "utf8")) as unknown);
-      if (existing.event_id !== event.event_id) throw new Error("bridge queue hash collision");
-      const merged = mergeCaptureEvent(existing, event);
-      if (!merged.updated) return existing;
-      await writeQueueEvent(path, merged.event);
-      return merged.event;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
-    }
-    await writeQueueEvent(path, event);
-    return event;
+    return withFileMutationLock(path, async () => {
+      try {
+        const existing = normalizeCaptureEvent(JSON.parse(await readFile(path, "utf8")) as unknown);
+        if (existing.event_id !== event.event_id) throw new Error("bridge queue hash collision");
+        const merged = mergeCaptureEvent(existing, event);
+        if (!merged.updated) return existing;
+        await writeQueueEvent(path, merged.event);
+        return merged.event;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+      }
+      await writeQueueEvent(path, event);
+      return event;
+    });
   }
 
   async pending(): Promise<number> {
@@ -60,13 +65,18 @@ export class MemhubBridgeQueue {
     for (const name of files) {
       const path = join(this.queueDir(), name);
       const key = name.slice(0, 64);
+      const canonicalPath = join(this.queueDir(), `${key}.json`);
       const claim = join(this.queueDir(), `${key}.sending-${randomUUID()}.json`);
-      try {
-        await rename(path, claim);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException)?.code === "ENOENT") continue;
-        throw error;
-      }
+      const claimed = await withFileMutationLock(canonicalPath, async () => {
+        try {
+          await rename(path, claim);
+          return true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false;
+          throw error;
+        }
+      });
+      if (!claimed) continue;
       const event = normalizeCaptureEvent(JSON.parse(await readFile(claim, "utf8")) as unknown);
       try {
         await uploadCapture(config, event);
@@ -136,6 +146,11 @@ export async function serveBridge(options: { stateRoot: string; host?: string; p
   const port = options.port ?? 17861;
   const queue = new MemhubBridgeQueue(options.stateRoot);
   let flushPromise: Promise<{ sent: number; pending: number; stopped_on_error?: string }> | null = null;
+  let retryTimer: NodeJS.Timeout | null = null;
+  let failureStreak = 0;
+  let nextRetryAt = 0;
+  let lastFlushError: string | null = null;
+  const retryJitter = bridgeRetryJitter(options.stateRoot);
   const flushQueue = () => {
     if (flushPromise) return flushPromise;
     flushPromise = (async () => {
@@ -149,14 +164,57 @@ export async function serveBridge(options: { stateRoot: string; host?: string; p
     })().finally(() => { flushPromise = null; });
     return flushPromise;
   };
+  const clearRetryTimer = () => {
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+  };
+  const scheduleBackgroundFlush = (delayMs: number) => {
+    const target = Date.now() + Math.max(0, delayMs);
+    if (retryTimer && nextRetryAt <= target) return;
+    clearRetryTimer();
+    nextRetryAt = target;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      nextRetryAt = 0;
+      void runBackgroundFlush();
+    }, Math.max(0, target - Date.now()));
+    retryTimer.unref();
+  };
+  const runBackgroundFlush = async () => {
+    try {
+      const result = await flushQueue();
+      if (result.stopped_on_error) {
+        failureStreak += 1;
+        lastFlushError = result.stopped_on_error;
+        scheduleBackgroundFlush(bridgeRetryDelayMs(failureStreak, retryJitter));
+        return;
+      }
+      failureStreak = 0;
+      lastFlushError = null;
+      scheduleBackgroundFlush(5_000);
+    } catch (error) {
+      failureStreak += 1;
+      lastFlushError = error instanceof Error ? error.message : String(error);
+      scheduleBackgroundFlush(bridgeRetryDelayMs(failureStreak, retryJitter));
+    }
+  };
   const flushInBackground = () => {
-    void flushQueue().catch(() => undefined);
+    if (failureStreak > 0 && nextRetryAt > Date.now()) return;
+    scheduleBackgroundFlush(0);
   };
   const server = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? "/", "http://localhost");
       if (request.method === "GET" && url.pathname === "/status") {
-        return json(response, 200, { ok: true, pending: await queue.pending() });
+        return json(response, 200, {
+          ok: true,
+          pending: await queue.pending(),
+          retry: {
+            failure_streak: failureStreak,
+            next_retry_at: nextRetryAt > 0 ? new Date(nextRetryAt).toISOString() : null,
+            last_error: lastFlushError
+          }
+        });
       }
       if (url.pathname === "/mcp") {
         const config = await loadBridgeConfig(options.stateRoot);
@@ -185,7 +243,13 @@ export async function serveBridge(options: { stateRoot: string; host?: string; p
         return;
       }
       if (request.method === "POST" && url.pathname === "/flush") {
-        return json(response, 200, await flushQueue());
+        const result = await flushQueue();
+        if (!result.stopped_on_error) {
+          failureStreak = 0;
+          lastFlushError = null;
+          scheduleBackgroundFlush(5_000);
+        }
+        return json(response, 200, result);
       }
       if (request.method === "POST" && url.pathname === "/capture") {
         const event = await queue.enqueue(await readJsonBody(request));
@@ -194,16 +258,41 @@ export async function serveBridge(options: { stateRoot: string; host?: string; p
         return json(response, 202, { accepted: true, event_id: event.event_id, pending });
       }
       response.writeHead(404).end();
-    })().catch((error) => json(response, 400, { error: error instanceof Error ? error.message : String(error) }));
+    })().catch((error) => {
+      const bodyError = asHttpJsonBodyError(error);
+      const timeout = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+      const fetchFailure = error instanceof TypeError && /fetch failed/i.test(error.message);
+      return json(response,
+        bodyError?.statusCode ?? (timeout ? 504 : fetchFailure ? 502 : 400),
+        {
+          error: bodyError?.code ?? (timeout ? "upstream_timeout" : fetchFailure ? "upstream_unavailable" : "bad_request"),
+          message: error instanceof Error ? error.message : String(error)
+        }
+      );
+    });
   });
+  server.keepAliveTimeout = 95_000;
+  server.headersTimeout = 100_000;
+  server.on("connection", (socket) => socket.setKeepAlive(true, 30_000));
   await new Promise<void>((ready, reject) => {
     server.once("error", reject);
     server.listen(port, host, () => ready());
   });
-  const retryTimer = setInterval(flushInBackground, 5_000);
-  retryTimer.unref();
   flushInBackground();
   console.error(`[memhub-bridge] listening on http://${host}:${port}`);
+}
+
+export function bridgeRetryDelayMs(failureStreak: number, jitter = 1): number {
+  if (!Number.isFinite(failureStreak) || failureStreak <= 0) return 5_000;
+  const exponent = Math.min(4, Math.max(0, Math.trunc(failureStreak) - 1));
+  const base = Math.min(60_000, 5_000 * (2 ** exponent));
+  const boundedJitter = Math.min(1.2, Math.max(0.8, Number.isFinite(jitter) ? jitter : 1));
+  return Math.round(base * boundedJitter);
+}
+
+function bridgeRetryJitter(stateRoot: string): number {
+  const digest = createHash("sha256").update(resolve(stateRoot), "utf8").digest();
+  return 0.8 + (digest.readUInt16BE(0) / 0xFFFF) * 0.4;
 }
 
 async function writeQueueEvent(path: string, event: MemhubCaptureEvent): Promise<void> {
@@ -230,19 +319,10 @@ async function uploadCapture(config: BridgeConfig, event: MemhubCaptureEvent): P
     method: "POST",
     headers,
     body: JSON.stringify(event),
-    signal: AbortSignal.timeout(15_000)
+    signal: AbortSignal.timeout(bridgeUpstreamTimeoutMs())
   });
   const text = await response.text();
   if (!response.ok) throw new Error(`capture upload HTTP ${response.status}: ${text.slice(0, 500)}`);
-}
-
-async function readJsonBody(request: import("node:http").IncomingMessage): Promise<unknown> {
-  let raw = "";
-  for await (const chunk of request) {
-    raw += chunk;
-    if (raw.length > 1_000_000) throw new Error("request body too large");
-  }
-  return JSON.parse(raw || "{}");
 }
 
 function json(response: import("node:http").ServerResponse, status: number, value: unknown): void {
@@ -299,7 +379,9 @@ async function proxyMcp(
     for await (const chunk of request) {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       bytes += buffer.length;
-      if (bytes > 4_000_000) throw new Error("MCP request body too large");
+      if (bytes > 4_000_000) {
+        throw new HttpJsonBodyError("MCP request body exceeds 4000000 bytes", 413, "request_body_too_large");
+      }
       chunks.push(buffer);
     }
     body = Buffer.concat(chunks).toString("utf8");
@@ -311,24 +393,7 @@ async function proxyMcp(
     redirect: "error",
     signal: AbortSignal.timeout(120_000)
   });
-  const responseHeaders: Record<string, string> = { "cache-control": "no-store" };
-  for (const name of ["content-type", "mcp-session-id", "www-authenticate"] as const) {
-    const value = upstream.headers.get(name);
-    if (value) responseHeaders[name] = value;
-  }
-  response.writeHead(upstream.status, responseHeaders);
-  if (!upstream.body) { response.end(); return; }
-  const reader = upstream.body.getReader();
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      response.write(Buffer.from(value));
-    }
-    response.end();
-  } finally {
-    reader.releaseLock();
-  }
+  await pipeUpstreamResponse(upstream, response, ["content-type", "mcp-session-id", "www-authenticate"]);
 }
 
 async function proxyContext(
@@ -350,14 +415,9 @@ async function proxyContext(
     headers,
     body,
     redirect: "error",
-    signal: AbortSignal.timeout(15_000)
+    signal: AbortSignal.timeout(bridgeUpstreamTimeoutMs())
   });
-  const text = await upstream.text();
-  response.writeHead(upstream.status, {
-    "content-type": upstream.headers.get("content-type") ?? "application/json",
-    "cache-control": "no-store"
-  });
-  response.end(text);
+  await pipeUpstreamResponse(upstream, response, ["content-type"]);
 }
 
 async function proxyLifecycle(
@@ -379,14 +439,39 @@ async function proxyLifecycle(
     headers,
     body,
     redirect: "error",
-    signal: AbortSignal.timeout(15_000)
+    signal: AbortSignal.timeout(bridgeUpstreamTimeoutMs())
   });
-  const text = await upstream.text();
-  response.writeHead(upstream.status, {
-    "content-type": upstream.headers.get("content-type") ?? "application/json",
-    "cache-control": "no-store"
-  });
-  response.end(text);
+  await pipeUpstreamResponse(upstream, response, ["content-type"]);
+}
+
+async function pipeUpstreamResponse(
+  upstream: Response,
+  response: import("node:http").ServerResponse,
+  headerNames: string[]
+): Promise<void> {
+  const responseHeaders: Record<string, string> = { "cache-control": "no-store" };
+  for (const name of headerNames) {
+    const value = upstream.headers.get(name);
+    if (value) responseHeaders[name] = value;
+  }
+  if (!responseHeaders["content-type"]) responseHeaders["content-type"] = "application/json";
+  response.writeHead(upstream.status, responseHeaders);
+  if (!upstream.body) { response.end(); return; }
+  const reader = upstream.body.getReader();
+  try {
+    while (true) {
+      if (response.destroyed) {
+        await reader.cancel().catch(() => undefined);
+        return;
+      }
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!response.write(Buffer.from(value))) await once(response, "drain");
+    }
+    response.end();
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 function contextEndpoint(captureEndpoint: string): string {
@@ -410,6 +495,14 @@ function singleRequestHeader(value: string | string[] | undefined): string | und
 
 function defaultBridgeRoot(): string {
   return resolve(process.env.MEMHUB_BRIDGE_HOME ?? join(homedir(), ".memhub"));
+}
+
+function bridgeUpstreamTimeoutMs(): number {
+  const configured = Number(process.env.MEMHUB_BRIDGE_UPSTREAM_TIMEOUT_MS ?? "");
+  if (Number.isFinite(configured) && configured >= 100 && configured <= 300_000) {
+    return Math.trunc(configured);
+  }
+  return 15_000;
 }
 
 async function readStdinJson(): Promise<unknown> {

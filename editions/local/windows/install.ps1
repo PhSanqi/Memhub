@@ -5,8 +5,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
-$Node = (Get-Command node -ErrorAction Stop).Source
-$Npm = (Get-Command npm -ErrorAction Stop).Source
+$BundledNode = Join-Path $RepoRoot "runtime\node.exe"
+$NodeCommand = Get-Command node -ErrorAction SilentlyContinue
+$Node = if (Test-Path $BundledNode) { $BundledNode } elseif ($NodeCommand) { $NodeCommand.Source } else { throw "Node.js 20+ is required" }
+$NpmCommand = Get-Command npm -ErrorAction SilentlyContinue
+$Npm = if ($NpmCommand) { $NpmCommand.Source } else { $null }
 $ServerState = Join-Path $StateRoot "server"
 $MemoryDir = Join-Path $StateRoot "memory"
 $ConfigPath = Join-Path $StateRoot "memory-config.yaml"
@@ -19,6 +22,7 @@ $McpEntry = Join-Path $RepoRoot "dist\mcp.js"
 $BridgeEntry = Join-Path $RepoRoot "dist\bridge.js"
 $NodeModules = Join-Path $RepoRoot "node_modules"
 if (-not (Test-Path $NodeModules)) {
+  if (-not $Npm) { throw "npm is required because bundled dependencies are missing" }
   Push-Location $RepoRoot
   try {
     $PreviousCudaInstall = $env:ONNXRUNTIME_NODE_INSTALL_CUDA
@@ -32,6 +36,7 @@ if (-not (Test-Path $NodeModules)) {
   }
 }
 if (-not $SkipBuild -and (!(Test-Path $MemoryEntry) -or !(Test-Path $McpEntry) -or !(Test-Path $BridgeEntry))) {
+  if (-not $Npm) { throw "npm is required because bundled build output is missing" }
   Push-Location $RepoRoot
   try {
     & $Npm run build

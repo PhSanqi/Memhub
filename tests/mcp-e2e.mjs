@@ -9,13 +9,15 @@ import { fileURLToPath } from "node:url";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import Database from "better-sqlite3";
-import { MemhubBridgeQueue, saveBridgeConfig } from "../dist/bridge.js";
+import { MemhubBridgeQueue, bridgeRetryDelayMs, saveBridgeConfig } from "../dist/bridge.js";
 import { FileProjectArchitectureSource } from "../dist/architecture-source.js";
 import { JsonProjectRegistry } from "../dist/project-registry.js";
 import { addAccount, ensureLocalAdminToken, setAccountRole } from "../dist/auth.js";
 import { createDevice, countCaptureEvents, listCaptureEvents } from "../dist/capture.js";
 import { defaultMemoryUserId } from "../dist/memory-source.js";
 import {
+  completeDistillationJob,
+  enqueueDerivedDistillationJob,
   enqueueDistillationJob,
   failDistillationJob,
   leaseDistillationJob,
@@ -86,6 +88,19 @@ const memory = createServer(async (request, response) => {
   requests.push({ url: request.url, body });
   response.setHeader("content-type", "application/json");
   if (request.url === "/api/v1/memory/search") {
+    if (body.query === "__long_context_probe__") {
+      response.end(JSON.stringify({ hits: [{
+        id: "long-context-probe",
+        kind: "profile",
+        memoryLayer: "L4",
+        status: "activated",
+        snippet: "界".repeat(600_000),
+        score: 0.99,
+        tags: ["global"],
+        source: "search"
+      }] }));
+      return;
+    }
     const project = body.namespace?.projectId;
     response.end(JSON.stringify({ hits: project
       ? [hit("global", "global", ["global"]), hit("project", `project ${project}`, [`project:${project}`])]
@@ -244,6 +259,20 @@ async function testBridgeMcpProxy() {
     let raw = "";
     for await (const chunk of request) raw += chunk;
     observed.push({ headers: request.headers, body: raw, method: request.method, url: request.url });
+    if (request.url === "/context") {
+      const parsed = raw ? JSON.parse(raw) : {};
+      if (parsed.query === "__timeout__") {
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 300));
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ late: true }));
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write('{"content":"');
+      for (let index = 0; index < 12; index += 1) response.write("界".repeat(50_000));
+      response.end('"}');
+      return;
+    }
     response.writeHead(200, { "content-type": "application/json", "mcp-session-id": "bridge-proxy-session" });
     response.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } }));
   });
@@ -259,7 +288,7 @@ async function testBridgeMcpProxy() {
     cloudflareAccessClientSecret: "test-service-secret"
   });
   const child = spawn(process.execPath, [resolve(here, "../dist/bridge.js"), "serve", "--port", String(bridgePort)], {
-    env: { ...process.env, MEMHUB_BRIDGE_HOME: bridgeRoot },
+    env: { ...process.env, MEMHUB_BRIDGE_HOME: bridgeRoot, MEMHUB_BRIDGE_UPSTREAM_TIMEOUT_MS: "100" },
     stdio: ["ignore", "pipe", "pipe"]
   });
   let stderr = "";
@@ -282,13 +311,48 @@ async function testBridgeMcpProxy() {
     assert.equal(observed[0].headers["x-memhub-device-token"], deviceToken);
     assert.equal(observed[0].headers["cf-access-client-id"], "test-service-id");
     assert.equal(observed[0].headers["cf-access-client-secret"], "test-service-secret");
+
+    const longContext = await fetch(`http://127.0.0.1:${bridgePort}/context`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query: "long context passthrough" })
+    });
+    assert.equal(longContext.status, 200);
+    const longContextPayload = await longContext.json();
+    assert.equal(longContextPayload.content.length, 600_000);
+    assert.equal(observed.at(-1).url, "/context");
+
+    const oversizedMcp = await fetch(`http://127.0.0.1:${bridgePort}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "x".repeat(4_000_001)
+    });
+    assert.equal(oversizedMcp.status, 413);
+    assert.equal((await oversizedMcp.json()).error, "request_body_too_large");
+
+    const timedOutContext = await fetch(`http://127.0.0.1:${bridgePort}/context`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query: "__timeout__" })
+    });
+    assert.equal(timedOutContext.status, 504);
+    assert.equal((await timedOutContext.json()).error, "upstream_timeout");
+
+    await new Promise((resolveClose, rejectClose) => upstream.close((error) => error ? rejectClose(error) : resolveClose()));
+    const unavailableContext = await fetch(`http://127.0.0.1:${bridgePort}/context`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query: "upstream unavailable classification" })
+    });
+    assert.equal(unavailableContext.status, 502);
+    assert.equal((await unavailableContext.json()).error, "upstream_unavailable");
   } finally {
     child.kill("SIGTERM");
     await new Promise((resolveExit) => {
       child.once("exit", resolveExit);
       setTimeout(resolveExit, 500);
     });
-    await new Promise((resolveClose) => upstream.close(resolveClose));
+    if (upstream.listening) await new Promise((resolveClose) => upstream.close(resolveClose));
   }
 }
 
@@ -571,6 +635,39 @@ async function testLocalAdmin(memoryPort) {
       aliases: []
     });
     assert.equal(createDelete.status, 200);
+    const deleteBlocker = await enqueueDerivedDistillationJob({
+      stateRoot,
+      accountId: account.account_id,
+      target: "l3",
+      projectId: "ui-delete",
+      evidence: [{
+        ref: "artifact:ui-delete-blocker",
+        kind: "artifact",
+        timestamp: "2026-09-22T00:00:00.000Z",
+        project_id: "ui-delete",
+        layer: "L2",
+        content: "Pending Control Plane deletion blocker."
+      }]
+    });
+    const blockedDeleteProject = await adminAction({ action: "delete-project", project: "ui-delete" });
+    assert.equal(blockedDeleteProject.status, 409);
+    const blockedDeletePayload = await blockedDeleteProject.json();
+    assert.equal(blockedDeletePayload.error, "unfinished_distillation_jobs");
+    assert.ok(blockedDeletePayload.jobs.some((job) => job.job_id === deleteBlocker.job.job_id));
+    const deleteBlockerHarness = "ui-delete-blocker-harness";
+    const leasedDeleteBlocker = await leaseDistillationJob(stateRoot, account.account_id, {
+      projectId: "ui-delete",
+      target: "l3",
+      harness: deleteBlockerHarness
+    });
+    assert.equal(leasedDeleteBlocker?.job_id, deleteBlocker.job.job_id);
+    await completeDistillationJob(
+      stateRoot,
+      account.account_id,
+      deleteBlocker.job.job_id,
+      { kind: "noop" },
+      deleteBlockerHarness
+    );
     const deleteProject = await adminAction({ action: "delete-project", project: "ui-delete" });
     assert.equal(deleteProject.status, 200);
     const projectsAfterMutations = await fetch(`http://127.0.0.1:${port}/memhub/admin/api?kind=projects`, { headers: { authorization } });
@@ -778,6 +875,12 @@ async function testHttp(memoryPort) {
       await new Promise((resolveWait) => setTimeout(resolveWait, 25));
     }
     assert.match(stderr, /listening on http:\/\/127\.0\.0\.1:/);
+    const health = await fetch(`http://127.0.0.1:${port}/memhub/health`);
+    assert.equal(health.status, 200);
+    const healthPayload = await health.json();
+    assert.equal(healthPayload.ok, true);
+    assert.equal(healthPayload.service, "memhub");
+    assert.ok(Number.isInteger(healthPayload.uptime_seconds));
     const client = new Client({ name: "memhub-http-test", version: "1.0.0" });
     const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`));
     try {
@@ -786,6 +889,77 @@ async function testHttp(memoryPort) {
       const projects = JSON.parse((await client.callTool({ name: "memmy_project", arguments: { action: "list" } })).content[0].text);
       assert.ok(projects.projects.includes("aide"));
       assert.ok(!projects.projects.some((project) => /^ws_[a-f0-9]{32,}$/i.test(project)));
+
+      const longContext = JSON.parse((await client.callTool({
+        name: "memmy_context",
+        arguments: { query: "__long_context_probe__", project: "aide", limit: 1 }
+      })).content[0].text);
+      const longContextItem = longContext.globalMemory.find((item) => item.id === "long-context-probe");
+      assert.ok(longContextItem);
+      assert.ok(Buffer.byteLength(longContextItem.content, "utf8") <= longContext.contextBudget.maxItemContentBytes);
+      assert.equal(longContextItem.provenance.contextTruncated, true);
+      assert.equal(longContextItem.provenance.originalContentBytes, Buffer.byteLength("界".repeat(600_000), "utf8"));
+      assert.ok(longContext.contextBudget.truncatedItems >= 1);
+      assert.ok(longContext.contextBudget.emittedContentBytes <= longContext.contextBudget.maxContentBytes);
+
+      const longEvidenceProject = "long-evidence-http";
+      const registry = new JsonProjectRegistry(join(root, "project-registry.json"));
+      if (!(await registry.resolve("acct-test", longEvidenceProject))) {
+        await registry.create("acct-test", {
+          projectId: longEvidenceProject,
+          description: "Dedicated long evidence transport regression project."
+        });
+      }
+      const longEvidenceJob = await enqueueDerivedDistillationJob({
+        stateRoot,
+        accountId: "acct-test",
+        target: "l3",
+        projectId: longEvidenceProject,
+        evidence: [{
+          ref: "artifact:long-evidence-http",
+          kind: "artifact",
+          timestamp: "2026-09-22T00:00:00.000Z",
+          project_id: longEvidenceProject,
+          layer: "L2",
+          content: "证".repeat(260_000)
+        }]
+      });
+      const longHarness = "http-long-evidence-harness";
+      let chunkPayload = JSON.parse((await client.callTool({
+        name: "memhub_distill",
+        arguments: {
+          action: "next",
+          kind: "l3",
+          scope: "project",
+          project: longEvidenceProject,
+          source_harness: longHarness,
+          evidence_chunk_chars: 100_000
+        }
+      })).content[0].text);
+      assert.equal(chunkPayload.job.job_id, longEvidenceJob.job.job_id);
+      assert.equal(chunkPayload.evidence_transport.mode, "chunked");
+      assert.equal(chunkPayload.job.evidence[0].content, undefined);
+      assert.equal(chunkPayload.job.evidence[0].text_chars.content, 260_000);
+      let collectedChars = chunkPayload.evidence_chunk.length;
+      while (chunkPayload.evidence_transport.next_offset !== null) {
+        chunkPayload = JSON.parse((await client.callTool({
+          name: "memhub_distill",
+          arguments: {
+            action: "next",
+            job_id: longEvidenceJob.job.job_id,
+            source_harness: longHarness,
+            evidence_offset: chunkPayload.evidence_transport.next_offset,
+            evidence_chunk_chars: 100_000
+          }
+        })).content[0].text);
+        collectedChars += chunkPayload.evidence_chunk.length;
+      }
+      assert.equal(chunkPayload.evidence_transport.complete, true);
+      assert.equal(collectedChars, chunkPayload.evidence_transport.total_chars);
+      assert.equal(JSON.parse((await client.callTool({
+        name: "memhub_distill",
+        arguments: { action: "skip", job_id: longEvidenceJob.job.job_id, source_harness: longHarness }
+      })).content[0].text).ok, true);
     } finally {
       await client.close();
     }
@@ -947,6 +1121,14 @@ async function testHttp(memoryPort) {
     assert.equal(retried.failure, undefined);
 
     const bridgeRoot = join(root, "bridge");
+    assert.equal(bridgeRetryDelayMs(0, 1), 5_000);
+    assert.equal(bridgeRetryDelayMs(1, 1), 5_000);
+    assert.equal(bridgeRetryDelayMs(2, 1), 10_000);
+    assert.equal(bridgeRetryDelayMs(3, 1), 20_000);
+    assert.equal(bridgeRetryDelayMs(4, 1), 40_000);
+    assert.equal(bridgeRetryDelayMs(5, 1), 60_000);
+    assert.equal(bridgeRetryDelayMs(10, 0.8), 48_000);
+    assert.equal(bridgeRetryDelayMs(10, 1.2), 72_000);
     const queue = new MemhubBridgeQueue(bridgeRoot);
     await saveBridgeConfig(bridgeRoot, {
       captureEndpoint: "http://127.0.0.1:9/memhub/capture",
@@ -1012,6 +1194,74 @@ async function testHttp(memoryPort) {
       assert.equal(raceRequests[1].assistant_text, "assistant half");
     } finally {
       await new Promise((resolveClose) => raceServer.close(resolveClose));
+    }
+
+    const backoffRoot = join(root, "bridge-backoff");
+    let backoffRequests = 0;
+    const backoffUpstream = createServer(async (request, response) => {
+      for await (const _chunk of request) { /* drain */ }
+      backoffRequests += 1;
+      response.writeHead(503, { "content-type": "application/json" });
+      response.end('{"error":"temporary"}');
+    });
+    const backoffUpstreamPort = await freePort();
+    await new Promise((resolveListen) => backoffUpstream.listen(backoffUpstreamPort, "127.0.0.1", resolveListen));
+    const backoffBridgePort = await freePort();
+    await saveBridgeConfig(backoffRoot, {
+      captureEndpoint: `http://127.0.0.1:${backoffUpstreamPort}/capture`,
+      deviceToken: createdDevice.token
+    });
+    const backoffChild = spawn(process.execPath, [bridgeEntry, "serve", "--port", String(backoffBridgePort)], {
+      env: { ...process.env, MEMHUB_BRIDGE_HOME: backoffRoot },
+      stdio: ["ignore", "ignore", "pipe"]
+    });
+    let backoffStderr = "";
+    backoffChild.stderr.setEncoding("utf8");
+    backoffChild.stderr.on("data", (data) => { backoffStderr += data; });
+    try {
+      const readyDeadline = Date.now() + 5_000;
+      while (!backoffStderr.includes("[memhub-bridge] listening") && Date.now() < readyDeadline) {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+      }
+      assert.match(backoffStderr, /\[memhub-bridge\] listening/);
+      const postQueuedCapture = (eventId) => fetch(`http://127.0.0.1:${backoffBridgePort}/capture`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          event_id: eventId,
+          host: "codex",
+          conversation_id: "bridge-backoff",
+          continuity_id: "bridge-backoff",
+          timestamp: "2026-09-22T06:00:00.000Z",
+          user_text: eventId,
+          capture_status: "complete"
+        })
+      });
+      assert.equal((await postQueuedCapture("bridge-backoff-1")).status, 202);
+      let backoffStatus;
+      const failureDeadline = Date.now() + 3_000;
+      while (Date.now() < failureDeadline) {
+        backoffStatus = await (await fetch(`http://127.0.0.1:${backoffBridgePort}/status`)).json();
+        if (backoffStatus.retry.failure_streak >= 1) break;
+        await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+      }
+      assert.equal(backoffRequests, 1);
+      assert.equal(backoffStatus.retry.failure_streak, 1);
+      assert.ok(backoffStatus.retry.next_retry_at);
+      const requestsBeforeSecondCapture = backoffRequests;
+      assert.equal((await postQueuedCapture("bridge-backoff-2")).status, 202);
+      await new Promise((resolveWait) => setTimeout(resolveWait, 400));
+      assert.equal(backoffRequests, requestsBeforeSecondCapture);
+      const queuedDuringBackoff = await (await fetch(`http://127.0.0.1:${backoffBridgePort}/status`)).json();
+      assert.equal(queuedDuringBackoff.pending, 2);
+      assert.equal(queuedDuringBackoff.retry.failure_streak, 1);
+    } finally {
+      backoffChild.kill("SIGTERM");
+      await new Promise((resolveExit) => {
+        backoffChild.once("exit", resolveExit);
+        setTimeout(resolveExit, 500);
+      });
+      await new Promise((resolveClose) => backoffUpstream.close(resolveClose));
     }
 
     await saveBridgeConfig(bridgeRoot, {
@@ -1160,6 +1410,61 @@ async function testHttp(memoryPort) {
     assert.equal(thresholdJobs.length, 2);
     assert.deepEqual(thresholdJobs[0].evidence_refs.sort(), ["l1:capture-threshold-1", "l1:capture-threshold-2"]);
     assert.deepEqual(thresholdJobs[1].evidence_refs.sort(), ["l1:capture-threshold-3", "l1:capture-threshold-4"]);
+
+    const longCapturePayload = JSON.stringify({
+      event_id: "capture-long-utf8",
+      host: "codex",
+      conversation_id: "long-utf8",
+      timestamp: "2026-09-18T08:05:00.000Z",
+      project_hint: "aide",
+      user_text: "界".repeat(300_000),
+      reasoning_summary: "理".repeat(100_000),
+      capture_status: "partial"
+    });
+    assert.ok(Buffer.byteLength(longCapturePayload, "utf8") > 1_000_000);
+    assert.ok(Buffer.byteLength(longCapturePayload, "utf8") < 4_000_000);
+    const longCaptureResponse = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${createdDevice.token}`
+      },
+      body: longCapturePayload
+    });
+    assert.equal(longCaptureResponse.status, 201);
+    const longStored = (await listCaptureEvents(stateRoot, "acct-test", { conversationId: "long-utf8", limit: 2 }))[0];
+    assert.equal(longStored.user_text.length, 300_000);
+    assert.equal(longStored.reasoning_summary.length, 100_000);
+
+    const oversizedCapturePayload = JSON.stringify({
+      event_id: "capture-over-http-limit",
+      host: "codex",
+      conversation_id: "oversized-http",
+      timestamp: "2026-09-18T08:06:00.000Z",
+      user_text: "界".repeat(1_400_000)
+    });
+    assert.ok(Buffer.byteLength(oversizedCapturePayload, "utf8") > 4_000_000);
+    const oversizedCaptureResponse = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${createdDevice.token}`
+      },
+      body: oversizedCapturePayload
+    });
+    assert.equal(oversizedCaptureResponse.status, 413);
+    assert.equal((await oversizedCaptureResponse.json()).error, "request_body_too_large");
+
+    const invalidJsonResponse = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${createdDevice.token}`
+      },
+      body: '{"event_id":'
+    });
+    assert.equal(invalidJsonResponse.status, 400);
+    assert.equal((await invalidJsonResponse.json()).error, "invalid_json_body");
     await setDistillationConfig(stateRoot, { auto_enabled: false });
   } finally {
     child.kill("SIGTERM");
@@ -1213,6 +1518,25 @@ async function exerciseClient(client, conversationId, stateRoot) {
   }
   assert.ok(projectList.projects.some((project) => project.project === "aide"));
   assert.equal(projectList.matches[0]?.project, "aide");
+  let workspaceProjectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "memhub" } })).content[0].text);
+  if (!workspaceProjectList.projects.some((project) => project.project === "memhub")) {
+    const createWorkspacePlan = JSON.parse((await client.callTool({
+      name: "memmy_project_manage",
+      arguments: {
+        action: "plan",
+        operation: "create",
+        project: "memhub",
+        description: "Memhub project used to verify current-workspace scope precedence."
+      }
+    })).content[0].text);
+    const createWorkspaceResult = JSON.parse((await client.callTool({
+      name: "memmy_project_manage",
+      arguments: { action: "execute", authorization_id: createWorkspacePlan.authorization_id }
+    })).content[0].text);
+    assert.equal(createWorkspaceResult.ok, true);
+    workspaceProjectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "memhub" } })).content[0].text);
+  }
+  assert.ok(workspaceProjectList.projects.some((project) => project.project === "memhub"));
   const baselineTodos = JSON.parse((await client.callTool({
     name: "memhub_todo",
     arguments: { action: "list", project: "aide", status: "all" }
@@ -1276,6 +1600,35 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(currentExplicitWithoutConversation.binding_available, false);
   assert.equal(currentExplicitWithoutConversation.resolution_source, "explicit_project");
   assert.equal(currentExplicitWithoutConversation.persisted, false);
+  const currentWorkspaceWithoutConversation = JSON.parse((await client.callTool({
+    name: "memmy_project",
+    arguments: { action: "current", workspace_project: "AIDE" }
+  })).content[0].text);
+  assert.equal(currentWorkspaceWithoutConversation.project, "aide");
+  assert.equal(currentWorkspaceWithoutConversation.resolution_source, "workspace_project");
+  const workspacePriorityConversation = `${conversationId}-workspace-priority`;
+  await client.callTool({
+    name: "memmy_project",
+    arguments: { action: "bind", conversation_id: workspacePriorityConversation, project: "aide" }
+  });
+  const workspacePriority = JSON.parse((await client.callTool({
+    name: "memmy_project",
+    arguments: { action: "current", conversation_id: workspacePriorityConversation, workspace_project: "memhub" }
+  })).content[0].text);
+  assert.equal(workspacePriority.project, "memhub");
+  assert.equal(workspacePriority.resolution_source, "workspace_project");
+  assert.equal(workspacePriority.persisted, false);
+  const conflictingTodoScope = await client.callTool({
+    name: "memhub_todo",
+    arguments: {
+      action: "add",
+      project: "aide",
+      workspace_project: "memhub",
+      text: "This conflicting scope must never be written."
+    }
+  });
+  assert.equal(conflictingTodoScope.isError, true);
+  assert.match(conflictingTodoScope.content[0].text, /project\/workspace conflict/);
   const unresolved = JSON.parse((await client.callTool({
     name: "memmy_context",
     arguments: { query: "continue the AIDEE work", project: "aidee", conversation_id: conversationId + "-unknown" }
@@ -1324,6 +1677,27 @@ async function exerciseClient(client, conversationId, stateRoot) {
       arguments: { action: "execute", authorization_id: plan.authorization_id }
     })).content[0].text).ok, true);
   }
+  const mergeHarness = `merge-job-${conversationId}`;
+  const mergeJob = await enqueueDerivedDistillationJob({
+    stateRoot,
+    accountId: "acct-test",
+    target: "l3",
+    projectId: mergeSource,
+    evidence: [{
+      ref: `artifact:merge-source-${conversationId}`,
+      kind: "artifact",
+      timestamp: "2026-09-22T00:00:00.000Z",
+      project_id: mergeSource,
+      layer: "L2",
+      content: "Historical L2 evidence that must remain valid after project merge."
+    }]
+  });
+  const leasedMergeJob = await leaseDistillationJob(stateRoot, "acct-test", {
+    projectId: mergeSource,
+    target: "l3",
+    harness: mergeHarness
+  });
+  assert.equal(leasedMergeJob?.job_id, mergeJob.job.job_id);
   const mergePlan = JSON.parse((await client.callTool({
     name: "memmy_project_manage",
     arguments: { action: "plan", operation: "merge", project: mergeSource, target: mergeTarget }
@@ -1332,13 +1706,72 @@ async function exerciseClient(client, conversationId, stateRoot) {
     name: "memmy_project_manage",
     arguments: { action: "execute", authorization_id: mergePlan.authorization_id }
   })).content[0].text).ok, true);
+  const mergedJobDryRun = await client.callTool({
+    name: "memhub_distill",
+    arguments: {
+      action: "submit",
+      job_id: mergeJob.job.job_id,
+      source_harness: mergeHarness,
+      content: "Merged projects keep historical evidence valid under the target canonical project.",
+      dry_run: true
+    }
+  });
+  assert.equal(mergedJobDryRun.isError, undefined);
+  assert.equal(JSON.parse(mergedJobDryRun.content[0].text).project, mergeTarget);
+  assert.equal(JSON.parse((await client.callTool({
+    name: "memhub_distill",
+    arguments: { action: "skip", job_id: mergeJob.job.job_id, source_harness: mergeHarness }
+  })).content[0].text).ok, true);
+
+  const deleteJob = await enqueueDerivedDistillationJob({
+    stateRoot,
+    accountId: "acct-test",
+    target: "l3",
+    projectId: deleteProject,
+    evidence: [{
+      ref: `artifact:delete-blocker-${conversationId}`,
+      kind: "artifact",
+      timestamp: "2026-09-22T00:00:00.000Z",
+      project_id: deleteProject,
+      layer: "L2",
+      content: "Pending evidence blocks project deletion until the job is resolved."
+    }]
+  });
   const deletePlan = JSON.parse((await client.callTool({
     name: "memmy_project_manage",
     arguments: { action: "plan", operation: "delete", project: deleteProject }
   })).content[0].text);
-  assert.equal(JSON.parse((await client.callTool({
+  assert.ok(deletePlan.impact.blockedByDistillationJobs.some((job) => job.job_id === deleteJob.job.job_id));
+  const blockedDelete = await client.callTool({
     name: "memmy_project_manage",
     arguments: { action: "execute", authorization_id: deletePlan.authorization_id }
+  });
+  assert.equal(blockedDelete.isError, true);
+  assert.match(blockedDelete.content[0].text, /unfinished distillation job/);
+  const deleteHarness = `delete-job-${conversationId}`;
+  const leasedDelete = JSON.parse((await client.callTool({
+    name: "memhub_distill",
+    arguments: {
+      action: "next",
+      kind: "l3",
+      scope: "project",
+      project: deleteProject,
+      source_harness: deleteHarness
+    }
+  })).content[0].text);
+  assert.equal(leasedDelete.job.job_id, deleteJob.job.job_id);
+  assert.equal(JSON.parse((await client.callTool({
+    name: "memhub_distill",
+    arguments: { action: "skip", job_id: deleteJob.job.job_id, source_harness: deleteHarness }
+  })).content[0].text).ok, true);
+  const deletePlanAfterResolution = JSON.parse((await client.callTool({
+    name: "memmy_project_manage",
+    arguments: { action: "plan", operation: "delete", project: deleteProject }
+  })).content[0].text);
+  assert.equal(deletePlanAfterResolution.impact.blockedByDistillationJobs.length, 0);
+  assert.equal(JSON.parse((await client.callTool({
+    name: "memmy_project_manage",
+    arguments: { action: "execute", authorization_id: deletePlanAfterResolution.authorization_id }
   })).content[0].text).ok, true);
   const historicalProjects = JSON.parse((await client.callTool({
     name: "memmy_project_list",
@@ -1386,6 +1819,18 @@ async function exerciseClient(client, conversationId, stateRoot) {
       reasoning_summary: "Validated the project binding and memory boundary."
     }
   });
+  await client.callTool({
+    name: "memmy_turn",
+    arguments: {
+      action: "checkpoint",
+      event_id: l1EventId,
+      conversation_id: conversationId,
+      continuity_id: conversationId,
+      turn_id: `source-${conversationId}`,
+      reasoning_summary: "Validated the project binding, memory boundary, and lifecycle update semantics.",
+      tool_summary: "Checkpoint summaries may advance while the L1 turn is incomplete."
+    }
+  });
   const committedTurn = JSON.parse((await client.callTool({
     name: "memmy_turn",
     arguments: {
@@ -1394,7 +1839,9 @@ async function exerciseClient(client, conversationId, stateRoot) {
       conversation_id: conversationId,
       continuity_id: conversationId,
       turn_id: `source-${conversationId}`,
-      assistant_text: "Keep this original assistant final in L1."
+      assistant_text: "Keep this original assistant final in L1.",
+      reasoning_summary: "Final public audit summary for this completed turn.",
+      tool_summary: "Final tool summary for this completed turn."
     }
   })).content[0].text);
   assert.equal(committedTurn.turn.status, "complete");
@@ -1403,7 +1850,8 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: { action: "resume", conversation_id: conversationId, continuity_id: conversationId }
   })).content[0].text);
   assert.equal(resumed.turns.at(-1).event_id, l1EventId);
-  assert.equal(resumed.turns.at(-1).reasoning_summary, "Validated the project binding and memory boundary.");
+  assert.equal(resumed.turns.at(-1).reasoning_summary, "Final public audit summary for this completed turn.");
+  assert.equal(resumed.turns.at(-1).tool_summary, "Final tool summary for this completed turn.");
   assert.equal(resumed.incomplete.length, 0);
 
   const unboundOpen = JSON.parse((await client.callTool({

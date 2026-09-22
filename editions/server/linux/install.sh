@@ -8,20 +8,21 @@ SERVER_STATE="$STATE_ROOT/server"
 MEMORY_DIR="$STATE_ROOT/memory"
 CONFIG_PATH="$STATE_ROOT/memory-config.yaml"
 ENV_PATH="$STATE_ROOT/server.env"
-NODE="${NODE:-$(command -v node || true)}"
+BUNDLED_NODE="$REPO_ROOT/runtime/node"
+NODE="${NODE:-$([[ -x "$BUNDLED_NODE" ]] && printf '%s' "$BUNDLED_NODE" || command -v node || true)}"
 NPM="${NPM:-$(command -v npm || true)}"
 USERNAME="${MEMHUB_USERNAME:-owner}"
 EMAIL="${MEMHUB_EMAIL:-}"
 PUBLIC_HOST="${MEMHUB_PUBLIC_HOST:-}"
 
 [[ -n "$NODE" ]] || { echo "Node.js 20+ is required" >&2; exit 2; }
-[[ -n "$NPM" ]] || { echo "npm is required" >&2; exit 2; }
-
 if [[ ! -d "$REPO_ROOT/node_modules" ]]; then
+  [[ -n "$NPM" ]] || { echo "npm is required because bundled dependencies are missing" >&2; exit 2; }
   echo "[memhub] dependencies missing; installing from lockfile"
   (cd "$REPO_ROOT" && ONNXRUNTIME_NODE_INSTALL_CUDA=skip npm ci --workspaces=false)
 fi
 if [[ ! -f "$REPO_ROOT/vendor/memory-core/src/server/index.js" || ! -f "$REPO_ROOT/dist/mcp.js" ]]; then
+  [[ -n "$NPM" ]] || { echo "npm is required because bundled build output is missing" >&2; exit 2; }
   echo "[memhub] build output missing; building Memhub"
   (cd "$REPO_ROOT" && npm run build)
 fi

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { withFileMutationLock } from "./file-mutation-lock.js";
 
 export type ProjectState = "active" | "merged" | "deleted";
 export type ProjectTodoStatus = "pending" | "done";
@@ -46,8 +47,6 @@ export interface ProjectSuggestion extends ProjectDescriptor {
 }
 
 export class JsonProjectRegistry {
-  private mutation = Promise.resolve();
-
   constructor(private readonly path: string) {}
 
   async reconcile(accountId: string, discoveredIds: readonly string[]): Promise<ProjectDescriptor[]> {
@@ -406,15 +405,7 @@ export class JsonProjectRegistry {
   }
 
   private async serialize<T>(operation: () => Promise<T>): Promise<T> {
-    const previous = this.mutation;
-    let release!: () => void;
-    this.mutation = new Promise<void>((resolve) => { release = resolve; });
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
+    return withFileMutationLock(this.path, operation);
   }
 
   private async read(): Promise<ProjectRegistryFile> {

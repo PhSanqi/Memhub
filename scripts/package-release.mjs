@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const CHECK_ONLY = process.argv.includes("--check");
+const WORKTREE = process.argv.includes("--worktree");
 const REF = argumentValue("--ref") ?? "HEAD";
 
 const variants = [
@@ -28,6 +30,7 @@ const commonPaths = [
   "src",
   "scripts",
   "tests",
+  "web-assets",
   "deploy",
   "adapters",
   "docs",
@@ -35,13 +38,13 @@ const commonPaths = [
   "editions/README.md"
 ];
 
-const packageJson = CHECK_ONLY
+const packageJson = CHECK_ONLY || WORKTREE
   ? JSON.parse(await readFile(resolve(ROOT, "package.json"), "utf8"))
   : JSON.parse(gitText("show", `${REF}:package.json`));
 const version = String(packageJson.version ?? "").trim();
 if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`invalid package version: ${version || "<empty>"}`);
 
-const pluginJson = CHECK_ONLY
+const pluginJson = CHECK_ONLY || WORKTREE
   ? JSON.parse(await readFile(resolve(ROOT, "adapters/plugin/plugin.json"), "utf8"))
   : JSON.parse(gitText("show", `${REF}:adapters/plugin/plugin.json`));
 if (pluginJson.version !== version) {
@@ -52,31 +55,65 @@ for (const variant of variants) {
   const installer = `editions/${variant.edition}/${variant.os}/install.${variant.os === "windows" ? "ps1" : "sh"}`;
   assertTracked(installer);
 }
+for (const path of [
+  "install-complete.sh",
+  "install-complete.ps1",
+  "scripts/package-complete-release.mjs",
+  "scripts/package-all-release.mjs",
+  "scripts/complete-runtime-smoke.cjs"
+]) assertTracked(path);
 
 if (CHECK_ONLY) {
-  console.log(JSON.stringify({ ok: true, version, variants: variants.map((item) => item.id) }, null, 2));
+  console.log(JSON.stringify({
+    ok: true,
+    version,
+    variants: variants.map((item) => item.id),
+    complete_variants: ["linux-x64-complete", "windows-x64-complete"],
+    worktree: WORKTREE
+  }, null, 2));
   process.exit(0);
 }
 
-const commit = gitText("rev-parse", `${REF}^{commit}`).trim();
+const commit = WORKTREE ? gitText("rev-parse", "HEAD").trim() : gitText("rev-parse", `${REF}^{commit}`).trim();
 const outputRoot = resolve(ROOT, "release", `v${version}`);
 await rm(outputRoot, { recursive: true, force: true });
 await mkdir(outputRoot, { recursive: true });
+const tempRoot = WORKTREE ? await mkdtemp(join(tmpdir(), "memhub-release-")) : null;
 
 const assets = [];
-for (const variant of variants) {
-  const rootName = `memhub-v${version}-${variant.id}`;
-  const filename = `${rootName}.${variant.format}`;
-  const output = resolve(outputRoot, filename);
-  const paths = [
-    ...commonPaths,
-    `editions/${variant.edition}/README.md`,
-    `editions/${variant.edition}/README.zh-CN.md`,
-    `editions/${variant.edition}/${variant.os}`
-  ];
-  gitArchive({ ref: REF, format: variant.format, prefix: `${rootName}/`, output, paths });
-  const digest = createHash("sha256").update(await readFile(output)).digest("hex");
-  assets.push({ ...variant, filename, sha256: digest });
+try {
+  for (const variant of variants) {
+    const rootName = `memhub-v${version}-${variant.id}`;
+    const filename = `${rootName}.${variant.format}`;
+    const output = resolve(outputRoot, filename);
+    const paths = [
+      ...commonPaths,
+      `editions/${variant.edition}/README.md`,
+      `editions/${variant.edition}/README.zh-CN.md`,
+      `editions/${variant.edition}/${variant.os}`
+    ];
+    if (WORKTREE) {
+      const stage = join(tempRoot, rootName);
+      await mkdir(stage, { recursive: true });
+      for (const path of paths) {
+        const source = resolve(ROOT, path);
+        const target = resolve(stage, path);
+        await mkdir(dirname(target), { recursive: true });
+        await cp(source, target, { recursive: true, force: true });
+      }
+      if (variant.format === "tar.gz") {
+        run("tar", ["-czf", output, "-C", tempRoot, rootName]);
+      } else {
+        run("zip", ["-qr", output, rootName], { cwd: tempRoot });
+      }
+    } else {
+      gitArchive({ ref: REF, format: variant.format, prefix: `${rootName}/`, output, paths });
+    }
+    const digest = createHash("sha256").update(await readFile(output)).digest("hex");
+    assets.push({ ...variant, filename, sha256: digest });
+  }
+} finally {
+  if (tempRoot) await rm(tempRoot, { recursive: true, force: true });
 }
 
 await writeFile(
@@ -86,11 +123,11 @@ await writeFile(
 );
 await writeFile(
   resolve(outputRoot, "release-manifest.json"),
-  JSON.stringify({ format: "memhub-release-v1", version, commit, ref: REF, assets }, null, 2) + "\n",
+  JSON.stringify({ format: "memhub-release-v1", version, commit, ref: WORKTREE ? "WORKTREE" : REF, assets }, null, 2) + "\n",
   "utf8"
 );
 
-console.log(JSON.stringify({ ok: true, version, commit, outputRoot, assets }, null, 2));
+console.log(JSON.stringify({ ok: true, version, commit, ref: WORKTREE ? "WORKTREE" : REF, outputRoot, assets }, null, 2));
 
 function argumentValue(flag) {
   const index = process.argv.indexOf(flag);
@@ -106,10 +143,16 @@ function gitText(...args) {
   return result.stdout;
 }
 
+function run(command, args, options = {}) {
+  const result = spawnSync(command, args, { cwd: options.cwd ?? ROOT, encoding: "utf8", stdio: "inherit" });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed with exit ${result.status}`);
+}
+
 function assertTracked(path) {
-  if (CHECK_ONLY) {
-    const result = spawnSync("git", ["ls-files", "--error-unmatch", path], { cwd: ROOT, encoding: "utf8" });
-    if (result.status !== 0) throw new Error(`release path is not tracked: ${path}`);
+  if (CHECK_ONLY || WORKTREE) {
+    const result = spawnSync(process.execPath, ["-e", "const fs=require('node:fs'); process.exit(fs.existsSync(process.argv[1])?0:1)", resolve(ROOT, path)], { cwd: ROOT, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(`release path is missing from the working tree: ${path}`);
     return;
   }
   gitText("cat-file", "-e", `${REF}:${path}`);
