@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { access, cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -247,8 +247,7 @@ function readFileSyncCompat(path) {
 
 function assertSource(path) {
   if (CHECK_ONLY || WORKTREE) {
-    const result = spawnSync("test", ["-e", resolve(ROOT, path)]);
-    if (result.status !== 0) throw new Error(`release path is missing: ${path}`);
+    if (!existsSync(resolve(ROOT, path))) throw new Error(`release path is missing: ${path}`);
     return;
   }
   gitText("cat-file", "-e", `${REF}:${path}`);

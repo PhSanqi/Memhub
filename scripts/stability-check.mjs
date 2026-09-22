@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir, hostname, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -7,6 +8,10 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+const npmExecPath = process.env.npm_execpath?.trim();
+const npmRunner = npmExecPath
+  ? { command: process.execPath, prefixArgs: [npmExecPath] }
+  : { command: npmCommand, prefixArgs: [] };
 const runId = new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
 const explicitDir = readOption("--report-dir");
 const stateRoot = resolve(process.env.MEMHUB_STATE_ROOT ?? join(homedir(), ".memmy", "memhub"));
@@ -26,12 +31,16 @@ const startedAt = new Date();
 const results = [];
 
 for (const [name, args] of steps) {
-  results.push(await runStep(name, npmCommand, args));
+  if (name === "core-check" && !existsSync(join(stateRoot, "core", "memory.sqlite"))) {
+    results.push(await skippedStep(name, "Memory Core state is not initialized on this host"));
+    continue;
+  }
+  results.push(await runStep(name, npmRunner.command, [...npmRunner.prefixArgs, ...args]));
 }
 
 const completedAt = new Date();
 const summary = {
-  ok: results.every((item) => item.exit_code === 0),
+  ok: results.every((item) => item.exit_code === 0 || item.skipped === true),
   run_id: runId,
   started_at: startedAt.toISOString(),
   completed_at: completedAt.toISOString(),
@@ -93,6 +102,25 @@ async function runStep(name, command, args) {
     completed_at: completed.toISOString(),
     duration_ms: completed.getTime() - started.getTime(),
     exit_code: exitCode,
+    log_file: logPath
+  };
+}
+
+async function skippedStep(name, reason) {
+  const now = new Date();
+  const logPath = join(reportDir, `${name}.log`);
+  const message = `[memhub-stability] skipped: ${reason}\n`;
+  process.stdout.write(`\n[memhub-stability] ${name}\n${message}`);
+  await writeFile(logPath, message, { mode: 0o600 });
+  return {
+    name,
+    command: null,
+    started_at: now.toISOString(),
+    completed_at: now.toISOString(),
+    duration_ms: 0,
+    exit_code: null,
+    skipped: true,
+    skip_reason: reason,
     log_file: logPath
   };
 }
