@@ -66,6 +66,7 @@ async function runStep(name, command, args) {
     const child = spawn(command, args, {
       cwd: repoRoot,
       env: process.env,
+      shell: process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command),
       stdio: ["ignore", "pipe", "pipe"]
     });
     const record = (stream, chunk) => {
