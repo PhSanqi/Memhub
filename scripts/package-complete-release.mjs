@@ -302,9 +302,19 @@ function commandText(command, args, options = {}) {
 }
 
 function run(command, args, options = {}) {
+  const invocation = portableInvocation(command, args);
   console.error(`[memhub] ${command} ${args.join(" ")}`);
-  const result = spawnSync(command, args, { ...options, stdio: "inherit" });
+  const result = spawnSync(invocation.command, invocation.args, { ...options, stdio: "inherit" });
+  if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed with status ${result.status}`);
+}
+
+function portableInvocation(command, args) {
+  if (process.platform === "win32" && command === "npm") {
+    const npmExecPath = process.env.npm_execpath?.trim();
+    if (npmExecPath) return { command: process.execPath, args: [npmExecPath, ...args] };
+  }
+  return { command, args };
 }
 
 function runPowerShell(script, args = []) {

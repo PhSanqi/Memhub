@@ -51,7 +51,7 @@ async function withCrossProcessLock<T>(targetPath: string, run: () => Promise<T>
       }
       break;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
+      if (!isLockContentionError(error)) throw error;
       if (await staleLockCanBeRemoved(lockPath)) {
         await unlink(lockPath).catch((unlinkError) => {
           if ((unlinkError as NodeJS.ErrnoException)?.code !== "ENOENT") throw unlinkError;
@@ -68,6 +68,12 @@ async function withCrossProcessLock<T>(targetPath: string, run: () => Promise<T>
   } finally {
     await releaseOwnedLock(lockPath, owner.token);
   }
+}
+
+function isLockContentionError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  if (code === "EEXIST") return true;
+  return process.platform === "win32" && (code === "EPERM" || code === "EACCES");
 }
 
 async function staleLockCanBeRemoved(lockPath: string): Promise<boolean> {
