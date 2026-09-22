@@ -115,6 +115,11 @@ try {
     const output = resolve(outputRoot, filename);
     if (target.os === "linux") {
       run("tar", ["-czf", output, "-C", tempRoot, rootName]);
+    } else if (process.platform === "win32") {
+      runPowerShell(
+        "Compress-Archive -LiteralPath $args[0] -DestinationPath $args[1] -CompressionLevel Optimal -Force",
+        [join(tempRoot, rootName), output]
+      );
     } else {
       run("zip", ["-qr", output, rootName], { cwd: tempRoot });
     }
@@ -176,7 +181,11 @@ async function installNodeRuntime(target, stage, temp) {
   const extractRoot = join(temp, `node-${target.os}-${Math.random().toString(16).slice(2)}`);
   await mkdir(extractRoot, { recursive: true });
   if (target.os === "linux") run("tar", ["-xJf", archive, "-C", extractRoot]);
-  else run("unzip", ["-q", archive, "-d", extractRoot]);
+  else if (process.platform === "win32") {
+    runPowerShell("Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force", [archive, extractRoot]);
+  } else {
+    run("unzip", ["-q", archive, "-d", extractRoot]);
+  }
   const folder = target.os === "linux"
     ? `node-v${NODE_VERSION}-linux-x64`
     : `node-v${NODE_VERSION}-win-x64`;
@@ -203,8 +212,29 @@ async function validateWindowsStage(stage) {
     "node_modules/onnxruntime-node/bin/napi-v6/win32/x64/onnxruntime.dll"
   ];
   for (const relative of required) await access(join(stage, relative));
-  const fileOutput = commandText("file", [join(stage, "node_modules", "better-sqlite3", "build", "Release", "better_sqlite3.node")]);
-  if (!/PE32\+.*x86-64/i.test(fileOutput)) throw new Error(`unexpected Windows better-sqlite3 binary: ${fileOutput.trim()}`);
+  for (const relative of [
+    "runtime/node/node.exe",
+    "node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+    "node_modules/onnxruntime-node/bin/napi-v6/win32/x64/onnxruntime_binding.node"
+  ]) {
+    await assertPe32PlusX64(join(stage, relative));
+  }
+}
+
+async function assertPe32PlusX64(path) {
+  const bytes = await readFile(path);
+  if (bytes.length < 0x40 || bytes[0] !== 0x4d || bytes[1] !== 0x5a) {
+    throw new Error(`not a PE executable: ${path}`);
+  }
+  const peOffset = bytes.readUInt32LE(0x3c);
+  if (peOffset + 26 > bytes.length || bytes.toString("ascii", peOffset, peOffset + 4) !== "PE\0\0") {
+    throw new Error(`invalid PE header: ${path}`);
+  }
+  const machine = bytes.readUInt16LE(peOffset + 4);
+  const optionalMagic = bytes.readUInt16LE(peOffset + 24);
+  if (machine !== 0x8664 || optionalMagic !== 0x20b) {
+    throw new Error(`expected PE32+ x86-64 binary: ${path}`);
+  }
 }
 
 async function mergeReleaseMetadata(outputRoot, result) {
@@ -275,6 +305,10 @@ function run(command, args, options = {}) {
   console.error(`[memhub] ${command} ${args.join(" ")}`);
   const result = spawnSync(command, args, { ...options, stdio: "inherit" });
   if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed with status ${result.status}`);
+}
+
+function runPowerShell(script, args = []) {
+  run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script, ...args]);
 }
 
 async function hashFile(path) {
