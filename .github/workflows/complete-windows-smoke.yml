@@ -101,7 +101,7 @@ jobs:
           if (-not $zip) { throw "Windows Complete artifact missing" }
           $extract = Join-Path $env:RUNNER_TEMP 'memhub-complete-extract'
           Expand-Archive -Path $zip.FullName -DestinationPath $extract -Force
-          $root = Get-ChildItem $extract -Directory | Where-Object { $_.Name -like 'memhub-*-windows-complete' } | Select-Object -First 1
+          $root = Get-ChildItem $extract -Directory | Where-Object { $_.Name -like 'memhub-*-windows-*-complete' } | Select-Object -First 1
           if (-not $root) { throw "Windows Complete root missing" }
           $node = Join-Path $root.FullName 'runtime\node\node.exe'
           if (-not (Test-Path $node)) { throw "Bundled node.exe missing" }
