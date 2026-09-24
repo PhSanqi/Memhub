@@ -6,7 +6,13 @@ const root = path.resolve(__dirname, "..");
 const major = Number(process.versions.node.split(".")[0]);
 if (!Number.isInteger(major) || major < 20) throw new Error(`Node.js 20+ required, found ${process.version}`);
 
-for (const relative of ["dist/mcp.js", "dist/bridge.js", "vendor/memory-core/src/server/index.js"]) {
+for (const relative of [
+  "dist/mcp.js",
+  "dist/bridge.js",
+  "vendor/memory-core/src/server/index.js",
+  "web-assets/logo-mark.png",
+  "web-assets/logo-lockup.png"
+]) {
   if (!fs.existsSync(path.join(root, relative))) throw new Error(`Complete runtime missing ${relative}`);
 }
 

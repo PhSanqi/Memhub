@@ -1,8 +1,8 @@
 # Changelog
 
-## v0.2.3 — 2026-09-25
+## v0.2.4 — 2026-09-25
 
-Memhub 0.2.3 is a release-hygiene pass over the current v0.2 runtime. It does not introduce a new memory hierarchy; it makes the repository, documentation, release packages, and hosted entrypoint match the production system that is already running.
+Memhub 0.2.4 is a release-hygiene pass over the current v0.2 runtime. It does not introduce a new memory hierarchy; it makes the repository, documentation, release packages, and hosted entrypoint match the production system that is already running. The v0.2.3 source checkpoint was not published as a release after Windows Complete smoke exposed a missing packaged Web asset.
 
 ### Documentation and repository cleanup
 
@@ -17,6 +17,8 @@ Memhub 0.2.3 is a release-hygiene pass over the current v0.2 runtime. It does no
 - Linux systemd deployments use `memhub-stack.target` to own the Core → Gateway → optional Bridge lifecycle.
 - Release metadata and package manifests are regenerated from the clean public release tree.
 - GitHub repository metadata, documentation navigation, release notes, and downloadable artifacts are aligned to the same release.
+- Complete archives now include the Web logo assets required by the Gateway; the Complete runtime smoke verifies both images before installation.
+- Windows Local/Server installers handle absent legacy scheduled tasks without failing on native stderr, and use the correct username expansion for state-directory ACLs.
 
 ## v0.2.2 — 2026-09-24
 
