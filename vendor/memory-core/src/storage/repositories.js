@@ -198,12 +198,21 @@ export class MemoryRepository {
          AND id != ?
          AND deleted_at IS NULL
          AND status IN ('activated', 'resolving')
+         AND user_id = ?
+         AND COALESCE(json_extract(info_json, '$.project_id'), '') = ?
          AND json_extract(properties_json, '$.internal_info.read_only') = 1
          AND json_extract(properties_json, '$.internal_info.source_agent_id') = ?
          AND COALESCE(
            json_extract(properties_json, '$.internal_info.source_skill_id'),
            json_extract(properties_json, '$.internal_info.source_skill_path')
-         ) = ?`).all(input.currentMemoryId, input.sourceAgentId, input.sourceSkillIdentity);
+         ) = ?
+         AND (
+           json_extract(properties_json, '$.internal_info.source_namespace_tenant_id') = ?
+           OR EXISTS (SELECT 1 FROM json_each(tags_json) WHERE value = 'provenance:account:' || ?)
+           OR (? = ? AND json_extract(properties_json, '$.internal_info.source_namespace_tenant_id') IS NULL
+             AND NOT EXISTS (SELECT 1 FROM json_each(tags_json) WHERE value LIKE 'provenance:account:%'))
+         )`).all(input.currentMemoryId, input.userId, input.projectId ?? "", input.sourceAgentId, input.sourceSkillIdentity,
+            input.tenantId, input.tenantId, input.tenantId, input.userId);
         return rows.map((row) => {
             const memory = this.hydrate(memoryFromSql(row));
             const internalSkill = isRecordLike(memory.properties.internal_info.skill)

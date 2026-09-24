@@ -1,0 +1,15 @@
+[Unit]
+Description=Memhub dedicated Cloudflare Tunnel health watchdog
+After=network-online.target memhub.service @TUNNEL_SERVICE@
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=MEMHUB_TUNNEL_WATCHDOG_PUBLIC_URL=@PUBLIC_URL@
+Environment=MEMHUB_TUNNEL_WATCHDOG_METRICS_URL=@METRICS_URL@
+Environment=MEMHUB_TUNNEL_WATCHDOG_SERVICE=@TUNNEL_SERVICE@
+ExecStart=@MEMHUB_DIR@/scripts/check-memhub-tunnel
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+UMask=0077

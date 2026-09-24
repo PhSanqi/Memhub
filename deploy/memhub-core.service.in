@@ -1,6 +1,9 @@
 [Unit]
 Description=Memhub Embedded Memory Core
 After=network.target
+PartOf=memhub-stack.target
+StartLimitIntervalSec=120
+StartLimitBurst=6
 
 [Service]
 Type=simple
@@ -8,9 +11,12 @@ WorkingDirectory=@MEMHUB_DIR@
 Environment="MEMMY_HOME=%h/.memmy"
 Environment="MEMMY_CONFIG=%h/.memmy/config.yaml"
 ExecStart=@NODE@ @MEMHUB_DIR@/vendor/memory-core/src/server/index.js --config %h/.memmy/config.yaml --host 127.0.0.1 --port 18960 --db %h/.memmy/memory-service/memory.sqlite
+ExecStartPost=@NODE@ @MEMHUB_DIR@/scripts/wait-for-service.mjs --url http://127.0.0.1:18960/health --kind core --timeout-ms 20000
 Restart=on-failure
 RestartSec=3s
+TimeoutStartSec=35s
 TimeoutStopSec=15s
+KillMode=control-group
 UMask=0077
 
 [Install]

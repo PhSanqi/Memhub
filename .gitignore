@@ -3,6 +3,7 @@ dist/
 release/
 .vite/
 .playwright-mcp/
+.review-runtime/
 *.log
 *.sqlite
 *.sqlite-shm

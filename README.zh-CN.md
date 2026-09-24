@@ -104,14 +104,10 @@ Web 界面会直接把 L2 展示成时间流，把 L3/L4 展示成可读条目�
 
 Memhub 提供 **Local Edition** 和 **Server Edition**，Linux / Windows 都支持。
 
-现在提供两种安装方式：
+Release 同时提供两条安装路径：
 
-| 安装方式 | 本机是否需要 Node/npm | 下载体积 | 适合场景 |
-| --- | --- | --- | --- |
-| **完整安装版** | **不需要** | 较大 | 大多数用户；第一次安装最省事 |
-| **便捷安装版** | 需要 Node.js 20+ 与 npm | 较小 | 已有开发环境、希望快速升级 |
-
-两种方式都支持 Local / Server。
+- **完整安装版（Complete）**：内置目标系统对应的 Node.js runtime、生产依赖和预构建 Memhub，不要求预先安装 Node/npm。
+- **便捷/源码安装版**：使用仓库里的 `install.sh` / `install.ps1`，必要时在目标机器安装依赖并完成 build。
 
 | 你想要的体验 | 推荐 |
 | --- | --- |
@@ -126,37 +122,35 @@ Memhub 提供 **Local Edition** 和 **Server Edition**，Linux / Windows 都支�
 
 所有内容都运行在本机，默认只监听 loopback。
 
-#### 完整安装版 — 推荐
+Linux Complete：
+
+~~~bash
+bash install-complete.sh --edition local
+~~~
+
+Windows Complete：
+
+~~~powershell
+powershell -ExecutionPolicy Bypass -File .\install-complete.ps1 -Edition local
+~~~
+
+便捷/源码安装：
 
 Linux：
 
 ~~~bash
-curl -fsSL https://github.com/PhSanqi/Memhub/releases/latest/download/install-complete.sh | bash
+git clone https://github.com/PhSanqi/Memhub.git
+cd Memhub
+bash editions/local/linux/install.sh
 ~~~
 
 Windows PowerShell：
 
 ~~~powershell
-$p=Join-Path $env:TEMP 'memhub-install-complete.ps1'; iwr https://github.com/PhSanqi/Memhub/releases/latest/download/install-complete.ps1 -OutFile $p; & $p; rm $p
+git clone https://github.com/PhSanqi/Memhub.git
+cd Memhub
+powershell -ExecutionPolicy Bypass -File .\editions\local\windows\install.ps1
 ~~~
-
-完整安装版会下载包含 Node.js runtime 和生产依赖的自包含包，校验 SHA-256 后直接使用包内 Node 运行，不要求电脑提前安装 Node/npm。
-
-#### 便捷安装版 — 下载更小
-
-Linux：
-
-~~~bash
-curl -fsSL https://github.com/PhSanqi/Memhub/releases/latest/download/install.sh | bash
-~~~
-
-Windows PowerShell：
-
-~~~powershell
-$p=Join-Path $env:TEMP 'memhub-install.ps1'; iwr https://github.com/PhSanqi/Memhub/releases/latest/download/install.ps1 -OutFile $p; & $p; rm $p
-~~~
-
-便捷安装版会自动解析最新稳定 Release、下载较小的平台/Edition 包并校验 SHA-256；目标机器需要已有 Node.js 20+ 和 npm。
 
 安装后，本地 MCP / Plugin 可以连接：
 
@@ -170,34 +164,34 @@ Local Edition 适合个人单机长期使用，不需要 VPS，也不需要 Clou
 
 Server Edition 把长期记忆集中到你自己的服务器，各设备通过自己的身份连接同一个账号。
 
-#### 完整安装版 — 推荐
+Linux Complete：
+
+~~~bash
+bash install-complete.sh --edition server --public-host memory.example.com
+~~~
+
+Windows Complete：
+
+~~~powershell
+powershell -ExecutionPolicy Bypass -File .\install-complete.ps1 -Edition server -PublicHost memory.example.com
+~~~
+
+便捷/源码安装：
 
 Linux Server：
 
 ~~~bash
-curl -fsSL https://github.com/PhSanqi/Memhub/releases/latest/download/install-complete.sh | \
-  bash -s -- --edition server --public-host memory.example.com
+git clone https://github.com/PhSanqi/Memhub.git
+cd Memhub
+MEMHUB_PUBLIC_HOST=memory.example.com bash editions/server/linux/install.sh
 ~~~
 
 Windows Server：
 
 ~~~powershell
-$p=Join-Path $env:TEMP 'memhub-install-complete.ps1'; iwr https://github.com/PhSanqi/Memhub/releases/latest/download/install-complete.ps1 -OutFile $p; & $p -Edition server -PublicHost memory.example.com; rm $p
-~~~
-
-#### 便捷安装版 — 下载更小
-
-Linux Server：
-
-~~~bash
-curl -fsSL https://github.com/PhSanqi/Memhub/releases/latest/download/install.sh | \
-  bash -s -- --edition server --public-host memory.example.com
-~~~
-
-Windows Server：
-
-~~~powershell
-$p=Join-Path $env:TEMP 'memhub-install.ps1'; iwr https://github.com/PhSanqi/Memhub/releases/latest/download/install.ps1 -OutFile $p; & $p -Edition server -PublicHost memory.example.com; rm $p
+git clone https://github.com/PhSanqi/Memhub.git
+cd Memhub
+powershell -ExecutionPolicy Bypass -File .\editions\server\windows\install.ps1 -PublicHost memory.example.com
 ~~~
 
 Server 默认仍只监听 loopback。公网入口建议放在 Cloudflare Access 或其他经过认证的反向代理后。
@@ -206,9 +200,8 @@ Server 默认仍只监听 loopback。公网入口建议放在 Cloudflare Access 
 
 - [Local Edition](editions/local/README.zh-CN.md)
 - [Server Edition](editions/server/README.zh-CN.md)
+- [Release 与 Complete 包](docs/EDITIONS.md)
 - [Release Packages](https://github.com/PhSanqi/Memhub/releases)
-
-如果需要开发、调试或手动控制安装目录，也可以 clone 仓库后直接运行 `editions/<edition>/<platform>/install.*`。
 
 ---
 

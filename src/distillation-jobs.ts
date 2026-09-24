@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { StoredCaptureEvent } from "./capture.js";
+import { withFileMutationLock } from "./file-mutation-lock.js";
 
 export type DistillationTarget = "l2" | "l3" | "l4" | "skill";
 
@@ -54,8 +55,6 @@ interface JobStore {
   version: 2;
   jobs: DistillationJob[];
 }
-
-let mutationTail = Promise.resolve();
 
 export async function getDistillationConfig(stateRoot: string): Promise<DistillationConfig> {
   try {
@@ -185,7 +184,7 @@ export async function leaseDistillationJob(
     leaseSeconds?: number;
   }
 ): Promise<DistillationJob | null> {
-  return withMutation(async () => {
+  return withMutation(stateRoot, async () => {
     const store = await loadStore(stateRoot);
     const now = Date.now();
     for (const job of store.jobs) {
@@ -297,7 +296,7 @@ async function enqueueJob(input: {
   const evidenceHash = createHash("sha256")
     .update(JSON.stringify({ target: input.target, project: input.projectId, evidence }), "utf8")
     .digest("hex");
-  return withMutation(async () => {
+  return withMutation(input.stateRoot, async () => {
     const store = await loadStore(input.stateRoot);
     const existing = store.jobs.find((job) =>
       job.account_id === input.accountId &&
@@ -351,7 +350,7 @@ async function mutateJob(
   jobId: string,
   fn: (job: DistillationJob) => void
 ): Promise<void> {
-  await withMutation(async () => {
+  await withMutation(stateRoot, async () => {
     const store = await loadStore(stateRoot);
     const job = store.jobs.find((item) => item.job_id === jobId && item.account_id === accountId);
     if (!job) throw new Error("distillation job not found for account");
@@ -439,14 +438,6 @@ async function atomicJson(path: string, value: unknown): Promise<void> {
   await rename(temporary, path);
 }
 
-async function withMutation<T>(run: () => Promise<T>): Promise<T> {
-  const previous = mutationTail;
-  let release!: () => void;
-  mutationTail = new Promise<void>((resolveLock) => { release = resolveLock; });
-  await previous;
-  try {
-    return await run();
-  } finally {
-    release();
-  }
+async function withMutation<T>(stateRoot: string, run: () => Promise<T>): Promise<T> {
+  return withFileMutationLock(storePath(stateRoot), run);
 }

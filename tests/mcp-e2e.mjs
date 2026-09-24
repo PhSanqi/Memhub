@@ -2,20 +2,23 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer, request as httpRequest } from "node:http";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import Database from "better-sqlite3";
-import { MemhubBridgeQueue, saveBridgeConfig } from "../dist/bridge.js";
+import { MemhubBridgeQueue, bridgeRetryDelayMs, saveBridgeConfig } from "../dist/bridge.js";
 import { FileProjectArchitectureSource } from "../dist/architecture-source.js";
 import { JsonProjectRegistry } from "../dist/project-registry.js";
 import { addAccount, ensureLocalAdminToken, setAccountRole } from "../dist/auth.js";
 import { createDevice, countCaptureEvents, listCaptureEvents } from "../dist/capture.js";
 import { defaultMemoryUserId } from "../dist/memory-source.js";
 import {
+  completeDistillationJob,
+  enqueueDerivedDistillationJob,
   enqueueDistillationJob,
   failDistillationJob,
   leaseDistillationJob,
@@ -42,6 +45,226 @@ function assertInlineScriptsParse(html) {
     assert.doesNotThrow(() => new Function(script));
   }
 }
+
+function chromiumExecutable() {
+  const candidates = [
+    process.env.MEMHUB_CHROMIUM,
+    process.env.CHROME_PATH,
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
+  ].filter(Boolean);
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
+function spawnCapture(command, args) {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (code === 0) resolvePromise(stdout);
+      else reject(new Error(`chromium layout smoke failed (${code ?? signal}): ${stderr.slice(-1200)}`));
+    });
+  });
+}
+
+async function assertResponsiveLayoutWithChromium(pages) {
+  const chromium = chromiumExecutable();
+  assert.ok(chromium, "responsive Chromium regression requires Chrome/Chromium; set MEMHUB_CHROMIUM when it is not on a standard path");
+  const layoutRoot = join(root, "responsive-layout");
+  await mkdir(layoutRoot, { recursive: true });
+  const collectedMetrics = [];
+  for (const [page, html] of Object.entries(pages)) {
+    const safeHtml = html.replace(
+      "<script>",
+      "<script>try{history.pushState=()=>{};history.replaceState=()=>{}}catch{};window.fetch=async()=>new Response(JSON.stringify({counts:{projects:2,L1:4,L2:3,L3:2,L4:1,Skill:2,pendingTodo:1},todos:{pending:[]},processing:{pending:0,leased:0},items:[]}),{status:200,headers:{'content-type':'application/json'}});</script><script>"
+    );
+    const encoded = Buffer.from(safeHtml).toString("base64");
+    for (const width of [390, 768, 1024, 1440]) {
+      const wrapperPath = join(layoutRoot, `${page}-${width}.html`);
+      const wrapper = `<!doctype html><html><body style="margin:0"><iframe id="frame" style="width:${width}px;height:1200px;border:0;display:block"></iframe><pre id="layout-result"></pre><script>
+const frame=document.getElementById('frame');
+frame.onload=()=>setTimeout(()=>{
+  try{
+  const d=frame.contentDocument,w=frame.contentWindow;
+  const visible=(el)=>{const r=el.getBoundingClientRect(),s=w.getComputedStyle(el);return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0&&r.bottom>0&&r.right>0&&r.top<w.innerHeight&&r.left<w.innerWidth};
+  const small=[...d.querySelectorAll('a[href],button,select,input:not([type="hidden"]),textarea,summary')].filter(visible).map(el=>{const r=el.getBoundingClientRect();return {tag:el.tagName,id:el.id||'',cls:el.className||'',w:Math.round(r.width),h:Math.round(r.height)}}).filter(x=>x.w<44||x.h<44);
+  const images=[...d.querySelectorAll('img')].map(el=>({src:el.getAttribute('src')||'',width:el.getAttribute('width'),height:el.getAttribute('height')})).filter(x=>!x.width||!x.height);
+  const sidebar=d.querySelector('.console-sidebar'),flow=d.querySelector('.memory-flow'),mobileView=d.getElementById('mobile-view-select'),consoleMenuToggle=d.getElementById('console-menu-toggle'),landingMenuToggle=d.getElementById('mobile-menu-toggle');
+  const active=sidebar?.querySelector('button.active'),sidebarRect=sidebar?.getBoundingClientRect(),activeRect=active?.getBoundingClientRect();
+  const flowButtons=flow?[...flow.querySelectorAll('[data-view-target]')]:[];
+  const mvRect=mobileView?.getBoundingClientRect(),cmRect=consoleMenuToggle?.getBoundingClientRect(),lmRect=landingMenuToggle?.getBoundingClientRect();
+  document.getElementById('layout-result').textContent=JSON.stringify({
+    innerWidth:w.innerWidth,
+    clientWidth:d.documentElement.clientWidth,
+    scrollWidth:d.documentElement.scrollWidth,
+    small,
+    imagesWithoutDimensions:images,
+    colorScheme:w.getComputedStyle(d.documentElement).colorScheme,
+    sidebarOverflowX:sidebar?w.getComputedStyle(sidebar).overflowX:null,
+    sidebarClientWidth:sidebar?sidebar.clientWidth:null,
+    sidebarScrollWidth:sidebar?sidebar.scrollWidth:null,
+    sidebarCanScrollRight:sidebar?sidebar.classList.contains('can-scroll-right'):false,
+    activeNavVisible:activeRect&&sidebarRect?activeRect.left>=sidebarRect.left-1&&activeRect.right<=sidebarRect.right+1:null,
+    flowOverflowX:flow?w.getComputedStyle(flow).overflowX:null,
+    flowClientWidth:flow?flow.clientWidth:null,
+    flowScrollWidth:flow?flow.scrollWidth:null,
+    flowButtonCount:flowButtons.length,
+    mobileViewVisible:!!(mvRect&&mvRect.width>0&&mvRect.height>0),
+    mobileViewHeight:mvRect?Math.round(mvRect.height):null,
+    consoleMenuVisible:!!(cmRect&&cmRect.width>0&&cmRect.height>0),
+    consoleMenuHeight:cmRect?Math.round(cmRect.height):null,
+    landingMenuVisible:!!(lmRect&&lmRect.width>0&&lmRect.height>0)
+  });
+  }catch(error){document.getElementById('layout-result').textContent=JSON.stringify({error:String(error),stack:error?.stack||''})}
+},180);
+setTimeout(()=>{if(!document.getElementById('layout-result').textContent){document.getElementById('layout-result').textContent=JSON.stringify({error:'layout-timeout',frameReady:frame.contentDocument?.readyState||null})}},900);
+frame.srcdoc=atob('${encoded}');
+</script></body></html>`;
+      await writeFile(wrapperPath, wrapper);
+      const output = await spawnCapture(chromium, [
+        "--headless=new",
+        "--no-sandbox",
+        "--disable-background-networking",
+        "--disable-sync",
+        "--metrics-recording-only",
+        "--window-size=1800,1500",
+        "--virtual-time-budget=1800",
+        "--dump-dom",
+        `file://${wrapperPath}`
+      ]);
+      const match = /<pre id="layout-result">([^<]+)<\/pre>/.exec(output);
+      assert.ok(match?.[1], `${page} ${width}px should produce Chromium layout metrics`);
+      const metrics = JSON.parse(match[1].replaceAll("&quot;", '"').replaceAll("&amp;", "&"));
+      assert.equal(metrics.error, undefined, `${page} ${width}px Chromium layout harness must complete`);
+      assert.equal(metrics.innerWidth, width, `${page} ${width}px must use the requested CSS viewport width`);
+      assert.ok(metrics.clientWidth <= width && metrics.clientWidth >= width - 24, `${page} ${width}px document width may differ only by the browser scrollbar`);
+      assert.equal(metrics.scrollWidth, metrics.clientWidth, `${page} ${width}px must not leak horizontal overflow to the root`);
+      if (width <= 768) assert.deepEqual(metrics.small, [], `${page} ${width}px visible interactive targets must be at least 44×44px`);
+      assert.deepEqual(metrics.imagesWithoutDimensions, [], page+" "+width+"px images must include intrinsic width and height attributes");
+      assert.equal(metrics.colorScheme, "light", page+" "+width+"px default theme must expose light native controls");
+      collectedMetrics.push({ page, width, ...metrics });
+      if (page === "landing" && width <= 768) assert.equal(metrics.landingMenuVisible, true, `${page} ${width}px must expose an explicit mobile navigation menu`);
+      if (page !== "landing" && width <= 768) {
+        assert.equal(metrics.mobileViewVisible, true, `${page} ${width}px must expose the mobile view selector`);
+        assert.ok(metrics.mobileViewHeight >= 44, `${page} ${width}px mobile view selector must be touch sized`);
+        assert.equal(metrics.consoleMenuVisible, true, `${page} ${width}px must expose cross-page mobile navigation`);
+        assert.ok(metrics.consoleMenuHeight >= 44, `${page} ${width}px cross-page navigation trigger must be touch sized`);
+        if (metrics.sidebarScrollWidth > metrics.sidebarClientWidth) {
+          assert.match(metrics.sidebarOverflowX, /^(auto|scroll)$/, `${page} sidebar must contain its own horizontal scrolling`);
+          if (metrics.sidebarScrollWidth - metrics.sidebarClientWidth > 3) assert.equal(metrics.sidebarCanScrollRight, true, `${page} sidebar must expose a continuation affordance when more items remain to the right`);
+        }
+        if (metrics.flowScrollWidth > metrics.flowClientWidth) {
+          assert.match(metrics.flowOverflowX, /^(auto|scroll)$/, `${page} memory flow must contain its own horizontal scrolling`);
+        }
+        if (width === 390) {
+          assert.equal(metrics.flowButtonCount, 4, `${page} mobile lifecycle must expose all four memory layers`);
+          assert.ok(metrics.flowScrollWidth <= metrics.flowClientWidth + 1, `${page} 390px lifecycle should fit as a complete compact layout without hidden layers`);
+        }
+      }
+    }
+  }
+  if (process.env.MEMHUB_WRITE_REVIEW_PAGES === "1") {
+    const reviewDir = resolve(here, "../.review-runtime/redesign-v2");
+    await mkdir(reviewDir, { recursive: true });
+    await writeFile(join(reviewDir, "deterministic-metrics.json"), JSON.stringify({
+      generatedAt: new Date().toISOString(),
+      chromium,
+      viewports: collectedMetrics
+    }, null, 2));
+  }
+}
+
+function consoleHtmlWithBrowserMocks(html) {
+  const payloads = {
+    overview:{counts:{projects:2,pendingTodo:1,L1:2,L2:1,L3:1,L4:1,Skill:1},todos:{pending:[{project_id:"alpha",project_name:"Alpha Project",text:"Verify responsive governance layout"}]},processing:{pending:1,leased:0}},
+    projects:{total:2,items:[
+      {project_id:"alpha",title:"Alpha Project",description:"A deliberately long project description used by the browser regression to verify that realistic content remains contained inside the project card without leaking horizontal layout.",aliases:["alpha-old"],status:"active",updated_at:"2026-09-21T09:00:00.000Z",pending_todo_count:1,pending_todos:[{id:"todo-1",text:"Verify responsive governance layout",status:"pending"}],todos:[{id:"todo-1",text:"Verify responsive governance layout",status:"pending",createdAt:"2026-09-21T08:00:00.000Z"}]},
+      {project_id:"beta",title:"Beta Project",description:"Second project used for URL filter history coverage.",aliases:[],status:"active",updated_at:"2026-09-21T08:30:00.000Z",pending_todo_count:0,pending_todos:[],todos:[]}
+    ]},
+    l1:{total:1,items:[{event_id:"turn-browser-1",source_kind:"capture",user_text:"A long source turn that exercises realistic wrapping and drawer rendering.",assistant_text:"The assistant response is intentionally non-trivial so the row is representative.",capture_status:"complete",project_hint:"alpha",timestamp:"2026-09-21T08:10:00.000Z"}]},
+    l2:{total:1,items:[{id:"l2-browser-1",project_id:"alpha",title:"Alpha timeline",summary:"Current project chronology",body:"# Alpha timeline\\n\\n## 2026-09-20 Initial decision\\nThe first durable decision was recorded.\\n\\n## 2026-09-21 Responsive review\\nThe mobile review identified navigation discoverability work.",updatedAt:"2026-09-21T08:20:00.000Z"}]},
+    l3:{total:1,items:[{id:"l3-browser-1",project_id:"alpha",title:"Alpha durable rules",summary:"Durable project rules",body:"- Preserve root overflow at zero.\\n- Keep mobile navigation discoverable.\\n- Verify browser evidence before acceptance.",updatedAt:"2026-09-21T08:25:00.000Z"}]},
+    l4:{total:1,items:[{id:"l4-browser-1",title:"Cross-project profile",summary:"Stable cross-project working profile",body:"- Prefers evidence-backed verification.\\n- Prefers minimal sufficient architecture.",updatedAt:"2026-09-21T08:30:00.000Z"}]},
+    skills:{total:1,items:[{id:"skill-browser-1",title:"Responsive review",summary:"Reusable frontend review procedure",status:"active"}]},
+    processing:{config:{auto_enabled:true,turn_threshold:8,idle_minutes:30},items:[{job_id:"job-browser-1",target:"l2",project_id:"alpha",reason:"threshold",evidence_refs:["l1:browser"],status:"failed",failure:"Simulated L2 evidence mismatch",failed_at:"2026-09-21T08:35:00.000Z",attempts:2,updated_at:"2026-09-21T08:35:00.000Z"}]},
+    accounts:{total:1,items:[{account_id:"acct-browser",username:"browser-admin",cloudflare_email:"operator.long.identity@example.org",role:"admin",status:"active"}]}
+  };
+  const serialized=JSON.stringify(payloads).replaceAll("<","\\u003c");
+  const mockScript=[
+    "<script>",
+    "localStorage.memhubTheme=localStorage.memhubTheme||'light';localStorage.memhubLang=localStorage.memhubLang||'en';",
+    "const __browserPayloads="+serialized+";",
+    "window.__browserMock={mutations:0,mutationDelay:180,failMutation:false,failNext:false,delayNextGet:false};",
+    "for(const pair of [['alpha','Alpha Project'],['beta','Beta Project']]){const s=document.getElementById('project-select');if(s&&![...s.options].some(o=>o.value===pair[0])){const o=document.createElement('option');o.value=pair[0];o.textContent=pair[1];s.append(o)}}",
+    "window.confirm=()=>true;",
+    "window.fetch=async(input,init={})=>{const method=String(init.method||'GET').toUpperCase();if(method==='POST'){window.__browserMock.mutations+=1;await new Promise(r=>setTimeout(r,window.__browserMock.mutationDelay));if(window.__browserMock.failMutation){window.__browserMock.failMutation=false;return new Response('mock mutation failure',{status:500})}return new Response(JSON.stringify({ok:true}),{status:200,headers:{'content-type':'application/json'}})}if(window.__browserMock.delayNextGet){window.__browserMock.delayNextGet=false;await new Promise(r=>setTimeout(r,150))}if(window.__browserMock.failNext){window.__browserMock.failNext=false;return new Response('mock backend failure',{status:500})}const u=new URL(String(input),'https://memhub.test');const kind=u.searchParams.get('kind')||'overview';return new Response(JSON.stringify(__browserPayloads[kind]||{items:[]}),{status:200,headers:{'content-type':'application/json'}})};",
+    "</script>"
+  ].join("");
+  return html.replace("<script>",mockScript+"<script>");
+}
+
+async function runConsoleBrowserScenario({chromium,html,page,width,full}) {
+  const dir=join(root,"browser-interaction");
+  await mkdir(dir,{recursive:true});
+  const childPath=join(dir,page+"-"+width+"-child.html");
+  await writeFile(childPath,consoleHtmlWithBrowserMocks(html));
+  const childUrl=pathToFileURL(childPath).href+"?view=l2&project=alpha";
+  const wrapperPath=join(dir,page+"-"+width+"-wrapper.html");
+  const fullFlag=full?"true":"false";
+  const script=[
+    "const frame=document.getElementById('frame'),out=document.getElementById('interaction-result');",
+    "const wait=ms=>new Promise(r=>setTimeout(r,ms));const checks=[];",
+    "function check(name,value,detail=''){if(!value)throw new Error(name+(detail?': '+detail:''));checks.push(name)}",
+    "async function run(){let d=frame.contentDocument,w=frame.contentWindow;const settle=async(ms=100)=>{await wait(ms);d=frame.contentDocument;w=frame.contentWindow};",
+    "const clickView=async view=>{const mobile=d.getElementById(\'mobile-view-select\');if(mobile&&w.innerWidth<=900){const mr=mobile.getBoundingClientRect();check(\'mobile-view-visible\',mr.width>0&&mr.height>=44);mobile.value=view;mobile.dispatchEvent(new Event(\'change\',{bubbles:true}))}else{const b=d.querySelector(\'aside button[data-view=\\\"\'+view+\'\\\"]\');check(\'view-button-\'+view,!!b);b.click()}await settle();check(\'url-view-\'+view,new URL(w.location.href).searchParams.get(\'view\')===view,w.location.href)};",
+    "await settle(230);const initialMobile=d.getElementById(\'mobile-view-select\'),menuToggle=d.getElementById(\'console-menu-toggle\');check(\'initial-view-from-url\',w.innerWidth<=900?initialMobile?.value===\'l2\':d.querySelector(\'aside button[data-view=\\\"l2\\\"]\')?.classList.contains(\'active\'));if(w.innerWidth<=900){const mr=initialMobile?.getBoundingClientRect(),tr=menuToggle?.getBoundingClientRect();check(\'mobile-view-selector-visible\',!!mr&&mr.width>0&&mr.height>=44);check(\'mobile-cross-page-menu-visible\',!!tr&&tr.width>=44&&tr.height>=44)}check(\'initial-project-from-url\',d.getElementById(\'project-select\')?.value===\'alpha\');check(\'root-overflow-initial\',d.documentElement.scrollWidth===d.documentElement.clientWidth);",
+    "const sidebar=d.querySelector(\'.console-sidebar\'),flow=d.querySelector(\'.memory-flow\');check(\'lifecycle-four-layers\',flow?.querySelectorAll(\'[data-view-target]\').length===4);if("+width+"===390)check(\'lifecycle-complete-mobile\',flow.scrollWidth<=flow.clientWidth+1);",
+    "if("+JSON.stringify(page)+"==='workspace'){const ps=d.getElementById('project-select');ps.value='';ps.dispatchEvent(new Event('change',{bubbles:true}));await settle();await clickView('overview');check('all-projects-portfolio',d.querySelectorAll('.portfolio-record').length>=2,String(d.querySelectorAll('.portfolio-record').length));check('overview-title-continue',/Continue working|继续工作/.test(d.getElementById('workspace-title')?.textContent||''));await clickView('l2');check('subview-title-specific',!/Continue working|继续工作/.test(d.getElementById('workspace-title')?.textContent||'')&&/Project chronology|项目时间线/.test(d.getElementById('workspace-title')?.textContent||''))}",
+    "if(!"+fullFlag+"){await clickView(\'processing\');await settle(260);check(\'mobile-view-processing\',d.getElementById(\'mobile-view-select\')?.value===\'processing\');check(\'root-overflow-after-nav\',d.documentElement.scrollWidth===d.documentElement.clientWidth);out.textContent=JSON.stringify({checks});return}",
+    "for(const v of ['overview','projects','l1','l2','l3','l4','processing']){await clickView(v);check('rendered-'+v,!!d.getElementById('items')?.textContent.trim())}",
+    "if("+JSON.stringify(page)+"==='admin'){await clickView('overview');check('overview-single-heading',d.getElementById('view-title').getClientRects().length===0);check('overview-followup-wide',d.querySelector('.overview-todos')?.getBoundingClientRect().width>=d.querySelector('.admin-health-card')?.getBoundingClientRect().width-1);await clickView('processing');const toggle=d.getElementById('cfg-auto');check('policy-switch-semantic',toggle?.getAttribute('role')==='switch'&&toggle?.closest('label')?.textContent.includes('Automatic'));check('processing-failure-summary',d.querySelector('.job-error')?.textContent.includes('evidence mismatch'));check('processing-retry-action',!!d.querySelector('.job-quick-retry'));d.querySelector('.job-row')?.click();await settle(40);check('processing-detail-failure',d.querySelector('.job-failure-detail')?.textContent.includes('evidence mismatch'));w.closeDrawer();await settle(30);await clickView('accounts');check('account-email-primary',d.querySelector('.account-identity')?.textContent==='operator.long.identity@example.org');check('account-uuid-secondary',d.querySelector('.account-record-meta code')?.textContent==='acct-browser');check('account-no-default-json',!d.querySelector('.account-record pre'));d.querySelector('.account-record-main')?.click();await settle(40);check('account-structured-detail',!!d.querySelector('.account-detail')&&d.getElementById('drawer-title')?.textContent.includes('operator.long.identity@example.org'));w.closeDrawer()}",
+    "await clickView('projects');check('long-project-content',d.querySelector('.project-ledger-record p')?.textContent.length>80);w.__browserMock.delayNextGet=true;d.querySelector('aside button[data-view=\\\"l1\\\"]')?.click();check('loading-state-visible',!!d.querySelector('.loading-state'));await settle(230);check('loading-state-clears',!d.querySelector('.loading-state'));",
+    "w.__browserMock.failNext=true;d.getElementById('refresh').click();await settle(110);check('load-error-visible',!!d.querySelector('.load-error'));check('load-error-retry',!!d.querySelector('.load-error button'));check('load-error-details',!!d.querySelector('.load-error details'));d.querySelector('.load-error button').click();await settle();check('load-error-recovers',!d.querySelector('.load-error'));",
+    "await clickView('projects');const card=d.querySelector('.project-ledger-record');card.focus();card.click();await settle(40);const drawer=d.getElementById('drawer');check('drawer-open',!drawer.classList.contains('hidden'));const labelled=drawer.getAttribute('aria-labelledby');check('drawer-accessible-name',!!(labelled&&d.getElementById(labelled)?.textContent.trim()));check('drawer-focus-enters',drawer.contains(d.activeElement));check('background-inert',d.getElementById('main-content').hasAttribute('inert'));let fs=[...drawer.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),summary,[tabindex]:not([tabindex=\\\"-1\\\"])')].filter(e=>e.getClientRects().length);fs.at(-1).focus();d.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}));check('drawer-tab-trap',d.activeElement===fs[0]);",
+    "d.querySelector('[data-project-action=\\\"todos\\\"]')?.click();await settle(40);const todo=d.getElementById('project-todo-text');check('todo-accessible-name',!!(todo?.labels?.length||todo?.getAttribute('aria-label')));d.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));await settle(30);check('drawer-escape-closes',drawer.classList.contains('hidden'));check('drawer-focus-restores',d.activeElement===card||(d.activeElement?.classList?.contains('project-ledger-record')&&d.activeElement?.dataset?.itemIndex===card.dataset.itemIndex),d.activeElement?.outerHTML?.slice(0,160)||String(d.activeElement));check('background-inert-clears',!d.getElementById('main-content').hasAttribute('inert'));",
+    "const before=d.documentElement.dataset.theme;d.getElementById('theme-toggle').click();check('theme-toggle',d.documentElement.dataset.theme!==before);check('theme-color-sync',d.querySelector('meta[name=\\\"theme-color\\\"]').content==='#101216');d.getElementById('lang').click();check('language-toggle',d.documentElement.lang==='zh-CN');",
+    "await clickView('l3');const ps=d.getElementById('project-select');ps.value='beta';ps.dispatchEvent(new Event('change',{bubbles:true}));await settle();check('url-project-beta',new URL(w.location.href).searchParams.get('project')==='beta');await clickView('l4');w.history.back();await settle(180);check('history-back-view',new URL(w.location.href).searchParams.get('view')==='l3');check('history-back-project',d.getElementById('project-select').value==='beta');w.history.forward();await settle(180);check('history-forward-view',new URL(w.location.href).searchParams.get('view')==='l4');",
+    "const reloadUrl=w.location.href;const loaded=new Promise(resolve=>frame.addEventListener('load',resolve,{once:true}));w.location.reload();await loaded;await wait(260);d=frame.contentDocument;w=frame.contentWindow;check('reload-url-preserved',w.location.href===reloadUrl);check('reload-view-restored',d.querySelector('aside button[data-view=\\\"l4\\\"]')?.classList.contains('active'));check('reload-project-restored',d.getElementById('project-select')?.value==='beta');",
+    "await clickView('projects');const c2=d.querySelector('.project-ledger-record');c2.focus();c2.click();await settle(40);d.querySelector('[data-project-action=\\\"todos\\\"]')?.click();await settle(40);const form=d.getElementById('project-todo-form'),submit=form.querySelector('button[type=\\\"submit\\\"]'),input=d.getElementById('project-todo-text');input.value='Duplicate guard browser test';const base=w.__browserMock.mutations;w.__browserMock.failMutation=true;submit.click();form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));check('mutation-busy-disabled',submit.disabled&&submit.getAttribute('aria-busy')==='true');check('mutation-local-guard',!d.querySelector('.drawer-close').disabled);await settle(250);check('mutation-deduplicated',w.__browserMock.mutations===base+1,String(w.__browserMock.mutations-base));check('mutation-failure-restores',!submit.disabled&&!submit.hasAttribute('aria-busy'));check('mutation-failure-keeps-form',!d.getElementById('drawer').classList.contains('hidden'));check('root-overflow-final',d.documentElement.scrollWidth===d.documentElement.clientWidth);out.textContent=JSON.stringify({checks,mutations:w.__browserMock.mutations})}",
+    "frame.addEventListener('load',()=>setTimeout(()=>run().catch(e=>{out.textContent=JSON.stringify({error:String(e),stack:e?.stack||'',checks})}),170),{once:true});setTimeout(()=>{if(!out.textContent)out.textContent=JSON.stringify({error:'interaction-timeout',checks})},5000);"
+  ].join("\n");
+  assert.doesNotThrow(()=>new Function(script),page+' '+width+'px interaction wrapper script should parse');
+  const wrapper='<!doctype html><html><body style="margin:0"><iframe id="frame" src="'+childUrl+'" style="width:'+width+'px;height:1250px;border:0;display:block"></iframe><pre id="interaction-result"></pre><script>'+script+'</script></body></html>';
+  await writeFile(wrapperPath,wrapper);
+  const profilePath=join(dir,"profile-"+page+"-"+width);await mkdir(profilePath,{recursive:true});
+  const output=await spawnCapture(chromium,["--headless=new","--no-sandbox","--allow-file-access-from-files","--disable-web-security","--user-data-dir="+profilePath,"--disable-background-networking","--disable-sync","--metrics-recording-only","--window-size=1800,1500","--virtual-time-budget=5600","--dump-dom",pathToFileURL(wrapperPath).href]);
+  const match=/<pre id="interaction-result">([\s\S]*?)<\/pre>/.exec(output);
+  if(!match?.[1]?.trim()){
+    const debugDir=resolve(here,"../.review-runtime/browser-debug");
+    await mkdir(debugDir,{recursive:true});
+    await writeFile(join(debugDir,page+"-"+width+"-dump.html"),output);
+  }
+  assert.ok(match?.[1]?.trim(),page+" "+width+"px should produce Chromium interaction results\n"+output.slice(-2400));
+  const result=JSON.parse(match[1].replaceAll("&quot;",'"').replaceAll("&amp;","&").replaceAll("&lt;","<").replaceAll("&gt;",">"));
+  assert.equal(result.error,undefined,page+" "+width+"px browser interaction failed: "+(result.error||"")+"\\n"+(result.stack||""));return result;
+}
+
+async function assertBrowserInteractionsWithChromium({workspaceHtml,adminHtml}) {
+  const chromium=chromiumExecutable();assert.ok(chromium,"browser interaction regression requires Chrome/Chromium; set MEMHUB_CHROMIUM when it is not on a standard path");
+  const admin=await runConsoleBrowserScenario({chromium,html:adminHtml,page:"admin",width:390,full:true});assert.ok(admin.checks.includes("mutation-deduplicated"));
+  const workspace=await runConsoleBrowserScenario({chromium,html:workspaceHtml,page:"workspace",width:768,full:false});assert.ok(workspace.checks.includes("mobile-view-processing"));assert.ok(workspace.checks.includes("all-projects-portfolio"));assert.ok(workspace.checks.includes("overview-title-continue"));assert.ok(workspace.checks.includes("subview-title-specific"));
+}
+
 
 historyDb.exec(`
   CREATE TABLE memories (
@@ -86,6 +309,19 @@ const memory = createServer(async (request, response) => {
   requests.push({ url: request.url, body });
   response.setHeader("content-type", "application/json");
   if (request.url === "/api/v1/memory/search") {
+    if (body.query === "__long_context_probe__") {
+      response.end(JSON.stringify({ hits: [{
+        id: "long-context-probe",
+        kind: "profile",
+        memoryLayer: "L4",
+        status: "activated",
+        snippet: "界".repeat(600_000),
+        score: 0.99,
+        tags: ["global"],
+        source: "search"
+      }] }));
+      return;
+    }
     const project = body.namespace?.projectId;
     response.end(JSON.stringify({ hits: project
       ? [hit("global", "global", ["global"]), hit("project", `project ${project}`, [`project:${project}`])]
@@ -111,7 +347,8 @@ const memory = createServer(async (request, response) => {
       body.namespace?.tenantId ?? "",
       body.namespace?.projectId ?? "global",
       body.layer ?? "L1",
-      body.sourceArtifactId ?? body.sourceSkillId ?? body.title ?? body.content
+      body.sourceArtifactId ?? body.sourceSkillId ?? body.title ?? body.content,
+      ...(body.layer === "Skill" ? [body.sourceSkillVersion ?? "unversioned"] : [])
     ].join("\0");
     const prior = memoryRecords.get(memoryKey);
     const id = prior?.id ?? `memory-${++memorySequence}`;
@@ -124,6 +361,14 @@ const memory = createServer(async (request, response) => {
       body: body.content,
       tags: Array.isArray(body.tags) ? body.tags : [],
       namespace: body.namespace,
+      metadata: {
+        info: { project_id: body.namespace?.projectId },
+        properties: { internal_info: {
+          source_agent_id: body.sourceAgentId,
+          source_skill_id: body.sourceSkillId,
+          source_skill_version: body.sourceSkillVersion
+        } }
+      },
       version: (prior?.version ?? 0) + 1
     };
     memoryRecords.set(memoryKey, record);
@@ -134,6 +379,17 @@ const memory = createServer(async (request, response) => {
     return;
   }
   const viewerPath = (request.url ?? "").split("?")[0];
+  if (request.method === "POST" && viewerPath === "/api/v1/skills/archive") {
+    const item = memoryById.get(body.skillId);
+    if (!item) {
+      response.statusCode = 404;
+      response.end(JSON.stringify({ error: "not_found" }));
+      return;
+    }
+    item.status = "archived";
+    response.end(JSON.stringify({ id: item.id, status: "archived" }));
+    return;
+  }
   const viewerUrl = new URL(request.url ?? "/", "http://127.0.0.1");
   const memoryGet = /^\/api\/v1\/memory\/([^/]+)$/.exec(viewerPath);
   if (request.method === "GET" && memoryGet) {
@@ -244,6 +500,20 @@ async function testBridgeMcpProxy() {
     let raw = "";
     for await (const chunk of request) raw += chunk;
     observed.push({ headers: request.headers, body: raw, method: request.method, url: request.url });
+    if (request.url === "/context") {
+      const parsed = raw ? JSON.parse(raw) : {};
+      if (parsed.query === "__timeout__") {
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 300));
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ late: true }));
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write('{"content":"');
+      for (let index = 0; index < 12; index += 1) response.write("界".repeat(50_000));
+      response.end('"}');
+      return;
+    }
     response.writeHead(200, { "content-type": "application/json", "mcp-session-id": "bridge-proxy-session" });
     response.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } }));
   });
@@ -259,7 +529,7 @@ async function testBridgeMcpProxy() {
     cloudflareAccessClientSecret: "test-service-secret"
   });
   const child = spawn(process.execPath, [resolve(here, "../dist/bridge.js"), "serve", "--port", String(bridgePort)], {
-    env: { ...process.env, MEMHUB_BRIDGE_HOME: bridgeRoot },
+    env: { ...process.env, MEMHUB_BRIDGE_HOME: bridgeRoot, MEMHUB_BRIDGE_UPSTREAM_TIMEOUT_MS: "100" },
     stdio: ["ignore", "pipe", "pipe"]
   });
   let stderr = "";
@@ -282,13 +552,48 @@ async function testBridgeMcpProxy() {
     assert.equal(observed[0].headers["x-memhub-device-token"], deviceToken);
     assert.equal(observed[0].headers["cf-access-client-id"], "test-service-id");
     assert.equal(observed[0].headers["cf-access-client-secret"], "test-service-secret");
+
+    const longContext = await fetch(`http://127.0.0.1:${bridgePort}/context`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query: "long context passthrough" })
+    });
+    assert.equal(longContext.status, 200);
+    const longContextPayload = await longContext.json();
+    assert.equal(longContextPayload.content.length, 600_000);
+    assert.equal(observed.at(-1).url, "/context");
+
+    const oversizedMcp = await fetch(`http://127.0.0.1:${bridgePort}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "x".repeat(4_000_001)
+    });
+    assert.equal(oversizedMcp.status, 413);
+    assert.equal((await oversizedMcp.json()).error, "request_body_too_large");
+
+    const timedOutContext = await fetch(`http://127.0.0.1:${bridgePort}/context`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query: "__timeout__" })
+    });
+    assert.equal(timedOutContext.status, 504);
+    assert.equal((await timedOutContext.json()).error, "upstream_timeout");
+
+    await new Promise((resolveClose, rejectClose) => upstream.close((error) => error ? rejectClose(error) : resolveClose()));
+    const unavailableContext = await fetch(`http://127.0.0.1:${bridgePort}/context`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query: "upstream unavailable classification" })
+    });
+    assert.equal(unavailableContext.status, 502);
+    assert.equal((await unavailableContext.json()).error, "upstream_unavailable");
   } finally {
     child.kill("SIGTERM");
     await new Promise((resolveExit) => {
       child.once("exit", resolveExit);
       setTimeout(resolveExit, 500);
     });
-    await new Promise((resolveClose) => upstream.close(resolveClose));
+    if (upstream.listening) await new Promise((resolveClose) => upstream.close(resolveClose));
   }
 }
 
@@ -407,8 +712,18 @@ async function testLocalAdmin(memoryPort) {
     assert.equal(authenticated.headers.get("referrer-policy"), "no-referrer");
     const authenticatedHtml = await authenticated.text();
     assertInlineScriptsParse(authenticatedHtml);
-    assert.match(authenticatedHtml, /Local token \+ loopback Host/);
-    assert.match(authenticatedHtml, /MEMORY CONTROL PLANE/);
+    assert.match(authenticatedHtml, /Local token .* loopback/);
+    assert.match(authenticatedHtml, /ADMIN \/ OPERATIONS/);
+    assert.match(authenticatedHtml, /class="admin-body memory-console-body admin-mode"/);
+    assert.match(authenticatedHtml, /@media\(max-width:900px\)/);
+    assert.match(authenticatedHtml, /id="console-menu-toggle"/);
+    assert.match(authenticatedHtml, /name="theme-color"/);
+    assert.match(authenticatedHtml, /class="skip-link" href="#main-content"/);
+    assert.match(authenticatedHtml, /touch-action:manipulation/);
+    assert.match(authenticatedHtml, /overscroll-behavior:contain/);
+    assert.match(authenticatedHtml, /name="memory-filter"/);
+    assert.match(authenticatedHtml, /name="project-description"/);
+    assert.match(authenticatedHtml, /autocomplete="off"/);
     assert.match(authenticatedHtml, /id="refresh"/);
     assert.match(authenticatedHtml, /id="theme-toggle"/);
     assert.match(authenticatedHtml, /localStorage\.memhubTheme/);
@@ -424,17 +739,21 @@ async function testLocalAdmin(memoryPort) {
     assert.match(authenticatedHtml, /data-view="skills"/);
     assert.match(authenticatedHtml, /data-view="processing"/);
     assert.match(authenticatedHtml, /id="account-select"/);
+    assert.match(authenticatedHtml, /id="mobile-view-select"/);
+    assert.match(authenticatedHtml, /data-en="Admin"/);
     assert.match(authenticatedHtml, /id="memory-flow"/);
     assert.match(authenticatedHtml, /id="primary-action"/);
     assert.match(authenticatedHtml, /class="nav-group"/);
-    assert.match(authenticatedHtml, /class="project-card"/);
+    assert.match(authenticatedHtml, /class="project-ledger-record"/);
     assert.match(authenticatedHtml, /class="policy-card"/);
     assert.match(authenticatedHtml, /create-project/);
     assert.match(authenticatedHtml, /set-distillation-config/);
+    assert.match(authenticatedHtml, /id="project-delete-confirm"/);
+    assert.match(authenticatedHtml, /HIGH IMPACT/);
     assert.doesNotMatch(authenticatedHtml, /data-view="captures"/);
     assert.doesNotMatch(authenticatedHtml, /data-view="episodes"/);
     assert.match(authenticatedHtml, /function renderOverview/);
-    assert.match(authenticatedHtml, /class="site-header"/);
+    assert.match(authenticatedHtml, /class="site-header console-topbar"/);
     assert.match(authenticatedHtml, /class="site-brand"/);
     assert.match(authenticatedHtml, /aria-live="polite"/);
     assert.match(authenticatedHtml, /role="dialog"/);
@@ -443,22 +762,58 @@ async function testLocalAdmin(memoryPort) {
     assert.equal(landing.status, 200);
     const landingHtml = await landing.text();
     assertInlineScriptsParse(landingHtml);
-    assert.match(landingHtml, /PROJECT-AWARE LONG-TERM MEMORY/);
-    assert.match(landingHtml, /FOUR RELEASE SURFACES/);
+    assert.match(landingHtml, /DURABLE AI MEMORY/);
+    assert.match(landingHtml, /class="memory-model-v2"/);
+    assert.match(landingHtml, /href="\/memhub\/docs\/workflows"/);
     assert.match(landingHtml, /github\.com\/PhSanqi\/Memhub/);
+    assert.match(landingHtml, /href="\/memhub\/docs"/);
+    assert.match(landingHtml, /href="\/memhub\/docs\/install"/);
     assert.match(landingHtml, /id="theme-toggle"/);
+    assert.match(landingHtml, /class="hero-product-proof"/);
+    assert.match(landingHtml, /class="memory-topology"/);
+    assert.match(landingHtml, /class="skill-plane"/);
+    assert.match(landingHtml, /Skill 不是第五层/);
+    assert.match(landingHtml, /\/assets\/logo-mark\.png/);
+    for (const asset of ["logo-mark.png", "logo-lockup.png"]) {
+      const response = await fetch(`http://127.0.0.1:${port}/memhub/assets/${asset}`);
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get("content-type") ?? "", /image\/png/);
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      assert.ok(bytes.length > 1000, `${asset} should be a real PNG asset`);
+      assert.equal(String.fromCharCode(...bytes.slice(1, 4)), "PNG");
+    }
     assert.match(landingHtml, /id="lang-toggle"/);
-    assert.match(landingHtml, /data-zh="项目感知长期记忆"/);
-    assert.match(landingHtml, /data-en="Memory that stays connected to the work\."/);
+    assert.match(landingHtml, /data-en="Let the next AI session/);
+    assert.match(landingHtml, /class="quickstart"/);
+    assert.match(landingHtml, /name="theme-color"/);
+    assert.match(landingHtml, /class="skip-link" href="#main-content"/);
     assert.match(landingHtml, /data-theme="light"/);
     assert.match(landingHtml, /landing-brand site-brand/);
     assert.match(landingHtml, /prefers-reduced-motion:reduce/);
+    for (const docsPath of ["/memhub/docs", "/memhub/docs/install", "/memhub/docs/workflows", "/memhub/docs/privacy", "/memhub/docs/troubleshooting"]) {
+      const docsResponse = await fetch(`http://127.0.0.1:${port}${docsPath}`);
+      assert.equal(docsResponse.status, 200, `${docsPath} should be public`);
+      const docsHtml = await docsResponse.text();
+      assertInlineScriptsParse(docsHtml);
+      assert.match(docsHtml, /MEMHUB DOCS/);
+      assert.match(docsHtml, /aria-current="page"/);
+      assert.match(docsHtml, /class="docs-task-meta"/);
+      assert.match(docsHtml, /class="docs-page-toc"/);
+      assert.match(docsHtml, /class="docs-pagination"/);
+      const countMatch = docsHtml.match(/<b>(\d+) 字<\/b>/);
+      assert.ok(countMatch && Number(countMatch[1]) >= 3000, `${docsPath} should expose at least 3000 Chinese characters`);
+    }
     const workspaceView = await fetch(`http://127.0.0.1:${port}/memhub/user`, { headers: { authorization } });
     assert.equal(workspaceView.status, 200);
     const workspaceHtml = await workspaceView.text();
     assertInlineScriptsParse(workspaceHtml);
-    assert.match(workspaceHtml, /data-en="Workspace"/);
-    assert.match(workspaceHtml, /data-en="My long-term memory"/);
+    assert.match(workspaceHtml, /data-en="My memory"/);
+    assert.match(workspaceHtml, /data-en="Continue working"/);
+    assert.match(workspaceHtml, /id="workspace-title"/);
+    assert.match(workspaceHtml, /function updateWorkspaceShell/);
+    assert.match(workspaceHtml, /function renderPortfolioOverview/);
+    assert.match(workspaceHtml, /class="portfolio-record"/);
+    assert.match(workspaceHtml, /class="project-ledger-record"/);
     assert.match(workspaceHtml, /data-view="l1"/);
     assert.match(workspaceHtml, /data-view="l2"/);
     assert.match(workspaceHtml, /data-view="l3"/);
@@ -469,7 +824,7 @@ async function testLocalAdmin(memoryPort) {
     assert.doesNotMatch(workspaceHtml, /DEVICE ACCESS/);
     assert.doesNotMatch(workspaceHtml, /data-view="captures"/);
     assert.doesNotMatch(workspaceHtml, /data-view="episodes"/);
-    assert.match(workspaceHtml, /class="admin-body memory-console-body"/);
+    assert.match(workspaceHtml, /class="admin-body memory-console-body workspace-mode"/);
     assert.match(workspaceHtml, /id="theme-toggle"/);
     assert.match(workspaceHtml, /id="lang"/);
     assert.match(workspaceHtml, /localStorage\.memhubTheme/);
@@ -477,10 +832,37 @@ async function testLocalAdmin(memoryPort) {
     assert.match(workspaceHtml, /function artifactBodyHtml/);
     assert.match(workspaceHtml, /class="timeline-event"/);
     assert.match(workspaceHtml, /__memhubAutoRefresh/);
-    assert.match(workspaceHtml, /load\(current,true\)/);
+    assert.match(workspaceHtml, /load\(current,true,'none'\)/);
     assert.match(workspaceHtml, /data-theme="light"/);
-    assert.match(workspaceHtml, /class="site-header"/);
+    assert.match(workspaceHtml, /class="site-header console-topbar"/);
     assert.match(workspaceHtml, /class="site-brand"/);
+    if (process.env.MEMHUB_WRITE_REVIEW_PAGES === "1") {
+      const reviewDir = resolve(here, "../.review-runtime/redesign-v2/pages");
+      await mkdir(reviewDir, { recursive: true });
+      await writeFile(join(reviewDir, "landing.html"), landingHtml);
+      await writeFile(join(reviewDir, "workspace.html"), consoleHtmlWithBrowserMocks(workspaceHtml));
+      await writeFile(join(reviewDir, "admin.html"), consoleHtmlWithBrowserMocks(authenticatedHtml));
+      const reviewDocs = {
+        "docs.html": "/memhub/docs",
+        "install.html": "/memhub/docs/install",
+        "workflows.html": "/memhub/docs/workflows",
+        "privacy.html": "/memhub/docs/privacy",
+        "troubleshooting.html": "/memhub/docs/troubleshooting"
+      };
+      for (const [filename, pathname] of Object.entries(reviewDocs)) {
+        const html = await (await fetch(`http://127.0.0.1:${port}${pathname}`)).text();
+        await writeFile(join(reviewDir, filename), html);
+      }
+    }
+    await assertResponsiveLayoutWithChromium({
+      landing: landingHtml,
+      workspace: workspaceHtml,
+      admin: authenticatedHtml
+    });
+    await assertBrowserInteractionsWithChromium({
+      workspaceHtml,
+      adminHtml: authenticatedHtml
+    });
     const projectView = await fetch(`http://127.0.0.1:${port}/memhub/admin/api?kind=projects`, { headers: { authorization } });
     assert.equal(projectView.status, 200);
     const projectPayload = await projectView.json();
@@ -571,6 +953,39 @@ async function testLocalAdmin(memoryPort) {
       aliases: []
     });
     assert.equal(createDelete.status, 200);
+    const deleteBlocker = await enqueueDerivedDistillationJob({
+      stateRoot,
+      accountId: account.account_id,
+      target: "l3",
+      projectId: "ui-delete",
+      evidence: [{
+        ref: "artifact:ui-delete-blocker",
+        kind: "artifact",
+        timestamp: "2026-09-22T00:00:00.000Z",
+        project_id: "ui-delete",
+        layer: "L2",
+        content: "Pending Control Plane deletion blocker."
+      }]
+    });
+    const blockedDeleteProject = await adminAction({ action: "delete-project", project: "ui-delete" });
+    assert.equal(blockedDeleteProject.status, 409);
+    const blockedDeletePayload = await blockedDeleteProject.json();
+    assert.equal(blockedDeletePayload.error, "unfinished_distillation_jobs");
+    assert.ok(blockedDeletePayload.jobs.some((job) => job.job_id === deleteBlocker.job.job_id));
+    const deleteBlockerHarness = "ui-delete-blocker-harness";
+    const leasedDeleteBlocker = await leaseDistillationJob(stateRoot, account.account_id, {
+      projectId: "ui-delete",
+      target: "l3",
+      harness: deleteBlockerHarness
+    });
+    assert.equal(leasedDeleteBlocker?.job_id, deleteBlocker.job.job_id);
+    await completeDistillationJob(
+      stateRoot,
+      account.account_id,
+      deleteBlocker.job.job_id,
+      { kind: "noop" },
+      deleteBlockerHarness
+    );
     const deleteProject = await adminAction({ action: "delete-project", project: "ui-delete" });
     assert.equal(deleteProject.status, 200);
     const projectsAfterMutations = await fetch(`http://127.0.0.1:${port}/memhub/admin/api?kind=projects`, { headers: { authorization } });
@@ -778,6 +1193,12 @@ async function testHttp(memoryPort) {
       await new Promise((resolveWait) => setTimeout(resolveWait, 25));
     }
     assert.match(stderr, /listening on http:\/\/127\.0\.0\.1:/);
+    const health = await fetch(`http://127.0.0.1:${port}/memhub/health`);
+    assert.equal(health.status, 200);
+    const healthPayload = await health.json();
+    assert.equal(healthPayload.ok, true);
+    assert.equal(healthPayload.service, "memhub");
+    assert.ok(Number.isInteger(healthPayload.uptime_seconds));
     const client = new Client({ name: "memhub-http-test", version: "1.0.0" });
     const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`));
     try {
@@ -786,6 +1207,77 @@ async function testHttp(memoryPort) {
       const projects = JSON.parse((await client.callTool({ name: "memmy_project", arguments: { action: "list" } })).content[0].text);
       assert.ok(projects.projects.includes("aide"));
       assert.ok(!projects.projects.some((project) => /^ws_[a-f0-9]{32,}$/i.test(project)));
+
+      const longContext = JSON.parse((await client.callTool({
+        name: "memmy_context",
+        arguments: { query: "__long_context_probe__", project: "aide", limit: 1 }
+      })).content[0].text);
+      const longContextItem = longContext.globalMemory.find((item) => item.id === "long-context-probe");
+      assert.ok(longContextItem);
+      assert.ok(Buffer.byteLength(longContextItem.content, "utf8") <= longContext.contextBudget.maxItemContentBytes);
+      assert.equal(longContextItem.provenance.contextTruncated, true);
+      assert.equal(longContextItem.provenance.originalContentBytes, Buffer.byteLength("界".repeat(600_000), "utf8"));
+      assert.ok(longContext.contextBudget.truncatedItems >= 1);
+      assert.ok(longContext.contextBudget.emittedContentBytes <= longContext.contextBudget.maxContentBytes);
+
+      const longEvidenceProject = "long-evidence-http";
+      const registry = new JsonProjectRegistry(join(root, "project-registry.json"));
+      if (!(await registry.resolve("acct-test", longEvidenceProject))) {
+        await registry.create("acct-test", {
+          projectId: longEvidenceProject,
+          description: "Dedicated long evidence transport regression project."
+        });
+      }
+      const longEvidenceJob = await enqueueDerivedDistillationJob({
+        stateRoot,
+        accountId: "acct-test",
+        target: "l3",
+        projectId: longEvidenceProject,
+        evidence: [{
+          ref: "artifact:long-evidence-http",
+          kind: "artifact",
+          timestamp: "2026-09-22T00:00:00.000Z",
+          project_id: longEvidenceProject,
+          layer: "L2",
+          content: "证".repeat(260_000)
+        }]
+      });
+      const longHarness = "http-long-evidence-harness";
+      let chunkPayload = JSON.parse((await client.callTool({
+        name: "memhub_distill",
+        arguments: {
+          action: "next",
+          kind: "l3",
+          scope: "project",
+          project: longEvidenceProject,
+          source_harness: longHarness,
+          evidence_chunk_chars: 100_000
+        }
+      })).content[0].text);
+      assert.equal(chunkPayload.job.job_id, longEvidenceJob.job.job_id);
+      assert.equal(chunkPayload.evidence_transport.mode, "chunked");
+      assert.equal(chunkPayload.job.evidence[0].content, undefined);
+      assert.equal(chunkPayload.job.evidence[0].text_chars.content, 260_000);
+      let collectedChars = chunkPayload.evidence_chunk.length;
+      while (chunkPayload.evidence_transport.next_offset !== null) {
+        chunkPayload = JSON.parse((await client.callTool({
+          name: "memhub_distill",
+          arguments: {
+            action: "next",
+            job_id: longEvidenceJob.job.job_id,
+            source_harness: longHarness,
+            evidence_offset: chunkPayload.evidence_transport.next_offset,
+            evidence_chunk_chars: 100_000
+          }
+        })).content[0].text);
+        collectedChars += chunkPayload.evidence_chunk.length;
+      }
+      assert.equal(chunkPayload.evidence_transport.complete, true);
+      assert.equal(collectedChars, chunkPayload.evidence_transport.total_chars);
+      assert.equal(JSON.parse((await client.callTool({
+        name: "memhub_distill",
+        arguments: { action: "skip", job_id: longEvidenceJob.job.job_id, source_harness: longHarness }
+      })).content[0].text).ok, true);
     } finally {
       await client.close();
     }
@@ -947,6 +1439,14 @@ async function testHttp(memoryPort) {
     assert.equal(retried.failure, undefined);
 
     const bridgeRoot = join(root, "bridge");
+    assert.equal(bridgeRetryDelayMs(0, 1), 5_000);
+    assert.equal(bridgeRetryDelayMs(1, 1), 5_000);
+    assert.equal(bridgeRetryDelayMs(2, 1), 10_000);
+    assert.equal(bridgeRetryDelayMs(3, 1), 20_000);
+    assert.equal(bridgeRetryDelayMs(4, 1), 40_000);
+    assert.equal(bridgeRetryDelayMs(5, 1), 60_000);
+    assert.equal(bridgeRetryDelayMs(10, 0.8), 48_000);
+    assert.equal(bridgeRetryDelayMs(10, 1.2), 72_000);
     const queue = new MemhubBridgeQueue(bridgeRoot);
     await saveBridgeConfig(bridgeRoot, {
       captureEndpoint: "http://127.0.0.1:9/memhub/capture",
@@ -1014,6 +1514,74 @@ async function testHttp(memoryPort) {
       await new Promise((resolveClose) => raceServer.close(resolveClose));
     }
 
+    const backoffRoot = join(root, "bridge-backoff");
+    let backoffRequests = 0;
+    const backoffUpstream = createServer(async (request, response) => {
+      for await (const _chunk of request) { /* drain */ }
+      backoffRequests += 1;
+      response.writeHead(503, { "content-type": "application/json" });
+      response.end('{"error":"temporary"}');
+    });
+    const backoffUpstreamPort = await freePort();
+    await new Promise((resolveListen) => backoffUpstream.listen(backoffUpstreamPort, "127.0.0.1", resolveListen));
+    const backoffBridgePort = await freePort();
+    await saveBridgeConfig(backoffRoot, {
+      captureEndpoint: `http://127.0.0.1:${backoffUpstreamPort}/capture`,
+      deviceToken: createdDevice.token
+    });
+    const backoffChild = spawn(process.execPath, [bridgeEntry, "serve", "--port", String(backoffBridgePort)], {
+      env: { ...process.env, MEMHUB_BRIDGE_HOME: backoffRoot },
+      stdio: ["ignore", "ignore", "pipe"]
+    });
+    let backoffStderr = "";
+    backoffChild.stderr.setEncoding("utf8");
+    backoffChild.stderr.on("data", (data) => { backoffStderr += data; });
+    try {
+      const readyDeadline = Date.now() + 5_000;
+      while (!backoffStderr.includes("[memhub-bridge] listening") && Date.now() < readyDeadline) {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+      }
+      assert.match(backoffStderr, /\[memhub-bridge\] listening/);
+      const postQueuedCapture = (eventId) => fetch(`http://127.0.0.1:${backoffBridgePort}/capture`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          event_id: eventId,
+          host: "codex",
+          conversation_id: "bridge-backoff",
+          continuity_id: "bridge-backoff",
+          timestamp: "2026-09-22T06:00:00.000Z",
+          user_text: eventId,
+          capture_status: "complete"
+        })
+      });
+      assert.equal((await postQueuedCapture("bridge-backoff-1")).status, 202);
+      let backoffStatus;
+      const failureDeadline = Date.now() + 3_000;
+      while (Date.now() < failureDeadline) {
+        backoffStatus = await (await fetch(`http://127.0.0.1:${backoffBridgePort}/status`)).json();
+        if (backoffStatus.retry.failure_streak >= 1) break;
+        await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+      }
+      assert.equal(backoffRequests, 1);
+      assert.equal(backoffStatus.retry.failure_streak, 1);
+      assert.ok(backoffStatus.retry.next_retry_at);
+      const requestsBeforeSecondCapture = backoffRequests;
+      assert.equal((await postQueuedCapture("bridge-backoff-2")).status, 202);
+      await new Promise((resolveWait) => setTimeout(resolveWait, 400));
+      assert.equal(backoffRequests, requestsBeforeSecondCapture);
+      const queuedDuringBackoff = await (await fetch(`http://127.0.0.1:${backoffBridgePort}/status`)).json();
+      assert.equal(queuedDuringBackoff.pending, 2);
+      assert.equal(queuedDuringBackoff.retry.failure_streak, 1);
+    } finally {
+      backoffChild.kill("SIGTERM");
+      await new Promise((resolveExit) => {
+        backoffChild.once("exit", resolveExit);
+        setTimeout(resolveExit, 500);
+      });
+      await new Promise((resolveClose) => backoffUpstream.close(resolveClose));
+    }
+
     await saveBridgeConfig(bridgeRoot, {
       mcpEndpoint: `http://127.0.0.1:${port}/mcp`,
       captureEndpoint: `http://127.0.0.1:${port}/memhub/capture`,
@@ -1038,7 +1606,7 @@ async function testHttp(memoryPort) {
       try {
         await bridgeClient.connect(bridgeTransport);
         const bridgeTools = await bridgeClient.listTools();
-        assert.deepEqual(bridgeTools.tools.map((tool) => tool.name).sort(), ["memhub_distill", "memhub_todo", "memmy_context", "memmy_project", "memmy_project_list", "memmy_project_manage", "memmy_turn"]);
+        assert.deepEqual(bridgeTools.tools.map((tool) => tool.name).sort(), ["memhub_branch", "memhub_distill", "memhub_result", "memhub_skill", "memhub_todo", "memmy_context", "memmy_project", "memmy_project_list", "memmy_project_manage", "memmy_turn"]);
         const bridgeContext = await bridgeClient.callTool({
           name: "memmy_context",
           arguments: { query: "continue through local bridge", project: "aide", conversation_id: "bridge-proxy-chat" }
@@ -1160,6 +1728,61 @@ async function testHttp(memoryPort) {
     assert.equal(thresholdJobs.length, 2);
     assert.deepEqual(thresholdJobs[0].evidence_refs.sort(), ["l1:capture-threshold-1", "l1:capture-threshold-2"]);
     assert.deepEqual(thresholdJobs[1].evidence_refs.sort(), ["l1:capture-threshold-3", "l1:capture-threshold-4"]);
+
+    const longCapturePayload = JSON.stringify({
+      event_id: "capture-long-utf8",
+      host: "codex",
+      conversation_id: "long-utf8",
+      timestamp: "2026-09-18T08:05:00.000Z",
+      project_hint: "aide",
+      user_text: "界".repeat(300_000),
+      reasoning_summary: "理".repeat(100_000),
+      capture_status: "partial"
+    });
+    assert.ok(Buffer.byteLength(longCapturePayload, "utf8") > 1_000_000);
+    assert.ok(Buffer.byteLength(longCapturePayload, "utf8") < 4_000_000);
+    const longCaptureResponse = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${createdDevice.token}`
+      },
+      body: longCapturePayload
+    });
+    assert.equal(longCaptureResponse.status, 201);
+    const longStored = (await listCaptureEvents(stateRoot, "acct-test", { conversationId: "long-utf8", limit: 2 }))[0];
+    assert.equal(longStored.user_text.length, 300_000);
+    assert.equal(longStored.reasoning_summary.length, 100_000);
+
+    const oversizedCapturePayload = JSON.stringify({
+      event_id: "capture-over-http-limit",
+      host: "codex",
+      conversation_id: "oversized-http",
+      timestamp: "2026-09-18T08:06:00.000Z",
+      user_text: "界".repeat(1_400_000)
+    });
+    assert.ok(Buffer.byteLength(oversizedCapturePayload, "utf8") > 4_000_000);
+    const oversizedCaptureResponse = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${createdDevice.token}`
+      },
+      body: oversizedCapturePayload
+    });
+    assert.equal(oversizedCaptureResponse.status, 413);
+    assert.equal((await oversizedCaptureResponse.json()).error, "request_body_too_large");
+
+    const invalidJsonResponse = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${createdDevice.token}`
+      },
+      body: '{"event_id":'
+    });
+    assert.equal(invalidJsonResponse.status, 400);
+    assert.equal((await invalidJsonResponse.json()).error, "invalid_json_body");
     await setDistillationConfig(stateRoot, { auto_enabled: false });
   } finally {
     child.kill("SIGTERM");
@@ -1186,8 +1809,10 @@ function acceptIdempotent(body, operation, response) {
 
 async function exerciseClient(client, conversationId, stateRoot) {
   const listed = await client.listTools();
-  assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["memhub_distill", "memhub_todo", "memmy_context", "memmy_project", "memmy_project_list", "memmy_project_manage", "memmy_turn"]);
+  assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["memhub_branch", "memhub_distill", "memhub_result", "memhub_skill", "memhub_todo", "memmy_context", "memmy_project", "memmy_project_list", "memmy_project_manage", "memmy_turn"]);
   assert.match(listed.tools.find((tool) => tool.name === "memmy_context")?.description ?? "", /conversation_id.*不要伪造|不要伪造.*conversation_id/);
+  assert.match(listed.tools.find((tool) => tool.name === "memhub_branch")?.description ?? "", /不新增 L1\/L2\/L3\/L4/);
+  assert.match(listed.tools.find((tool) => tool.name === "memhub_result")?.description ?? "", /result_id.*next_offset|next_offset.*result_id/);
   assert.match(listed.tools.find((tool) => tool.name === "memmy_project")?.description ?? "", /action=current.*没有 conversation_id 时不会报错/);
   assert.match(listed.tools.find((tool) => tool.name === "memmy_project_list")?.description ?? "", /description.*禁止盲目新建/);
   assert.match(listed.tools.find((tool) => tool.name === "memmy_project_manage")?.description ?? "", /action=plan.*明确授权.*action=execute/);
@@ -1213,6 +1838,132 @@ async function exerciseClient(client, conversationId, stateRoot) {
   }
   assert.ok(projectList.projects.some((project) => project.project === "aide"));
   assert.equal(projectList.matches[0]?.project, "aide");
+  let workspaceProjectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "memhub" } })).content[0].text);
+  if (!workspaceProjectList.projects.some((project) => project.project === "memhub")) {
+    const createWorkspacePlan = JSON.parse((await client.callTool({
+      name: "memmy_project_manage",
+      arguments: {
+        action: "plan",
+        operation: "create",
+        project: "memhub",
+        description: "Memhub project used to verify current-workspace scope precedence."
+      }
+    })).content[0].text);
+    const createWorkspaceResult = JSON.parse((await client.callTool({
+      name: "memmy_project_manage",
+      arguments: { action: "execute", authorization_id: createWorkspacePlan.authorization_id }
+    })).content[0].text);
+    assert.equal(createWorkspaceResult.ok, true);
+    workspaceProjectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "memhub" } })).content[0].text);
+  }
+  assert.ok(workspaceProjectList.projects.some((project) => project.project === "memhub"));
+  const branchConversation = `${conversationId}-branches`;
+  const retrievalBranch = JSON.parse((await client.callTool({
+    name: "memhub_branch",
+    arguments: { action: "create", project: "aide", name: "Retrieval", goal: "Improve semantic BM25 retrieval precision." }
+  })).content[0].text).branch;
+  const webBranch = JSON.parse((await client.callTool({
+    name: "memhub_branch",
+    arguments: { action: "create", project: "aide", name: "Web", goal: "Finish the Control Plane web interface." }
+  })).content[0].text).branch;
+  await client.callTool({
+    name: "memhub_branch",
+    arguments: { action: "create", project: "aide", name: "Network", goal: "Diagnose Cloudflare transport stability." }
+  });
+  const branchList = JSON.parse((await client.callTool({
+    name: "memhub_branch",
+    arguments: { action: "list", project: "aide" }
+  })).content[0].text);
+  assert.equal(branchList.branches.length, 3);
+  await client.callTool({
+    name: "memhub_branch",
+    arguments: { action: "switch", project: "aide", conversation_id: branchConversation, branch: retrievalBranch.branchId }
+  });
+  const retrievalTurn = JSON.parse((await client.callTool({
+    name: "memmy_turn",
+    arguments: {
+      action: "open",
+      conversation_id: branchConversation,
+      continuity_id: branchConversation,
+      project: "aide",
+      user_text: "Tune semantic BM25 retrieval precision for the Retrieval branch."
+    }
+  })).content[0].text);
+  await client.callTool({
+    name: "memmy_turn",
+    arguments: {
+      action: "commit",
+      event_id: retrievalTurn.turn.event_id,
+      conversation_id: branchConversation,
+      continuity_id: branchConversation,
+      assistant_text: "Retrieval ranking work completed for this branch checkpoint."
+    }
+  });
+  let branchContext = JSON.parse((await client.callTool({
+    name: "memmy_context",
+    arguments: { query: "继续", project: "aide", conversation_id: branchConversation, continuity_id: branchConversation }
+  })).content[0].text);
+  assert.equal(branchContext.branchContext.branchId, retrievalBranch.branchId);
+  assert.equal(branchContext.branchContext.source, "conversation_binding");
+  assert.ok(branchContext.recentSession.some((item) => /BM25 retrieval/.test(item.content)));
+  branchContext = JSON.parse((await client.callTool({
+    name: "memmy_context",
+    arguments: { query: "继续", project: "aide", conversation_id: branchConversation, branch: webBranch.branchId }
+  })).content[0].text);
+  assert.equal(branchContext.branchContext.branchId, webBranch.branchId);
+  assert.equal(branchContext.branchContext.source, "explicit");
+  const webTurn = JSON.parse((await client.callTool({
+    name: "memmy_turn",
+    arguments: {
+      action: "open",
+      conversation_id: branchConversation,
+      continuity_id: branchConversation,
+      project: "aide",
+      user_text: "Finish the Control Plane web interface for the Web branch."
+    }
+  })).content[0].text);
+  await client.callTool({
+    name: "memmy_turn",
+    arguments: {
+      action: "commit",
+      event_id: webTurn.turn.event_id,
+      conversation_id: branchConversation,
+      continuity_id: branchConversation,
+      assistant_text: "Web interface work completed for this branch checkpoint."
+    }
+  });
+  const webScopedContext = JSON.parse((await client.callTool({
+    name: "memmy_context",
+    arguments: {
+      query: "继续",
+      project: "aide",
+      conversation_id: branchConversation,
+      continuity_id: branchConversation
+    }
+  })).content[0].text);
+  assert.equal(webScopedContext.branchContext.branchId, webBranch.branchId);
+  assert.ok(webScopedContext.recentSession.some((item) => /Control Plane web interface/.test(item.content)));
+  assert.ok(webScopedContext.recentSession.every((item) => !/BM25 retrieval/.test(item.content)));
+  const branchCurrent = JSON.parse((await client.callTool({
+    name: "memhub_branch",
+    arguments: { action: "current", project: "aide", conversation_id: branchConversation }
+  })).content[0].text);
+  assert.equal(branchCurrent.branch.branchId, webBranch.branchId);
+  await client.callTool({
+    name: "memhub_branch",
+    arguments: { action: "close", project: "aide", branch: webBranch.branchId }
+  });
+  const branchAfterClose = JSON.parse((await client.callTool({
+    name: "memhub_branch",
+    arguments: { action: "current", project: "aide", conversation_id: branchConversation }
+  })).content[0].text);
+  assert.equal(branchAfterClose.branch, null);
+  const branchListWithClosed = JSON.parse((await client.callTool({
+    name: "memhub_branch",
+    arguments: { action: "list", project: "aide", include_closed: true }
+  })).content[0].text);
+  assert.ok(branchListWithClosed.branches.length >= 3);
+  assert.equal(branchListWithClosed.branches.find((branch) => branch.branchId === webBranch.branchId).status, "closed");
   const baselineTodos = JSON.parse((await client.callTool({
     name: "memhub_todo",
     arguments: { action: "list", project: "aide", status: "all" }
@@ -1228,6 +1979,15 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(addedTodo.project, "aide");
   assert.equal(addedTodo.todo.status, "pending");
   assert.equal(addedTodo.pending_count, baselinePendingCount + 1);
+  const contextWithRelevantTodo = JSON.parse((await client.callTool({
+    name: "memmy_context",
+    arguments: { query: "dedicated MCP todo lifecycle", project: "AIDE" }
+  })).content[0].text);
+  const aideCandidateWithTodo = contextWithRelevantTodo.projectCandidates.find((project) => project.project === "aide");
+  assert.ok(aideCandidateWithTodo);
+  assert.equal(aideCandidateWithTodo.relevantTodos[0].id, addedTodo.todo.id);
+  assert.equal(aideCandidateWithTodo.relevantTodos.length, 1);
+  assert.deepEqual(aideCandidateWithTodo.relevantTodos[0].matchedTerms, ["dedicated", "mcp", "todo", "lifecycle"]);
   const pendingTodos = JSON.parse((await client.callTool({
     name: "memhub_todo",
     arguments: { action: "list", project: "aide" }
@@ -1276,6 +2036,35 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(currentExplicitWithoutConversation.binding_available, false);
   assert.equal(currentExplicitWithoutConversation.resolution_source, "explicit_project");
   assert.equal(currentExplicitWithoutConversation.persisted, false);
+  const currentWorkspaceWithoutConversation = JSON.parse((await client.callTool({
+    name: "memmy_project",
+    arguments: { action: "current", workspace_project: "AIDE" }
+  })).content[0].text);
+  assert.equal(currentWorkspaceWithoutConversation.project, "aide");
+  assert.equal(currentWorkspaceWithoutConversation.resolution_source, "workspace_project");
+  const workspacePriorityConversation = `${conversationId}-workspace-priority`;
+  await client.callTool({
+    name: "memmy_project",
+    arguments: { action: "bind", conversation_id: workspacePriorityConversation, project: "aide" }
+  });
+  const workspacePriority = JSON.parse((await client.callTool({
+    name: "memmy_project",
+    arguments: { action: "current", conversation_id: workspacePriorityConversation, workspace_project: "memhub" }
+  })).content[0].text);
+  assert.equal(workspacePriority.project, "memhub");
+  assert.equal(workspacePriority.resolution_source, "workspace_project");
+  assert.equal(workspacePriority.persisted, false);
+  const conflictingTodoScope = await client.callTool({
+    name: "memhub_todo",
+    arguments: {
+      action: "add",
+      project: "aide",
+      workspace_project: "memhub",
+      text: "This conflicting scope must never be written."
+    }
+  });
+  assert.equal(conflictingTodoScope.isError, true);
+  assert.match(conflictingTodoScope.content[0].text, /project\/workspace conflict/);
   const unresolved = JSON.parse((await client.callTool({
     name: "memmy_context",
     arguments: { query: "continue the AIDEE work", project: "aidee", conversation_id: conversationId + "-unknown" }
@@ -1283,6 +2072,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(unresolved.resolvedProjectId, null);
   assert.equal(unresolved.recallScope, "global_only");
   assert.ok(unresolved.projectCandidates.some((project) => project.project === "aide"));
+  assert.ok(unresolved.projectCandidates.every((project) => project.relevantTodos === undefined));
   const updatePlanResult = await client.callTool({
     name: "memmy_project_manage",
     arguments: {
@@ -1324,6 +2114,27 @@ async function exerciseClient(client, conversationId, stateRoot) {
       arguments: { action: "execute", authorization_id: plan.authorization_id }
     })).content[0].text).ok, true);
   }
+  const mergeHarness = `merge-job-${conversationId}`;
+  const mergeJob = await enqueueDerivedDistillationJob({
+    stateRoot,
+    accountId: "acct-test",
+    target: "l3",
+    projectId: mergeSource,
+    evidence: [{
+      ref: `artifact:merge-source-${conversationId}`,
+      kind: "artifact",
+      timestamp: "2026-09-22T00:00:00.000Z",
+      project_id: mergeSource,
+      layer: "L2",
+      content: "Historical L2 evidence that must remain valid after project merge."
+    }]
+  });
+  const leasedMergeJob = await leaseDistillationJob(stateRoot, "acct-test", {
+    projectId: mergeSource,
+    target: "l3",
+    harness: mergeHarness
+  });
+  assert.equal(leasedMergeJob?.job_id, mergeJob.job.job_id);
   const mergePlan = JSON.parse((await client.callTool({
     name: "memmy_project_manage",
     arguments: { action: "plan", operation: "merge", project: mergeSource, target: mergeTarget }
@@ -1332,13 +2143,72 @@ async function exerciseClient(client, conversationId, stateRoot) {
     name: "memmy_project_manage",
     arguments: { action: "execute", authorization_id: mergePlan.authorization_id }
   })).content[0].text).ok, true);
+  const mergedJobDryRun = await client.callTool({
+    name: "memhub_distill",
+    arguments: {
+      action: "submit",
+      job_id: mergeJob.job.job_id,
+      source_harness: mergeHarness,
+      content: "Merged projects keep historical evidence valid under the target canonical project.",
+      dry_run: true
+    }
+  });
+  assert.equal(mergedJobDryRun.isError, undefined);
+  assert.equal(JSON.parse(mergedJobDryRun.content[0].text).project, mergeTarget);
+  assert.equal(JSON.parse((await client.callTool({
+    name: "memhub_distill",
+    arguments: { action: "skip", job_id: mergeJob.job.job_id, source_harness: mergeHarness }
+  })).content[0].text).ok, true);
+
+  const deleteJob = await enqueueDerivedDistillationJob({
+    stateRoot,
+    accountId: "acct-test",
+    target: "l3",
+    projectId: deleteProject,
+    evidence: [{
+      ref: `artifact:delete-blocker-${conversationId}`,
+      kind: "artifact",
+      timestamp: "2026-09-22T00:00:00.000Z",
+      project_id: deleteProject,
+      layer: "L2",
+      content: "Pending evidence blocks project deletion until the job is resolved."
+    }]
+  });
   const deletePlan = JSON.parse((await client.callTool({
     name: "memmy_project_manage",
     arguments: { action: "plan", operation: "delete", project: deleteProject }
   })).content[0].text);
-  assert.equal(JSON.parse((await client.callTool({
+  assert.ok(deletePlan.impact.blockedByDistillationJobs.some((job) => job.job_id === deleteJob.job.job_id));
+  const blockedDelete = await client.callTool({
     name: "memmy_project_manage",
     arguments: { action: "execute", authorization_id: deletePlan.authorization_id }
+  });
+  assert.equal(blockedDelete.isError, true);
+  assert.match(blockedDelete.content[0].text, /unfinished distillation job/);
+  const deleteHarness = `delete-job-${conversationId}`;
+  const leasedDelete = JSON.parse((await client.callTool({
+    name: "memhub_distill",
+    arguments: {
+      action: "next",
+      kind: "l3",
+      scope: "project",
+      project: deleteProject,
+      source_harness: deleteHarness
+    }
+  })).content[0].text);
+  assert.equal(leasedDelete.job.job_id, deleteJob.job.job_id);
+  assert.equal(JSON.parse((await client.callTool({
+    name: "memhub_distill",
+    arguments: { action: "skip", job_id: deleteJob.job.job_id, source_harness: deleteHarness }
+  })).content[0].text).ok, true);
+  const deletePlanAfterResolution = JSON.parse((await client.callTool({
+    name: "memmy_project_manage",
+    arguments: { action: "plan", operation: "delete", project: deleteProject }
+  })).content[0].text);
+  assert.equal(deletePlanAfterResolution.impact.blockedByDistillationJobs.length, 0);
+  assert.equal(JSON.parse((await client.callTool({
+    name: "memmy_project_manage",
+    arguments: { action: "execute", authorization_id: deletePlanAfterResolution.authorization_id }
   })).content[0].text).ok, true);
   const historicalProjects = JSON.parse((await client.callTool({
     name: "memmy_project_list",
@@ -1386,6 +2256,18 @@ async function exerciseClient(client, conversationId, stateRoot) {
       reasoning_summary: "Validated the project binding and memory boundary."
     }
   });
+  await client.callTool({
+    name: "memmy_turn",
+    arguments: {
+      action: "checkpoint",
+      event_id: l1EventId,
+      conversation_id: conversationId,
+      continuity_id: conversationId,
+      turn_id: `source-${conversationId}`,
+      reasoning_summary: "Validated the project binding, memory boundary, and lifecycle update semantics.",
+      tool_summary: "Checkpoint summaries may advance while the L1 turn is incomplete."
+    }
+  });
   const committedTurn = JSON.parse((await client.callTool({
     name: "memmy_turn",
     arguments: {
@@ -1394,7 +2276,9 @@ async function exerciseClient(client, conversationId, stateRoot) {
       conversation_id: conversationId,
       continuity_id: conversationId,
       turn_id: `source-${conversationId}`,
-      assistant_text: "Keep this original assistant final in L1."
+      assistant_text: "Keep this original assistant final in L1.",
+      reasoning_summary: "Final public audit summary for this completed turn.",
+      tool_summary: "Final tool summary for this completed turn."
     }
   })).content[0].text);
   assert.equal(committedTurn.turn.status, "complete");
@@ -1403,8 +2287,46 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: { action: "resume", conversation_id: conversationId, continuity_id: conversationId }
   })).content[0].text);
   assert.equal(resumed.turns.at(-1).event_id, l1EventId);
-  assert.equal(resumed.turns.at(-1).reasoning_summary, "Validated the project binding and memory boundary.");
+  assert.equal(resumed.turns.at(-1).reasoning_summary, "Final public audit summary for this completed turn.");
+  assert.equal(resumed.turns.at(-1).tool_summary, "Final tool summary for this completed turn.");
   assert.equal(resumed.incomplete.length, 0);
+
+  const largeResultConversation = `${conversationId}-generic-large-result`;
+  const largeResultOpen = JSON.parse((await client.callTool({
+    name: "memmy_turn",
+    arguments: {
+      action: "open",
+      conversation_id: largeResultConversation,
+      project: "aide",
+      user_text: "Verify generic MCP result chunk transport."
+    }
+  })).content[0].text);
+  const largeAssistantText = "大".repeat(130_000);
+  let largeResultChunk = JSON.parse((await client.callTool({
+    name: "memmy_turn",
+    arguments: {
+      action: "commit",
+      event_id: largeResultOpen.turn.event_id,
+      conversation_id: largeResultConversation,
+      assistant_text: largeAssistantText
+    }
+  })).content[0].text);
+  assert.equal(largeResultChunk.result_transport.mode, "chunked");
+  let largeResultJson = largeResultChunk.result_chunk;
+  while (largeResultChunk.result_transport.next_offset !== null) {
+    largeResultChunk = JSON.parse((await client.callTool({
+      name: "memhub_result",
+      arguments: {
+        result_id: largeResultChunk.result_transport.result_id,
+        offset: largeResultChunk.result_transport.next_offset,
+        chunk_chars: 100_000
+      }
+    })).content[0].text);
+    largeResultJson += largeResultChunk.result_chunk;
+  }
+  const reconstructedLargeResult = JSON.parse(largeResultJson);
+  assert.equal(reconstructedLargeResult.turn.assistant_text, largeAssistantText);
+  assert.equal(reconstructedLargeResult.turn.status, "complete");
 
   const unboundOpen = JSON.parse((await client.callTool({
     name: "memmy_turn",
@@ -1544,6 +2466,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(crossAccountEvidence.isError, true);
   assert.match(crossAccountEvidence.content[0].text, /current account scope/i);
 
+  const reconnectArtifactId = `aide-reconnect-${conversationId}`;
   await client.callTool({
     name: "memhub_distill",
     arguments: {
@@ -1553,7 +2476,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
       title: "AIDE reconnect workflow",
       content: "Use this when AIDE reconnect fails. Inspect state, repair the bridge, then verify reconnection.",
       source_harness: "codex",
-      artifact_id: "aide-reconnect-v1",
+      artifact_id: reconnectArtifactId,
       version: "1",
       evidence_refs: ["l1:test-turn"],
       source_conversations: [conversationId],
@@ -1565,7 +2488,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(skillWrite.body.namespace.projectId, "aide");
   assert.equal(skillWrite.body.namespace.tenantId, "acct-test");
   assert.equal(skillWrite.body.sourceAgentId, "codex");
-  assert.equal(skillWrite.body.sourceSkillId, "aide-reconnect-v1");
+  assert.equal(skillWrite.body.sourceSkillId, reconnectArtifactId);
   assert.equal(skillWrite.body.sourceSkillVersion, "1");
   assert.ok(skillWrite.body.tags.includes("artifact:skill"));
   assert.ok(skillWrite.body.tags.includes("project:aide"));
@@ -1573,6 +2496,144 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.ok(skillWrite.body.tags.includes("evidence:l1:test-turn"));
   assert.ok(skillWrite.body.tags.includes(`source-conversation:${conversationId}`));
   assert.equal(typeof skillWrite.body.requestId, "string");
+
+  const skillRecord = [...memoryById.values()].find((item) => item.memoryLayer === "Skill" &&
+    item.title === "AIDE reconnect workflow" &&
+    item.metadata?.properties?.internal_info?.source_skill_id === reconnectArtifactId);
+  assert.ok(skillRecord);
+  const loadedSkill = JSON.parse((await client.callTool({
+    name: "memhub_skill",
+    arguments: { action: "load", skill_id: skillRecord.id, executor: "codex" }
+  })).content[0].text);
+  assert.equal(loadedSkill.skill_id, skillRecord.id);
+  assert.equal(typeof loadedSkill.execution_id, "string");
+  assert.match(loadedSkill.content, /repair the bridge/);
+  assert.equal(loadedSkill.metadata.loadRequired, true);
+  assert.equal(loadedSkill.metadata.scope, "project:aide");
+
+  const invokedSkill = JSON.parse((await client.callTool({
+    name: "memhub_skill",
+    arguments: {
+      action: "record",
+      skill_id: skillRecord.id,
+      execution_id: loadedSkill.execution_id,
+      stage: "invoked",
+      executor: "codex"
+    }
+  })).content[0].text);
+  assert.equal(invokedSkill.event.stage, "invoked");
+  const completedSkill = JSON.parse((await client.callTool({
+    name: "memhub_skill",
+    arguments: {
+      action: "record",
+      skill_id: skillRecord.id,
+      execution_id: loadedSkill.execution_id,
+      stage: "success",
+      note: "reconnected and verified"
+    }
+  })).content[0].text);
+  assert.equal(completedSkill.summary.successes, 1);
+  assert.ok(completedSkill.summary.reliability > 0.5);
+  const skillStatus = JSON.parse((await client.callTool({
+    name: "memhub_skill",
+    arguments: { action: "status", skill_id: skillRecord.id, execution_id: loadedSkill.execution_id }
+  })).content[0].text);
+  assert.deepEqual(skillStatus.execution.map((event) => event.stage), ["selected", "loaded", "invoked", "success"]);
+
+  const unchangedVersion = await client.callTool({
+    name: "memhub_skill",
+    arguments: {
+      action: "plan", operation: "revise", skill_id: skillRecord.id,
+      version: "1", content: "# Same version\n\nImproved procedure", note: "invalid version"
+    }
+  });
+  assert.equal(unchangedVersion.isError, true, "Skill revisions must advance their source version");
+  const foreignSkillId = `foreign-${conversationId}`;
+  memoryById.set(foreignSkillId, {
+    ...skillRecord, id: foreignSkillId,
+    namespace: { ...skillRecord.namespace, tenantId: "another-account" },
+    tags: skillRecord.tags.map((tag) => tag.startsWith("provenance:account:") ? "provenance:account:another-account" : tag)
+  });
+  const foreignLoad = await client.callTool({ name: "memhub_skill", arguments: { action: "load", skill_id: foreignSkillId } });
+  assert.equal(foreignLoad.isError, true, "cross-account Skill must not be loaded");
+  memoryById.delete(foreignSkillId);
+
+  const revisionContent = `# AIDE reconnect workflow\n\n## When to use\nWhen AIDE reconnect fails.\n\n## Procedure\nRead the current project state, repair the bridge, and verify reconnection with a real MCP round trip. Never infer success from a local build alone.`;
+  const plan = JSON.parse((await client.callTool({
+    name: "memhub_skill",
+    arguments: {
+      action: "plan", operation: "revise", skill_id: skillRecord.id,
+      version: "2.0.0", content: revisionContent, title: "AIDE reconnect workflow",
+      tags: ["reconnect", "reusable"], note: "replace stale reconnect checks"
+    }
+  })).content[0].text);
+  assert.equal(plan.status, "awaiting_user_authorization");
+  assert.equal(plan.source_skill_id, reconnectArtifactId);
+  assert.equal(plan.next_version, "2.0.0");
+  assert.equal(skillRecord.status, "activated", "planning must not mutate existing Skill");
+  const revised = JSON.parse((await client.callTool({
+    name: "memhub_skill",
+    arguments: { action: "execute", skill_id: skillRecord.id, authorization_id: plan.authorization_id }
+  })).content[0].text);
+  assert.equal(revised.ok, true);
+  assert.notEqual(revised.skill_id, skillRecord.id);
+  assert.equal(revised.source_skill_id, reconnectArtifactId, "stable source identity must survive version changes");
+  assert.equal(skillRecord.status, "archived");
+  const revisedWrite = [...requests].reverse().find((entry) => entry.url === "/api/v1/memory/add");
+  assert.equal(revisedWrite.body.sourceSkillId, reconnectArtifactId);
+  assert.equal(revisedWrite.body.sourceSkillVersion, "2.0.0");
+  assert.ok(revisedWrite.body.tags.includes(`revision-of:${skillRecord.id}`));
+  assert.equal(revisedWrite.body.namespace.projectId, "aide");
+  const oldLoad = await client.callTool({ name: "memhub_skill", arguments: { action: "load", skill_id: skillRecord.id } });
+  assert.equal(oldLoad.isError, true, "superseded Skill cannot start another execution");
+  assert.match(oldLoad.content[0].text, /archived or inactive/);
+  const oldStatus = JSON.parse((await client.callTool({ name: "memhub_skill", arguments: { action: "status", skill_id: skillRecord.id } })).content[0].text);
+  assert.equal(oldStatus.status, "archived");
+  assert.equal(oldStatus.summary.successes, 1, "prior execution telemetry must remain accessible");
+  const replay = await client.callTool({
+    name: "memhub_skill",
+    arguments: { action: "execute", skill_id: skillRecord.id, authorization_id: plan.authorization_id }
+  });
+  assert.equal(replay.isError, true, "governance authorization must be single-use");
+  const newerCall = await client.callTool({ name: "memhub_skill", arguments: { action: "load", skill_id: revised.skill_id } });
+  assert.equal(newerCall.isError, undefined, JSON.stringify({ revised, newRecordStatus: memoryById.get(revised.skill_id)?.status, oldRecordStatus: memoryById.get(skillRecord.id)?.status, newerCall }));
+  const newer = JSON.parse(newerCall.content[0].text);
+  assert.match(newer.content, /real MCP round trip/);
+  await client.callTool({ name: "memhub_skill", arguments: { action: "record", skill_id: revised.skill_id, execution_id: newer.execution_id, stage: "invoked" } });
+  const failed = JSON.parse((await client.callTool({ name: "memhub_skill", arguments: { action: "record", skill_id: revised.skill_id, execution_id: newer.execution_id, stage: "failure", note: "connection timeout" } })).content[0].text);
+  assert.equal(failed.summary.failures, 1);
+  const corrected = JSON.parse((await client.callTool({ name: "memhub_skill", arguments: { action: "record", skill_id: revised.skill_id, execution_id: newer.execution_id, stage: "user_correction", note: "use a bounded retry" } })).content[0].text);
+  assert.equal(corrected.summary.user_corrections, 1);
+  const retry = JSON.parse((await client.callTool({ name: "memhub_skill", arguments: { action: "load", skill_id: revised.skill_id } })).content[0].text);
+  await client.callTool({ name: "memhub_skill", arguments: { action: "record", skill_id: revised.skill_id, execution_id: retry.execution_id, stage: "invoked" } });
+  const improved = JSON.parse((await client.callTool({ name: "memhub_skill", arguments: { action: "record", skill_id: revised.skill_id, execution_id: retry.execution_id, stage: "success", note: "verified MCP round trip" } })).content[0].text);
+  assert.ok(improved.summary.reliability > corrected.summary.reliability, "successful retry must improve version reliability");
+  const wrongExecution = await client.callTool({ name: "memhub_skill", arguments: { action: "status", skill_id: skillRecord.id, execution_id: retry.execution_id } });
+  assert.equal(wrongExecution.isError, true, "another Skill's execution must not appear under this ID");
+
+  const retirementPlan = JSON.parse((await client.callTool({
+    name: "memhub_skill",
+    arguments: { action: "plan", operation: "retire", skill_id: revised.skill_id, note: "workflow superseded by external release" }
+  })).content[0].text);
+  const currentSkill = memoryById.get(revised.skill_id);
+  const originalContent = currentSkill.body;
+  currentSkill.body += " stale concurrent edit";
+  const staleExecution = await client.callTool({
+    name: "memhub_skill",
+    arguments: { action: "execute", skill_id: revised.skill_id, authorization_id: retirementPlan.authorization_id }
+  });
+  assert.equal(staleExecution.isError, true, "mutated Skill must invalidate an older governance plan");
+  currentSkill.body = originalContent;
+  const freshRetirementPlan = JSON.parse((await client.callTool({
+    name: "memhub_skill",
+    arguments: { action: "plan", operation: "retire", skill_id: revised.skill_id, note: "workflow superseded by external release" }
+  })).content[0].text);
+  const retired = JSON.parse((await client.callTool({
+    name: "memhub_skill",
+    arguments: { action: "execute", skill_id: revised.skill_id, authorization_id: freshRetirementPlan.authorization_id }
+  })).content[0].text);
+  assert.equal(retired.status, "archived");
+  assert.equal(memoryById.get(revised.skill_id).status, "archived");
 
 }
 

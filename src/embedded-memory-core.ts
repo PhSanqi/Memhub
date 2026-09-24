@@ -1,8 +1,9 @@
-import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ManagedProcessStack } from "./process-stack.js";
+import { probeService } from "./service-readiness.js";
 
 export interface EmbeddedMemoryCoreOptions {
   stateRoot?: string;
@@ -18,7 +19,8 @@ export class EmbeddedMemoryCore {
   readonly configPath: string;
   readonly dbPath: string;
   readonly entrypoint: string;
-  private child?: ChildProcess;
+  private stack?: ManagedProcessStack;
+  private starting?: Promise<string>;
 
   constructor(options: EmbeddedMemoryCoreOptions = {}) {
     const stateRoot = resolve(options.stateRoot ?? process.env.MEMHUB_STATE_ROOT ?? join(homedir(), ".memhub"));
@@ -39,26 +41,45 @@ export class EmbeddedMemoryCore {
   }
 
   async start(): Promise<string> {
-    if (await healthy(this.endpoint)) return this.endpoint;
-    if (!existsSync(this.entrypoint)) throw new Error(`embedded Memory Core is missing: ${this.entrypoint}`);
-    this.child = spawn(process.execPath, [
-      this.entrypoint,
-      "--config", this.configPath,
-      "--host", "127.0.0.1",
-      "--port", new URL(this.endpoint).port,
-      "--db", this.dbPath
-    ], { stdio: "inherit", env: { ...process.env, MEMHUB_EMBEDDED_MEMORY_CORE: "1" } });
-    for (let attempt = 0; attempt < 60; attempt += 1) {
-      if (await healthy(this.endpoint)) return this.endpoint;
-      if (this.child.exitCode !== null) throw new Error(`embedded Memory Core exited with code ${this.child.exitCode}`);
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
-    }
-    throw new Error("embedded Memory Core did not become healthy");
+    if (this.starting) return this.starting;
+    this.starting = this.startOwnedOrExternal().finally(() => { this.starting = undefined; });
+    return this.starting;
   }
 
   async stop(): Promise<void> {
-    if (!this.child || this.child.exitCode !== null) return;
-    this.child.kill("SIGTERM");
+    // Stop first to abort an in-flight health wait instead of waiting for the
+    // entire startup deadline before shutting down.
+    if (this.stack) await this.stack.stop();
+    if (this.starting) await this.starting.catch(() => undefined);
+    this.stack = undefined;
+  }
+
+  private async startOwnedOrExternal(): Promise<string> {
+    if (this.stack?.status.ready) return this.endpoint;
+    // Preserve existing embedded-mode compatibility: reuse a healthy external
+    // Memory Core, but never register it as owned or send it termination signals.
+    if (!this.stack && (await probeService(`${this.endpoint}/health`, "core")).ok) return this.endpoint;
+    if (!existsSync(this.entrypoint)) throw new Error(`embedded Memory Core is missing: ${this.entrypoint}`);
+    this.stack ??= new ManagedProcessStack({
+      services: [{
+        name: "memory-core",
+        kind: "core",
+        entrypoint: this.entrypoint,
+        cwd: dirname(this.entrypoint),
+        args: ["--config", this.configPath, "--host", "127.0.0.1", "--port", new URL(this.endpoint).port, "--db", this.dbPath],
+        healthUrl: `${this.endpoint}/health`,
+        env: { MEMHUB_EMBEDDED_MEMORY_CORE: "1" }
+      }],
+      readinessTimeoutMs: 10_000
+    });
+    try {
+      await this.stack.start();
+    } catch (error) {
+      await this.stack.stop();
+      this.stack = undefined;
+      throw error;
+    }
+    return this.endpoint;
   }
 }
 
@@ -69,13 +90,4 @@ function defaultEntrypoint(): string {
 
 function legacyOr(legacy: string, clean: string): string {
   return existsSync(legacy) ? legacy : clean;
-}
-
-async function healthy(endpoint: string): Promise<boolean> {
-  try {
-    const response = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(500) });
-    return response.ok;
-  } catch {
-    return false;
-  }
 }

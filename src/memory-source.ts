@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import type { ContextItem } from "./context-capsule.js";
 import type { LocalMemoryRestClient, RecallHit, RuntimeNamespace } from "./local-memory-client.js";
+import { rankRecallHits, type RankedRecallHit, type RetrievalRankDiagnostics } from "./retrieval-ranker.js";
+import { compactSkillContextItem } from "./skill-router.js";
 
 interface SearchResponseLike {
   hits?: RecallHit[];
@@ -19,7 +21,24 @@ export interface ContextMemorySource {
     conversationId?: string;
     limit: number;
     reusableSkillProjectIds?: readonly string[];
-  }): Promise<{ globalMemory: ContextItem[]; projectMemory: ContextItem[]; reusableSkills: ContextItem[] }>;
+  }): Promise<{
+    globalMemory: ContextItem[];
+    projectMemory: ContextItem[];
+    reusableSkills: ContextItem[];
+    diagnostics?: ContextRecallDiagnostics;
+  }>;
+}
+
+export interface ContextRecallDiagnostics {
+  version: "retrieval-v1";
+  requestedLimit: number;
+  finalLimit: number;
+  candidateLimit: number;
+  lanes: {
+    global: RetrievalRankDiagnostics;
+    project: RetrievalRankDiagnostics;
+    skills: RetrievalRankDiagnostics;
+  };
 }
 
 export type DistilledArtifactKind = "l2" | "l3" | "l4" | "skill";
@@ -36,19 +55,28 @@ export class MemoryRestContextSource implements ContextMemorySource {
     conversationId?: string;
     limit: number;
     reusableSkillProjectIds?: readonly string[];
-  }): Promise<{ globalMemory: ContextItem[]; projectMemory: ContextItem[]; reusableSkills: ContextItem[] }> {
-    const globalResponse = await this.search(input, null, { layers: ["L4"] });
+  }): Promise<{
+    globalMemory: ContextItem[];
+    projectMemory: ContextItem[];
+    reusableSkills: ContextItem[];
+    diagnostics: ContextRecallDiagnostics;
+  }> {
+    const requestedLimit = Math.max(1, Math.min(50, input.limit));
+    const finalLimit = Math.min(12, requestedLimit);
+    const candidateLimit = Math.min(50, Math.max(12, finalLimit * 4));
+    const globalResponse = await this.search(input, null, { layers: ["L4"], limit: candidateLimit });
     const globalHits = hitsFromResponse(globalResponse)
       .filter((hit) => hit.tags.includes("global"));
-    const globalIds = new Set(globalHits.map((hit) => hit.id));
-    const globalMemory = globalHits.map((hit) => contextItemFromHit(hit, "global"));
+    const rankedGlobal = rankRecallHits(globalHits, input.query, finalLimit);
+    const globalIds = new Set(rankedGlobal.hits.map(({ hit }) => hit.id));
+    const globalMemory = rankedGlobal.hits.map((ranked) => contextItemFromRankedHit(ranked, "global", undefined, rankedGlobal.diagnostics));
     const projectStorageIds = input.projectId === null
       ? []
       : unique(input.projectStorageIds?.length ? input.projectStorageIds : [input.projectId]);
     let projectHits: RecallHit[] = [];
     if (input.projectId !== null) {
       projectHits = dedupeHits((await Promise.all(projectStorageIds.map(async (storageProjectId) =>
-        hitsFromResponse(await this.search(input, storageProjectId, { layers: ["L3", "L2"] }))
+        hitsFromResponse(await this.search(input, storageProjectId, { layers: ["L3", "L2"], limit: candidateLimit }))
           .filter((hit) => hit.tags.includes(`project:${storageProjectId}`))
       ))).flat());
       // A freshly migrated/bootstrap project may not have a v2 L2/L3 artifact
@@ -57,21 +85,21 @@ export class MemoryRestContextSource implements ContextMemorySource {
       // normal context capsule and remains an evidence layer for distillation.
       if (projectHits.length === 0) {
         projectHits = dedupeHits((await Promise.all(projectStorageIds.map(async (storageProjectId) =>
-          hitsFromResponse(await this.search(input, storageProjectId, { layers: ["L1"] }))
+          hitsFromResponse(await this.search(input, storageProjectId, { layers: ["L1"], limit: candidateLimit }))
             .filter((hit) => hit.tags.includes(`project:${storageProjectId}`))
         ))).flat());
       }
     }
-    const projectMemory = projectHits
-      .filter((hit) => !globalIds.has(hit.id))
-      .map((hit) => contextItemFromHit(hit, "project", input.projectId ?? undefined));
+    const rankedProject = rankRecallHits(projectHits.filter((hit) => !globalIds.has(hit.id)), input.query, finalLimit);
+    const projectMemory = rankedProject.hits
+      .map((ranked) => contextItemFromRankedHit(ranked, "project", input.projectId ?? undefined, rankedProject.diagnostics));
 
     const reusableSkillProjectIds = unique([
       ...(input.projectId ? [input.projectId] : []),
       ...(input.reusableSkillProjectIds ?? [])
     ])
       .slice(0, 32);
-    const perProjectSkillLimit = Math.min(20, Math.max(6, input.limit));
+    const perProjectSkillLimit = candidateLimit;
     const reusableHits = (await Promise.all(reusableSkillProjectIds.map(async (projectId) => {
       const response = await this.search(input, projectId, {
         layers: ["Skill"],
@@ -84,17 +112,36 @@ export class MemoryRestContextSource implements ContextMemorySource {
     }))).flat()
       .filter(({ hit }) => !globalIds.has(hit.id))
       .sort((left, right) => right.hit.score - left.hit.score);
-    const seenSkillIds = new Set<string>();
-    const reusableSkills = reusableHits
-      .filter(({ hit }) => {
-        if (seenSkillIds.has(hit.id)) return false;
-        seenSkillIds.add(hit.id);
-        return true;
-      })
-      .slice(0, input.limit)
-      .map(({ hit, projectId }) => contextItemFromHit(hit, "capability", projectId));
+    const skillProjectById = new Map<string, string>();
+    for (const { hit, projectId } of reusableHits) {
+      if (!skillProjectById.has(hit.id)) skillProjectById.set(hit.id, projectId);
+    }
+    const dedupedReusableHits = dedupeHits(reusableHits.map(({ hit }) => hit));
+    const rankedSkills = rankRecallHits(dedupedReusableHits, input.query, finalLimit);
+    const reusableSkills = rankedSkills.hits
+      .map((ranked) => compactSkillContextItem(contextItemFromRankedHit(
+          ranked,
+          "capability",
+          skillProjectById.get(ranked.hit.id),
+          rankedSkills.diagnostics
+        )));
 
-    return { globalMemory, projectMemory, reusableSkills };
+    return {
+      globalMemory,
+      projectMemory,
+      reusableSkills,
+      diagnostics: {
+        version: "retrieval-v1",
+        requestedLimit,
+        finalLimit,
+        candidateLimit,
+        lanes: {
+          global: rankedGlobal.diagnostics,
+          project: rankedProject.diagnostics,
+          skills: rankedSkills.diagnostics
+        }
+      }
+    };
   }
 
   distill(input: {
@@ -267,6 +314,9 @@ function dedupeHits(hits: readonly RecallHit[]): RecallHit[] {
 
 function contextItemFromHit(hit: RecallHit, scope: "global" | "project" | "capability", projectId?: string): ContextItem {
   const content = hit.title?.trim() ? `${hit.title.trim()}\n${hit.snippet}` : hit.snippet;
+  const tags = hit.tags.slice(0, 32);
+  const allRetrievalRoutes = hit.retrievalRoutes ?? [];
+  const retrievalRoutes = allRetrievalRoutes.slice(0, 16);
   return {
     id: hit.id,
     content,
@@ -280,9 +330,38 @@ function contextItemFromHit(hit: RecallHit, scope: "global" | "project" | "capab
       kind: hit.kind,
       memoryLayer: hit.memoryLayer,
       score: hit.score,
-      tags: hit.tags,
+      tags,
+      ...(hit.tags.length > tags.length ? { tagsTruncated: true, originalTagCount: hit.tags.length } : {}),
       retrievalSource: hit.source,
-      retrievalRoutes: hit.retrievalRoutes
+      retrievalRoutes,
+      ...(allRetrievalRoutes.length > retrievalRoutes.length
+        ? { retrievalRoutesTruncated: true, originalRetrievalRouteCount: allRetrievalRoutes.length }
+        : {})
+    }
+  };
+}
+
+function contextItemFromRankedHit(
+  ranked: RankedRecallHit,
+  scope: "global" | "project" | "capability",
+  projectId: string | undefined,
+  diagnostics: RetrievalRankDiagnostics
+): ContextItem {
+  const item = contextItemFromHit(ranked.hit, scope, projectId);
+  return {
+    ...item,
+    provenance: {
+      ...(item.provenance ?? {}),
+      retrievalV1: {
+        rank: ranked.rank,
+        semanticScore: ranked.semanticScore,
+        lexicalScore: ranked.lexicalScore,
+        fusedScore: ranked.fusedScore,
+        diversityPenaltyApplied: ranked.diversityPenaltyApplied,
+        matchedTerms: ranked.matchedTerms,
+        candidateCount: diagnostics.candidateCount,
+        dedupedCount: diagnostics.dedupedCount
+      }
     }
   };
 }

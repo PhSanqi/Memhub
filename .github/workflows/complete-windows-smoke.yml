@@ -62,6 +62,15 @@ jobs:
               & cmd.exe /c "schtasks.exe /Delete /F /TN $name >NUL 2>&1" | Out-Null
             }
           }
+          function Stop-TestMemhubProcesses([string]$InstallRoot) {
+            $needle = $InstallRoot.ToLowerInvariant()
+            Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
+              $commandLine = [string]$_.CommandLine
+              if ($commandLine -and $commandLine.ToLowerInvariant().Contains($needle)) {
+                try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {}
+              }
+            }
+          }
           function Wait-PortClosed([int]$Port, [int]$Seconds = 20) {
             $deadline = (Get-Date).AddSeconds($Seconds)
             while ((Get-Date) -lt $deadline) {
@@ -114,7 +123,8 @@ jobs:
             if (-not $status) { throw 'Bridge status endpoint returned no data' }
             Write-Host '[memhub] Windows Complete Local install smoke PASS'
           } finally {
-            Remove-TestTasks @('Memhub-Bridge','Memhub-Local','Memhub-Memory')
+            Remove-TestTasks @('Memhub-Local-Stack','Memhub-Bridge','Memhub-Local','Memhub-Memory')
+            Stop-TestMemhubProcesses $root.FullName
             Wait-PortClosed 17861
             Wait-PortClosed 3001
             Wait-PortClosed 18960
@@ -128,7 +138,8 @@ jobs:
             Wait-Port 3001
             Write-Host '[memhub] Windows Complete Server install smoke PASS'
           } finally {
-            Remove-TestTasks @('Memhub-Server','Memhub-Server-Memory')
+            Remove-TestTasks @('Memhub-Server-Stack','Memhub-Server','Memhub-Server-Memory')
+            Stop-TestMemhubProcesses $root.FullName
             Wait-PortClosed 3001
             Wait-PortClosed 18960
             Remove-PathWithRetry $serverState

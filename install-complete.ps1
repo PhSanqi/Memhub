@@ -39,7 +39,7 @@ if ($Version -eq "latest") {
 }
 if ($Tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Could not resolve a stable Memhub release tag: $Tag" }
 
-$Asset = "memhub-$Tag-windows-complete.zip"
+$Asset = "memhub-$Tag-windows-x64-complete.zip"
 $BaseUrl = "https://github.com/$Repo/releases/download/$Tag"
 $Temp = Join-Path ([IO.Path]::GetTempPath()) ("memhub-complete-" + [Guid]::NewGuid().ToString("N"))
 $Archive = Join-Path $Temp $Asset

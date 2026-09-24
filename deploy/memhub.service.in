@@ -3,14 +3,22 @@ Description=Memhub MCP Gateway
 After=network-online.target memhub-core.service
 Requires=memhub-core.service
 Wants=network-online.target
+PartOf=memhub-core.service memhub-stack.target
+StartLimitIntervalSec=120
+StartLimitBurst=6
 
 [Service]
 Type=simple
 WorkingDirectory=@MEMHUB_DIR@
 EnvironmentFile=-%h/.memmy/memhub/memhub.env
+ExecStartPre=@NODE@ @MEMHUB_DIR@/scripts/wait-for-service.mjs --url http://127.0.0.1:18960/health --kind core --timeout-ms 20000
 ExecStart=@NODE@ @MEMHUB_DIR@/dist/mcp.js --http 3001 --http-path @HTTP_PATH@ --capture-path @CAPTURE_PATH@ --state-root %h/.memmy/memhub --memory-url http://127.0.0.1:18960 --architecture-root @ARCHITECTURE_ROOT@
+ExecStartPost=@NODE@ @MEMHUB_DIR@/scripts/wait-for-service.mjs --url http://127.0.0.1:3001@HEALTH_PATH@ --kind gateway --timeout-ms 20000
 Restart=on-failure
 RestartSec=3s
+TimeoutStartSec=50s
+TimeoutStopSec=15s
+KillMode=control-group
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

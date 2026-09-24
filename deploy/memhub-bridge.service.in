@@ -1,15 +1,24 @@
 [Unit]
 Description=Memhub Local Bridge
-After=network-online.target
+After=network-online.target memhub.service
+Requires=memhub.service
 Wants=network-online.target
+PartOf=memhub.service memhub-stack.target
+StartLimitIntervalSec=120
+StartLimitBurst=6
 
 [Service]
 Type=simple
 WorkingDirectory=@MEMHUB_DIR@
 Environment="MEMHUB_BRIDGE_HOME=%h/.memhub"
+ExecStartPre=@NODE@ @MEMHUB_DIR@/scripts/wait-for-service.mjs --url http://127.0.0.1:3001@HEALTH_PATH@ --kind gateway --timeout-ms 20000
 ExecStart=@NODE@ @MEMHUB_DIR@/dist/bridge.js serve --port 17861
+ExecStartPost=@NODE@ @MEMHUB_DIR@/scripts/wait-for-service.mjs --url http://127.0.0.1:17861/health --kind bridge --timeout-ms 20000
 Restart=on-failure
 RestartSec=3s
+TimeoutStartSec=35s
+TimeoutStopSec=15s
+KillMode=control-group
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -17,4 +26,4 @@ ProtectHome=read-only
 ReadWritePaths=%h/.memhub
 
 [Install]
-WantedBy=default.target
+WantedBy=memhub-stack.target

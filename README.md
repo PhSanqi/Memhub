@@ -104,14 +104,10 @@ The Web Workspace renders L2 as a timeline and L3/L4 as readable items instead o
 
 Memhub ships as **Local Edition** and **Server Edition**, with Linux and Windows support.
 
-There are now two installation paths:
+Release assets provide two installation paths:
 
-| Install path | Node/npm on your machine | Download size | Best for |
-| --- | --- | --- | --- |
-| **Complete Install** | **Not required** | Larger | Most users; simplest first-time setup |
-| **Quick Install** | Node.js 20+ and npm required | Smaller | Existing developer machines and lightweight upgrades |
-
-Both paths support Local and Server editions.
+- **Complete**: target-OS Node.js runtime, production dependencies, and prebuilt Memhub are already bundled; Node/npm do not need to be preinstalled.
+- **Convenience/source**: use the repository `install.sh` / `install.ps1`; these install/build dependencies on the target host when needed.
 
 | What you want | Recommended |
 | --- | --- |
@@ -126,37 +122,35 @@ Both paths support Local and Server editions.
 
 Everything runs on one machine and listens on loopback by default.
 
-#### Complete Install — recommended
+Complete Linux:
+
+~~~bash
+bash install-complete.sh --edition local
+~~~
+
+Complete Windows:
+
+~~~powershell
+powershell -ExecutionPolicy Bypass -File .\install-complete.ps1 -Edition local
+~~~
+
+Convenience/source install:
 
 Linux:
 
 ~~~bash
-curl -fsSL https://github.com/PhSanqi/Memhub/releases/latest/download/install-complete.sh | bash
+git clone https://github.com/PhSanqi/Memhub.git
+cd Memhub
+bash editions/local/linux/install.sh
 ~~~
 
 Windows PowerShell:
 
 ~~~powershell
-$p=Join-Path $env:TEMP 'memhub-install-complete.ps1'; iwr https://github.com/PhSanqi/Memhub/releases/latest/download/install-complete.ps1 -OutFile $p; & $p; rm $p
+git clone https://github.com/PhSanqi/Memhub.git
+cd Memhub
+powershell -ExecutionPolicy Bypass -File .\editions\local\windows\install.ps1
 ~~~
-
-Complete Install downloads the self-contained Linux/Windows Complete package, verifies SHA-256, and runs with the Node runtime bundled inside the package.
-
-#### Quick Install — smaller download
-
-Linux:
-
-~~~bash
-curl -fsSL https://github.com/PhSanqi/Memhub/releases/latest/download/install.sh | bash
-~~~
-
-Windows PowerShell:
-
-~~~powershell
-$p=Join-Path $env:TEMP 'memhub-install.ps1'; iwr https://github.com/PhSanqi/Memhub/releases/latest/download/install.ps1 -OutFile $p; & $p; rm $p
-~~~
-
-Quick Install resolves the latest stable Release, downloads the smaller platform/edition package, verifies SHA-256, and runs the normal installer. It requires Node.js 20+ and npm on the target machine.
 
 After installation, local MCP clients and plugins can connect to:
 
@@ -170,34 +164,34 @@ Local Edition is the simplest way to get durable private memory without a VPS or
 
 Server Edition keeps durable memory on your own central server while multiple devices connect as authenticated clients.
 
-#### Complete Install — recommended
+Complete Linux:
+
+~~~bash
+bash install-complete.sh --edition server --public-host memory.example.com
+~~~
+
+Complete Windows:
+
+~~~powershell
+powershell -ExecutionPolicy Bypass -File .\install-complete.ps1 -Edition server -PublicHost memory.example.com
+~~~
+
+Convenience/source install:
 
 Linux Server:
 
 ~~~bash
-curl -fsSL https://github.com/PhSanqi/Memhub/releases/latest/download/install-complete.sh | \
-  bash -s -- --edition server --public-host memory.example.com
+git clone https://github.com/PhSanqi/Memhub.git
+cd Memhub
+MEMHUB_PUBLIC_HOST=memory.example.com bash editions/server/linux/install.sh
 ~~~
 
 Windows Server:
 
 ~~~powershell
-$p=Join-Path $env:TEMP 'memhub-install-complete.ps1'; iwr https://github.com/PhSanqi/Memhub/releases/latest/download/install-complete.ps1 -OutFile $p; & $p -Edition server -PublicHost memory.example.com; rm $p
-~~~
-
-#### Quick Install — smaller download
-
-Linux Server:
-
-~~~bash
-curl -fsSL https://github.com/PhSanqi/Memhub/releases/latest/download/install.sh | \
-  bash -s -- --edition server --public-host memory.example.com
-~~~
-
-Windows Server:
-
-~~~powershell
-$p=Join-Path $env:TEMP 'memhub-install.ps1'; iwr https://github.com/PhSanqi/Memhub/releases/latest/download/install.ps1 -OutFile $p; & $p -Edition server -PublicHost memory.example.com; rm $p
+git clone https://github.com/PhSanqi/Memhub.git
+cd Memhub
+powershell -ExecutionPolicy Bypass -File .\editions\server\windows\install.ps1 -PublicHost memory.example.com
 ~~~
 
 The Server still binds to loopback by default. Put public access behind an authenticated reverse proxy such as Cloudflare Access.
@@ -206,9 +200,8 @@ Detailed setup:
 
 - [Local Edition](editions/local/README.md)
 - [Server Edition](editions/server/README.md)
+- [Release and Complete packages](docs/EDITIONS.md)
 - [Release Packages](https://github.com/PhSanqi/Memhub/releases)
-
-For development, troubleshooting, or manual control over the checkout, you can still clone the repository and run `editions/<edition>/<platform>/install.*` directly.
 
 ---
 

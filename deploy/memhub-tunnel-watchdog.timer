@@ -1,0 +1,11 @@
+[Unit]
+Description=Memhub dedicated Cloudflare Tunnel health watchdog timer
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=60s
+Unit=memhub-tunnel-watchdog.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
