@@ -116,6 +116,8 @@ jobs:
           $localState = Join-Path $env:RUNNER_TEMP 'memhub-complete-local-state'
           try {
             & (Join-Path $root.FullName 'install-complete.ps1') -Edition local -StateRoot $localState
+            $localConfig = Get-Content -Raw (Join-Path $localState 'memory-config.yaml') | ConvertFrom-Json
+            if ([string]$localConfig.memmyMemory.storage.token -notmatch '^[0-9a-f]{64}$') { throw 'Local memory token is invalid' }
             Wait-Port 18960
             Wait-Port 3001
             Wait-Port 17861
@@ -134,6 +136,8 @@ jobs:
           $serverState = Join-Path $env:RUNNER_TEMP 'memhub-complete-server-state'
           try {
             & (Join-Path $root.FullName 'install-complete.ps1') -Edition server -StateRoot $serverState -Username owner
+            $serverConfig = Get-Content -Raw (Join-Path $serverState 'memory-config.yaml') | ConvertFrom-Json
+            if ([string]$serverConfig.memmyMemory.storage.token -notmatch '^[0-9a-f]{64}$') { throw 'Server memory token is invalid' }
             Wait-Port 18960
             Wait-Port 3001
             Write-Host '[memhub] Windows Complete Server install smoke PASS'
@@ -146,3 +150,4 @@ jobs:
           }
 
           Remove-PathWithRetry $extract
+          $global:LASTEXITCODE = 0

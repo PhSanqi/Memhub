@@ -14,7 +14,7 @@ Memhub gives ChatGPT, Codex, MCP clients, and other AI harnesses a durable memor
 
 It keeps original conversation evidence, builds a chronological project history, distills durable project knowledge, maintains a carefully scoped cross-project profile, and exposes reusable Skills, project Todos, retrieval, provenance, and a browser workspace from one self-hosted runtime.
 
-- **Current release:** v0.2.4
+- **Current release:** v0.2.5
 - **Canonical hosted deployment:** https://memhub.sanqi.org/
 - **Downloads:** https://github.com/PhSanqi/Memhub/releases
 

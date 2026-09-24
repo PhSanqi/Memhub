@@ -4,7 +4,7 @@ import { access, readFile } from "node:fs/promises";
 const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 const pluginJson = JSON.parse(await readFile(new URL("../adapters/plugin/plugin.json", import.meta.url), "utf8"));
 assert.equal(pluginJson.version, packageJson.version, "plugin and runtime release versions must stay aligned");
-assert.equal(packageJson.version, "0.2.4", "release regression expects the v0.2.4 line");
+assert.equal(packageJson.version, "0.2.5", "release regression expects the v0.2.5 line");
 
 const editions = [
   {
@@ -98,6 +98,9 @@ for (const edition of ["local", "server"]) {
   assert.match(windows, /--action stop/, "Windows reinstall must gracefully stop an existing stack before replacement");
   assert.match(windows, /schtasks\.exe \/Query/, "Windows reinstall must check whether a scheduled task exists before removal");
   assert.match(windows, /cmd\.exe \/d \/c/, "Windows task cleanup must suppress missing-task native stderr");
+  assert.match(windows, /RandomNumberGenerator/, "Windows Memory token must use a shell-safe cryptographic RNG");
+  assert.match(windows, /MemoryToken -notmatch/, "Windows installer must reject an invalid Memory token");
+  assert.doesNotMatch(windows, /\$Node -e/, "Windows PowerShell must not pass inline JavaScript through native argument quoting");
   assert.doesNotMatch(windows, /Start-Sleep -Seconds 1/, "Windows dependencies must use readiness, not a fixed sleep");
   assert.equal((windows.match(/Install-LogonTask\s+"Memhub-/g) ?? []).length, 1, "one Windows stack task owns all child processes");
   const uninstall = await readFile(new URL(`../editions/${edition}/windows/uninstall.ps1`, import.meta.url), "utf8");
