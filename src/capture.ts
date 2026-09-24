@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { chmod, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { withFileMutationLock } from "./file-mutation-lock.js";
 
 export interface MemhubCaptureEvent {
   event_id: string;
@@ -71,9 +72,6 @@ export interface IdleCaptureGroup {
   complete_count: number;
 }
 
-let deviceMutationTail = Promise.resolve();
-let captureIndexMutationTail = Promise.resolve();
-
 export function normalizeCaptureEvent(value: unknown): MemhubCaptureEvent {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("capture event must be an object");
   const input = value as Record<string, unknown>;
@@ -117,7 +115,7 @@ export async function createDevice(
     token_hash: tokenHash(token),
     created_at: new Date().toISOString()
   };
-  await withDeviceMutation(async () => {
+  await withDeviceMutation(stateRoot, async () => {
     const store = await loadDevices(stateRoot);
     store.devices.push(device);
     await saveDevices(stateRoot, store);
@@ -137,7 +135,7 @@ export async function listDevices(stateRoot: string, accountIdRaw?: string): Pro
 
 export async function revokeDevice(stateRoot: string, deviceIdRaw: string): Promise<boolean> {
   const deviceId = requiredId(deviceIdRaw, "deviceId", 200);
-  return withDeviceMutation(async () => {
+  return withDeviceMutation(stateRoot, async () => {
     const store = await loadDevices(stateRoot);
     const device = store.devices.find((item) => item.device_id === deviceId);
     if (!device || device.revoked_at) return false;
@@ -151,7 +149,7 @@ export async function authenticateDevice(stateRoot: string, tokenRaw: string): P
   const token = tokenRaw.trim();
   if (!token) return null;
   const hash = tokenHash(token);
-  return withDeviceMutation(async () => {
+  return withDeviceMutation(stateRoot, async () => {
     const store = await loadDevices(stateRoot);
     const expected = Buffer.from(hash, "hex");
     const device = store.devices.find((item) => {
@@ -171,7 +169,7 @@ export async function storeCaptureEvent(
   device: Pick<DeviceRecord, "device_id" | "account_id">,
   rawEvent: unknown
 ): Promise<{ created: boolean; updated: boolean; event: StoredCaptureEvent }> {
-  return withCaptureIndexMutation(async () => {
+  return withCaptureIndexMutation(stateRoot, async () => {
     const event = normalizeCaptureEvent(rawEvent);
     const stored: StoredCaptureEvent = {
       ...event,
@@ -228,7 +226,7 @@ export async function isCaptureIngested(stateRoot: string, accountId: string, ev
 }
 
 export async function markCaptureIngested(stateRoot: string, accountId: string, eventId: string): Promise<void> {
-  await withCaptureIndexMutation(async () => {
+  await withCaptureIndexMutation(stateRoot, async () => {
     await ensureCaptureIndexUnlocked(stateRoot, accountId);
     await markCaptureIndexDirty(stateRoot, accountId, eventId);
     const path = `${captureEventPath(stateRoot, accountId, eventId)}.ingested`;
@@ -247,7 +245,7 @@ export async function captureIndexStats(
   accountIdRaw?: string,
   projectId?: string
 ): Promise<CaptureIndexStats> {
-  return withCaptureIndexMutation(async () => {
+  return withCaptureIndexMutation(stateRoot, async () => {
     const accountIds = accountIdRaw?.trim()
       ? [accountIdRaw.trim()]
       : await discoverCaptureAccountIds(stateRoot);
@@ -283,7 +281,7 @@ export async function captureIndexStats(
 }
 
 export async function listIdleCaptureGroups(stateRoot: string, cutoffIso: string): Promise<IdleCaptureGroup[]> {
-  return withCaptureIndexMutation(async () => {
+  return withCaptureIndexMutation(stateRoot, async () => {
     const accountIds = await discoverCaptureAccountIds(stateRoot);
     for (const accountId of accountIds) await ensureCaptureIndexUnlocked(stateRoot, accountId);
     return withCaptureIndexDb(stateRoot, (db) => {
@@ -345,7 +343,7 @@ export async function listCaptureIndexEntries(
     limit?: number;
   } = {}
 ): Promise<CaptureIndexEntry[]> {
-  return withCaptureIndexMutation(async () => {
+  return withCaptureIndexMutation(stateRoot, async () => {
     const accountIds = accountIdRaw?.trim()
       ? [accountIdRaw.trim()]
       : await discoverCaptureAccountIds(stateRoot);
@@ -608,12 +606,8 @@ function accountHash(accountId: string): string {
   return createHash("sha256").update(accountId, "utf8").digest("hex");
 }
 
-async function withCaptureIndexMutation<T>(run: () => Promise<T>): Promise<T> {
-  const previous = captureIndexMutationTail;
-  let release!: () => void;
-  captureIndexMutationTail = new Promise<void>((resolveLock) => { release = resolveLock; });
-  await previous;
-  try { return await run(); } finally { release(); }
+async function withCaptureIndexMutation<T>(stateRoot: string, run: () => Promise<T>): Promise<T> {
+  return withFileMutationLock(captureIndexPath(stateRoot), run);
 }
 
 export function mergeCaptureEvent(
@@ -640,9 +634,7 @@ export function mergeCaptureEvent(
     "workspace_path",
     "project_hint",
     "user_text",
-    "assistant_text",
-    "reasoning_summary",
-    "tool_summary"
+    "assistant_text"
   ] as const) {
     const current = existing[field];
     const next = incoming[field];
@@ -653,6 +645,16 @@ export function mergeCaptureEvent(
       continue;
     }
     if (current !== next) throw new Error(`capture event conflict for ${field}`);
+  }
+  for (const field of ["reasoning_summary", "tool_summary"] as const) {
+    const current = existing[field];
+    const next = incoming[field];
+    if (next === undefined || current === next) continue;
+    if (existing.capture_status === "complete") {
+      throw new Error(`capture event conflict for ${field}`);
+    }
+    event[field] = next;
+    updated = true;
   }
   const nextStatus = mergeCaptureStatus(existing.capture_status, incoming.capture_status);
   if (nextStatus !== existing.capture_status) {
@@ -767,12 +769,8 @@ function normalizeDeviceRecord(value: unknown): DeviceRecord {
   };
 }
 
-async function withDeviceMutation<T>(run: () => Promise<T>): Promise<T> {
-  const previous = deviceMutationTail;
-  let release!: () => void;
-  deviceMutationTail = new Promise<void>((resolveLock) => { release = resolveLock; });
-  await previous;
-  try { return await run(); } finally { release(); }
+async function withDeviceMutation<T>(stateRoot: string, run: () => Promise<T>): Promise<T> {
+  return withFileMutationLock(devicesPath(stateRoot), run);
 }
 
 function tokenHash(token: string): string {

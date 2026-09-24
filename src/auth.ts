@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { withFileMutationLock } from "./file-mutation-lock.js";
 
 const VERSION = 1;
 
@@ -27,8 +28,6 @@ export interface MemhubAccountSummary {
   role: "user" | "admin";
 }
 
-let mutationTail = Promise.resolve();
-
 export async function hasAccounts(stateRoot: string): Promise<boolean> {
   return Object.keys((await load(stateRoot)).accounts).length > 0;
 }
@@ -53,7 +52,7 @@ export async function setAccountRole(
 ): Promise<void> {
   const accountRef = accountRefRaw.trim();
   if (!accountRef) throw new Error("account reference is required");
-  await withMutationLock(async () => {
+  await withMutationLock(stateRoot, async () => {
     const data = await load(stateRoot);
     const entry = Object.entries(data.accounts).find(([username, record]) =>
       username === accountRef || record.account_id === accountRef || record.cloudflare?.email === accountRef.toLowerCase()
@@ -99,7 +98,7 @@ export async function addAccount(
 ): Promise<{ username: string; account_id: string }> {
   const username = usernameOf(usernameRaw);
   const email = emailRaw === undefined ? undefined : emailOf(emailRaw);
-  return withMutationLock(async () => {
+  return withMutationLock(stateRoot, async () => {
     const data = await load(stateRoot);
     if (data.accounts[username]) throw new Error(`账号已存在：${username}`);
     if (email) assertEmailAvailable(data, email);
@@ -117,7 +116,7 @@ export async function addAccount(
 export async function bindCloudflareEmail(stateRoot: string, usernameRaw: string, emailRaw: string): Promise<void> {
   const username = usernameOf(usernameRaw);
   const email = emailOf(emailRaw);
-  await withMutationLock(async () => {
+  await withMutationLock(stateRoot, async () => {
     const data = await load(stateRoot);
     const record = data.accounts[username];
     if (!record) throw new Error(`账号不存在：${username}`);
@@ -130,7 +129,7 @@ export async function bindCloudflareEmail(stateRoot: string, usernameRaw: string
 
 export async function deleteAccount(stateRoot: string, usernameRaw: string): Promise<void> {
   const username = usernameOf(usernameRaw);
-  await withMutationLock(async () => {
+  await withMutationLock(stateRoot, async () => {
     const data = await load(stateRoot);
     if (!data.accounts[username]) throw new Error(`账号不存在：${username}`);
     delete data.accounts[username];
@@ -147,7 +146,7 @@ export async function resolveCloudflareAccount(
   const email = emailOf(identity.email);
   if (!sub || sub.length > 512) throw new Error("Cloudflare sub 无效");
 
-  return withMutationLock(async () => {
+  return withMutationLock(stateRoot, async () => {
     const data = await load(stateRoot);
     const entries = Object.entries(data.accounts);
     const bySub = entries.find(([, record]) => record.cloudflare?.sub === sub);
@@ -193,16 +192,8 @@ function assertEmailAvailable(data: AccountStore, email: string, exceptUsername?
   if (conflict) throw new Error(`该 Cloudflare 邮箱已绑定账号：${conflict[0]}`);
 }
 
-async function withMutationLock<T>(run: () => Promise<T>): Promise<T> {
-  const previous = mutationTail;
-  let release!: () => void;
-  mutationTail = new Promise<void>((resolveLock) => { release = resolveLock; });
-  await previous;
-  try {
-    return await run();
-  } finally {
-    release();
-  }
+async function withMutationLock<T>(stateRoot: string, run: () => Promise<T>): Promise<T> {
+  return withFileMutationLock(filePath(stateRoot), run);
 }
 
 function filePath(stateRoot: string): string {

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { withFileMutationLock } from "./file-mutation-lock.js";
 
 export interface ConversationProjectBinding {
   accountId: string;
@@ -21,8 +22,6 @@ interface BindingFile {
 }
 
 export class JsonConversationProjectBindingStore implements ConversationProjectBindingStore {
-  private mutation = Promise.resolve();
-
   constructor(private readonly path: string) {}
 
   async get(accountId: string, conversationId: string): Promise<ConversationProjectBinding | null> {
@@ -66,15 +65,7 @@ export class JsonConversationProjectBindingStore implements ConversationProjectB
   }
 
   private async serialize<T>(operation: () => Promise<T>): Promise<T> {
-    const previous = this.mutation;
-    let release!: () => void;
-    this.mutation = new Promise<void>((resolve) => { release = resolve; });
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
+    return withFileMutationLock(this.path, operation);
   }
 
   private async read(): Promise<BindingFile> {
