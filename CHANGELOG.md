@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.2.3 — 2026-09-25
+
+Memhub 0.2.3 is a release-hygiene pass over the current v0.2 runtime. It does not introduce a new memory hierarchy; it makes the repository, documentation, release packages, and hosted entrypoint match the production system that is already running.
+
+### Documentation and repository cleanup
+
+- Reorganized the public documentation around one current source of truth: product guides, architecture, operations, Skills, maintainer notes, and repository-tooling contracts.
+- Removed superseded repair/simplification/evolution documents from the active tree. Their provenance remains available in Git history instead of competing with current architecture.
+- Kept legacy runtime compatibility only where the code still supports it; retired deployment URLs and obsolete implementation guidance are no longer presented as active instructions.
+- Refreshed the English and Chinese READMEs around the current account/project model, L1–L4 memory, Retrieval v1, Branches, Skills, Todos, MCP, browser workspace, Local/Server editions, and Linux/Windows installation paths.
+
+### Production and release alignment
+
+- The canonical hosted entrypoint is `https://memhub.sanqi.org/`.
+- Linux systemd deployments use `memhub-stack.target` to own the Core → Gateway → optional Bridge lifecycle.
+- Release metadata and package manifests are regenerated from the clean public release tree.
+- GitHub repository metadata, documentation navigation, release notes, and downloadable artifacts are aligned to the same release.
+
 ## v0.2.2 — 2026-09-24
 
 Memhub 0.2.2 is the first release where the L1–L4 memory model, project routing, Retrieval v1, Branch context, executable Skill lifecycle, bounded result transport, production process supervision, and the reorganized public documentation ship together.

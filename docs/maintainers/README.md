@@ -2,4 +2,4 @@
 
 - [Upstream attribution](upstream.md)
 
-Historical migration/repair records are under [../archive/](../archive/). UI review contracts used by repository tooling are under [../internal/](../internal/).
+UI review contracts used by repository tooling are under [../internal/](../internal/). Superseded migration/repair plans are retained in Git history rather than the active documentation tree.

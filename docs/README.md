@@ -2,7 +2,7 @@
 
 This directory is the documentation source of truth for the current Memhub runtime.
 
-Start with the task you are trying to complete. Historical repair and design records are deliberately separated from current operating documentation so an old migration note cannot be mistaken for Current Truth.
+Start with the task you are trying to complete. Superseded repair plans and migration-era design records are intentionally removed from the current documentation tree and remain available through Git history, so old guidance cannot be mistaken for Current Truth.
 
 ## Use Memhub
 
@@ -40,8 +40,4 @@ The canonical hosted project deployment is **https://memhub.sanqi.org/**. Self-h
 - [Long-term content audit Skill](skills/memhub-long-term-content-audit-v2.md)
 - [Internal UI/review contracts](internal/)
 
-## Historical records
-
-`archive/` contains superseded implementation plans, one-off repair reports, and previous scope documents. They are retained for provenance only and are **not current architecture or deployment instructions**.
-
-Current Truth belongs in the Project Registry/current architecture and the active documents linked above.
+Current Truth belongs in the Project Registry, current architecture, and the active documents linked above. Historical implementation records belong to Git history rather than the active documentation navigation.

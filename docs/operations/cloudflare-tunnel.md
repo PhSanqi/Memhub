@@ -4,7 +4,7 @@ Memhub should stay bound to loopback and let `cloudflared` own the public edge c
 
 ## Canonical production route
 
-The canonical production route for this project is `https://memhub.sanqi.org/`. Production health, MCP, capture, browser UI, and the dedicated Tunnel watchdog must resolve from that hostname. The historical `plugin.sanqi.org/memhub` route is retired and is not a production source of truth.
+The canonical production route for this project is `https://memhub.sanqi.org/`. Production health, MCP, capture, browser UI, and the dedicated Tunnel watchdog must resolve from that hostname.
 
 The `memory.example.com` values used later in this document are intentionally generic placeholders for self-hosted installations; they do not replace the canonical route above for the project deployment.
 

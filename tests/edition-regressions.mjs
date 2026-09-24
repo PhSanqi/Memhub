@@ -75,7 +75,7 @@ assert.match(deployTarget, /Requires=memhub-core\.service memhub\.service/);
 for (const [name, source] of [["README.md", readme], ["README.zh-CN.md", readmeZh], ["docs/operations/cloudflare-tunnel.md", cloudflareGuide]]) {
   assert.match(source, /https:\/\/memhub\.sanqi\.org\//, name + ": canonical production route must be explicit");
 }
-assert.match(cloudflareGuide, /plugin\.sanqi\.org\/memhub/, "operations guide must identify the retired production route");
+assert.doesNotMatch(cloudflareGuide, /plugin\.sanqi\.org\/memhub/, "operations guide must not retain the retired production route");
 assert.doesNotMatch(readme, /plugin\.sanqi\.org\/memhub/, "main README must not advertise the retired route");
 assert.doesNotMatch(readmeZh, /plugin\.sanqi\.org\/memhub/, "Chinese README must not advertise the retired route");
 for (const edition of ["local", "server"]) {

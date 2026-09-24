@@ -14,7 +14,7 @@ Memhub gives ChatGPT, Codex, MCP clients, and other AI harnesses a durable memor
 
 It keeps original conversation evidence, builds a chronological project history, distills durable project knowledge, maintains a carefully scoped cross-project profile, and exposes reusable Skills, project Todos, retrieval, provenance, and a browser workspace from one self-hosted runtime.
 
-- **Current release:** v0.2.2
+- **Current release:** v0.2.3
 - **Canonical hosted deployment:** https://memhub.sanqi.org/
 - **Downloads:** https://github.com/PhSanqi/Memhub/releases
 
@@ -199,14 +199,15 @@ npm run process:smoke
 
 Start at **[docs/README.md](docs/README.md)**.
 
-The documentation is organized into:
+The current documentation is organized into:
 
 - product and installation guides;
 - architecture and data boundaries;
 - operations and deployment;
 - maintainer notes;
-- internal review contracts;
-- historical migration/repair records kept under `docs/archive/`.
+- internal review contracts used by repository tooling.
+
+Superseded repair plans and migration-era design notes are kept in Git history instead of the current documentation tree, so old implementation guidance cannot be mistaken for Current Truth.
 
 ## Project status
 

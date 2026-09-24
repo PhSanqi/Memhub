@@ -14,7 +14,7 @@ Memhub 为 ChatGPT、Codex、MCP 客户端和其他 AI Harness 提供跨对话�
 
 它从原始对话证据出发，构建项目时间线、长期项目知识和跨项目稳定画像，并把 Skill、Todo、检索、来源追踪与浏览器工作区统一到一个可自托管运行时中。
 
-- **当前版本：** v0.2.2
+- **当前版本：** v0.2.3
 - **项目 canonical 线上入口：** https://memhub.sanqi.org/
 - **下载：** https://github.com/PhSanqi/Memhub/releases
 
@@ -199,14 +199,15 @@ npm run process:smoke
 
 统一从 **[docs/README.md](docs/README.md)** 开始。
 
-文档按用途分为：
+当前文档按用途分为：
 
 - 产品与安装指南；
 - 架构和数据边界；
 - 部署与运维；
 - Maintainer 文档；
-- 内部 UI/Review contract；
-- `docs/archive/` 下保留的历史迁移/修复记录。
+- 仓库工具仍在使用的内部 UI/Review contract。
+
+已经被取代的修复方案、迁移阶段设计记录不再留在当前文档树中，而由 Git 历史保存，避免旧实现说明被误认为 Current Truth。
 
 ## 项目状态
 
