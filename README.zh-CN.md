@@ -16,6 +16,8 @@ Memhub 是一个私有、项目感知的长期记忆中心。Codex、MCP 客户�
 
 当前发布线：**v0.2.x** · [查看 Releases](https://github.com/PhSanqi/Memhub/releases)
 
+本项目当前唯一 canonical 生产入口：**https://memhub.sanqi.org/**。旧的 `plugin.sanqi.org/memhub` 路径已退役，不再作为生产 Health、MCP、Capture 或 Watchdog 地址。下文自托管示例继续使用 `memory.example.com` 作为占位域名。
+
 ---
 
 ## 你能用 Memhub 做什么

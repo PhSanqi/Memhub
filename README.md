@@ -16,6 +16,8 @@ It is more than a chat archive. Memhub turns raw conversations into readable pro
 
 Current release line: **v0.2.x** · [View Releases](https://github.com/PhSanqi/Memhub/releases)
 
+Canonical hosted deployment for this project: **https://memhub.sanqi.org/**. The former `plugin.sanqi.org/memhub` route is retired and must not be used as the production health, MCP, capture, or watchdog endpoint. Self-hosted examples below continue to use `memory.example.com` as a placeholder.
+
 ---
 
 ## What you get

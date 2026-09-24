@@ -2,6 +2,12 @@
 
 Memhub should stay bound to loopback and let `cloudflared` own the public edge connection. Do not expose port 3001 directly.
 
+## Canonical production route
+
+The canonical production route for this project is `https://memhub.sanqi.org/`. Production health, MCP, capture, browser UI, and the dedicated Tunnel watchdog must resolve from that hostname. The historical `plugin.sanqi.org/memhub` route is retired and is not a production source of truth.
+
+The `memory.example.com` values used later in this document are intentionally generic placeholders for self-hosted installations; they do not replace the canonical route above for the project deployment.
+
 ## Recommended connector transport
 
 - Keep `cloudflared` transport protocol on `auto`. It prefers QUIC and falls back to HTTP/2 when UDP connectivity is unavailable.
@@ -48,6 +54,12 @@ To include the public route:
 
 ```bash
 npm run network:check -- --public-host memory.example.com
+```
+
+For this project's production deployment, use:
+
+```bash
+npm run network:check -- --public-host memhub.sanqi.org --metrics 127.0.0.1:20241
 ```
 
 On a host running several Tunnel connectors, also pass the connector's fixed metrics address so the report cannot attach to a different Tunnel after process restart:
@@ -115,6 +127,8 @@ export MEMHUB_TUNNEL_WATCHDOG_SERVICE=cloudflared.service
 ./deploy/install-tunnel-watchdog.sh
 systemctl --user enable --now memhub-tunnel-watchdog.timer
 ```
+
+The installed production watchdog for this project must set `MEMHUB_TUNNEL_WATCHDOG_PUBLIC_URL=https://memhub.sanqi.org/`.
 
 The default policy is three consecutive observations before recovery and a ten-minute restart cooldown. Unknown/malformed connector metrics never trigger a restart. The watchdog restarts only the configured Tunnel service; it does not change the machine-wide proxy, firewall, DNS, or unrelated Cloudflare connectors.
 
