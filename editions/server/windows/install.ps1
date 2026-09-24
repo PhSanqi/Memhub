@@ -88,7 +88,7 @@ $StackLock = Join-Path $StateRoot ".server-stack.lock"
 @echo off
 "$Node" "$StackEntry" --mode server --home "$StateRoot"
 "@ | Set-Content -Encoding ASCII $StackLauncher
-try { & icacls.exe $StateRoot /inheritance:r /grant:r "$env:USERNAME:(OI)(CI)F" | Out-Null } catch {}
+try { & icacls.exe $StateRoot /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" | Out-Null } catch {}
 
 function Install-LogonTask([string]$Name, [string]$Launcher) {
   & schtasks.exe /Create /F /SC ONLOGON /TN $Name /TR ('"' + $Launcher + '"') | Out-Null
@@ -102,8 +102,12 @@ if (Test-Path $StackLock) {
   }
 }
 foreach ($Task in @("Memhub-Server-Stack", "Memhub-Server-Memory", "Memhub-Server")) {
-  & schtasks.exe /End /TN $Task 2>$null | Out-Null
-  & schtasks.exe /Delete /F /TN $Task 2>$null | Out-Null
+  & cmd.exe /d /c "schtasks.exe /Query /TN `"$Task`" >NUL 2>&1" | Out-Null
+  if ($LASTEXITCODE -eq 0) {
+    & cmd.exe /d /c "schtasks.exe /End /TN `"$Task`" >NUL 2>&1" | Out-Null
+    & cmd.exe /d /c "schtasks.exe /Delete /F /TN `"$Task`" >NUL 2>&1" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to remove existing scheduled task $Task" }
+  }
 }
 function Stop-MemhubNodeProcesses {
   $Needles = @($MemoryEntry, $McpEntry) | ForEach-Object { $_.ToLowerInvariant() }

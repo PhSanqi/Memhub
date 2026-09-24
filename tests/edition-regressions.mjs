@@ -4,7 +4,7 @@ import { access, readFile } from "node:fs/promises";
 const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 const pluginJson = JSON.parse(await readFile(new URL("../adapters/plugin/plugin.json", import.meta.url), "utf8"));
 assert.equal(pluginJson.version, packageJson.version, "plugin and runtime release versions must stay aligned");
-assert.equal(packageJson.version, "0.2.3", "release regression expects the v0.2.3 line");
+assert.equal(packageJson.version, "0.2.4", "release regression expects the v0.2.4 line");
 
 const editions = [
   {
@@ -78,6 +78,12 @@ for (const [name, source] of [["README.md", readme], ["README.zh-CN.md", readmeZ
 assert.doesNotMatch(cloudflareGuide, /plugin\.sanqi\.org\/memhub/, "operations guide must not retain the retired production route");
 assert.doesNotMatch(readme, /plugin\.sanqi\.org\/memhub/, "main README must not advertise the retired route");
 assert.doesNotMatch(readmeZh, /plugin\.sanqi\.org\/memhub/, "Chinese README must not advertise the retired route");
+const completePackager = await readFile(new URL("../scripts/package-complete-release.mjs", import.meta.url), "utf8");
+const completeSmoke = await readFile(new URL("../scripts/complete-runtime-smoke.cjs", import.meta.url), "utf8");
+assert.match(completePackager, /"web-assets"/, "Complete archives must include the Web assets used by Gateway CLI and UI");
+for (const asset of ["logo-mark.png", "logo-lockup.png"]) {
+  assert.match(completeSmoke, new RegExp(`web-assets/${asset.replace(".", "\\.")}`), `Complete smoke must check ${asset}`);
+}
 for (const edition of ["local", "server"]) {
   const linux = await readFile(new URL(`../editions/${edition}/linux/install.sh`, import.meta.url), "utf8");
   const windows = await readFile(new URL(`../editions/${edition}/windows/install.ps1`, import.meta.url), "utf8");
@@ -90,6 +96,8 @@ for (const edition of ["local", "server"]) {
   assert.match(windows, /Get-CimInstance Win32_Process/, "Windows reinstall must identify orphaned Memhub Node children");
   assert.match(windows, /Stop-Process -Id/, "Windows reinstall must terminate orphaned Memhub Node children");
   assert.match(windows, /--action stop/, "Windows reinstall must gracefully stop an existing stack before replacement");
+  assert.match(windows, /schtasks\.exe \/Query/, "Windows reinstall must check whether a scheduled task exists before removal");
+  assert.match(windows, /cmd\.exe \/d \/c/, "Windows task cleanup must suppress missing-task native stderr");
   assert.doesNotMatch(windows, /Start-Sleep -Seconds 1/, "Windows dependencies must use readiness, not a fixed sleep");
   assert.equal((windows.match(/Install-LogonTask\s+"Memhub-/g) ?? []).length, 1, "one Windows stack task owns all child processes");
   const uninstall = await readFile(new URL(`../editions/${edition}/windows/uninstall.ps1`, import.meta.url), "utf8");
