@@ -5,9 +5,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
-$BundledNode = Join-Path $RepoRoot "runtime\node.exe"
+$BundledNode = @(
+  $env:NODE,
+  (Join-Path $RepoRoot "runtime\node\node.exe"),
+  (Join-Path $RepoRoot "runtime\node.exe")
+) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 $NodeCommand = Get-Command node -ErrorAction SilentlyContinue
-$Node = if (Test-Path $BundledNode) { $BundledNode } elseif ($NodeCommand) { $NodeCommand.Source } else { throw "Node.js 20+ is required" }
+$Node = if ($BundledNode) { $BundledNode } elseif ($NodeCommand) { $NodeCommand.Source } else { throw "Node.js 20+ is required" }
 $NpmCommand = Get-Command npm -ErrorAction SilentlyContinue
 $Npm = if ($NpmCommand) { $NpmCommand.Source } else { $null }
 $ServerState = Join-Path $StateRoot "server"
