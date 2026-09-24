@@ -108,6 +108,9 @@ Business project memory and authoritative architecture come from one primary pro
 | `memhub_distill` | distillation jobs + Memory Core | job lease/complete/fail and L2/L3/L4/Skill artifacts | explicit workspace/project or job scope | lease owner, target, evidence and canonical project are revalidated on submit |
 | `memmy_project_list` | Project Registry | none | account scoped | read-only discovery before create/bind of uncertain projects |
 | `memhub_todo` | Project Registry todos | add/complete/reopen todo | current workspace/project first; conversation binding is fallback | Todo state is not duplicated into architecture or memory artifacts |
+| `memhub_branch` | project-local workstream state | create/update/close/bind Branch context | only after one primary project is resolved | Branch narrows project retrieval; it never becomes L1/L2/L3/L4 or crosses project boundaries |
+| `memhub_skill` | Skill artifacts + execution telemetry | load/record/plan/execute Skill lifecycle | explicit project/account Skill scope | full procedures load explicitly; revision/retirement requires short-lived authorization |
+| `memhub_result` | short-lived result spool | read progressive result chunks | account-scoped result ownership | spool data is transport state only and is never distilled |
 | `memmy_project_manage` | Project Registry lifecycle | create/update/delete/merge | explicit project references only | one-shot plan/execute authorization; delete is blocked while unfinished distillation jobs exist; merge preserves historical storage aliases |
 | `memmy_project` | project binding + architecture reader | bind/unbind only | explicit workspace/project overrides old binding | architecture is read-only; project lifecycle mutations belong to `memmy_project_manage` |
 

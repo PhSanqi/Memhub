@@ -122,7 +122,7 @@ Memory Core schema v8 changes the durable memory taxonomy to L1/L2/L3/L4/Skill w
 - `verify`: exact frozen-copy comparison;
 - `preserved`: schema-changing cutover verification based on database integrity, durable table presence and preservation of baseline durable row identities.
 
-See [CORE_MIGRATION.md](CORE_MIGRATION.md).
+See [Memory Core migration](../operations/migration.md).
 
 ## Long-term-content hygiene
 

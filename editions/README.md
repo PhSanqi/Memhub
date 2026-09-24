@@ -6,4 +6,4 @@ Memhub ships one shared core with two deployment profiles:
 - `local/`: standalone loopback deployment for users without a server.
 - root `install-complete.sh` / `install-complete.ps1`: self-contained release installers that use the bundled target-OS Node runtime, production dependencies and prebuilt output, then select either Local or Server mode from the same archive.
 
-See `../docs/EDITIONS.md` for the architectural contract.
+See [Edition and release documentation](../docs/operations/editions.md) for the architectural contract.
