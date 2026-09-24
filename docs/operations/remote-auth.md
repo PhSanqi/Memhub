@@ -16,7 +16,7 @@ Cloudflare requests are explicitly excluded from this local path.
 
 Show or rotate the token with `memhub admin-token show|rotate` (or
 `node dist/mcp.js admin-token ...` in a source checkout). See
-[Control Plane, capture and distillation](CONTROL_PLANE_AND_DISTILLATION.md).
+[Control Plane, capture and distillation](../architecture/control-plane-and-distillation.md).
 
 Machine credentials remain separate from human login: a device token selects an already-bound Memhub `account_id`; it does not create or merge a human account.
 

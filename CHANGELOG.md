@@ -1,8 +1,17 @@
 # Changelog
 
-## v0.2.2 — 2026-09-22
+## v0.2.2 — 2026-09-24
 
-Memhub 0.2.2 focuses on runtime stability, concurrent-state safety, bounded long-context transport, and self-contained installation packages.
+Memhub 0.2.2 is the first release where the L1–L4 memory model, project routing, Retrieval v1, Branch context, executable Skill lifecycle, bounded result transport, production process supervision, and the reorganized public documentation ship together.
+
+### Retrieval, project context and Skills
+
+- Account/project governance now bounds the legal candidate set before relevance ranking. Retrieval v1 performs deterministic second-stage semantic + BM25-style lexical fusion, exact-content deduplication and bounded Top-K selection without broadening project scope.
+- `memmy_context` defaults to a compact Context Capsule with aggregate/per-item byte budgets, compact provenance and lane-level retrieval diagnostics; standard/full modes remain available for deeper inspection.
+- Project Branches provide project-local workstream context without creating a second memory hierarchy. Branches can narrow retrieval but cannot expose another project's business memory.
+- Skill Router returns compact candidates first, then `memhub_skill action=load` loads the selected full procedure. Execution telemetry records selected/loaded/invoked/success/failure/user-correction state.
+- Skill revision/retirement uses an explicit plan → approval → execute contract, preserves stable `source_skill_id`, archives predecessors and retains historical telemetry.
+- `memhub_result` provides account-scoped progressive transport for unusually large generic MCP responses; transport spool data is never treated as durable memory.
 
 ### Stability and concurrency
 
@@ -21,12 +30,27 @@ Memhub 0.2.2 focuses on runtime stability, concurrent-state safety, bounded long
 - Memhub and Bridge HTTP origins use longer keepalive intervals aligned with Cloudflare Tunnel origin connection reuse, and Memhub exposes a minimal health endpoint.
 - `npm run network:check` inspects origin/public health plus available cloudflared Prometheus metrics without requiring Cloudflare account API access.
 
+### Process ownership and production recovery
+
+- Linux deployment has an explicit systemd stack target with ordered Core → Gateway → optional Bridge readiness and lifecycle propagation.
+- Direct/Windows installs use one `run-stack.mjs` supervisor instead of independent child login tasks, with singleton ownership, health supervision, bounded restart budgets and graceful reverse-order shutdown.
+- Bridge queue claims survive upstream failures and supervisor restarts with at-least-once/idempotent replay semantics.
+- The optional dedicated Cloudflare watchdog requires repeated failure, checks local origin health before recovery, enforces cooldown, and verifies the connector after restart.
+- Process, systemd, network-report and watchdog behavior have deterministic regression coverage.
+
 ### Complete packages
 
 - Linux Complete and Windows Complete packages bundle the target-OS Node.js runtime, production `node_modules`, and prebuilt Memhub output.
 - One Complete archive supports both Local and Server installation and does not require Node/npm on the destination host.
 - Complete artifacts are built natively on their target operating system so native modules such as `better-sqlite3` match the host ABI.
 - Existing `install.sh` / `install.ps1` remain the convenience/source installation path.
+
+### Documentation and public project surface
+
+- GitHub README has been rewritten around the current product: project-aware memory, L1–L4, Project Registry/Todos, Branch, Retrieval, Skill and the Local/Server deployment choice.
+- Public documentation is now grouped under `docs/architecture/`, `docs/operations/`, `docs/maintainers/`, `docs/internal/` and `docs/archive/`, with `docs/README.md` as the navigation source of truth.
+- Superseded repair/simplification documents are retained only under `docs/archive/` so historical implementation notes are not confused with current architecture.
+- The canonical hosted deployment is `https://memhub.sanqi.org/`; the previous `plugin.sanqi.org/memhub` route is retired.
 
 ## v0.2.0 — 2026-09-20
 

@@ -4,387 +4,213 @@
 
 ![Release](https://img.shields.io/github/v/release/PhSanqi/Memhub?display_name=tag)
 ![Node.js](https://img.shields.io/badge/Node.js-20%2B-339933?logo=node.js&logoColor=white)
-![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-5b67d6)
+![Platforms](https://img.shields.io/badge/Linux%20%7C%20Windows-5b67d6)
 ![MCP](https://img.shields.io/badge/MCP-ready-7c3aed)
 ![License](https://img.shields.io/github/license/PhSanqi/Memhub)
 
-**让 AI 不只记住这一轮对话，而是持续记住你、你的项目，以及你正在做的事情。**
+**面向 AI Agent 的项目感知长期记忆系统。**
 
-Memhub 是一个私有、项目感知的长期记忆中心。Codex、MCP 客户端和其他 AI Harness 可以在不同会话、不同设备之间共享同一个人的长期记忆，同时继续把不同项目隔离开。
+Memhub 为 ChatGPT、Codex、MCP 客户端和其他 AI Harness 提供跨对话、跨设备的持久记忆，同时把不同项目严格隔离，避免“所有历史都塞进一个上下文”。
 
-它不是单纯的聊天记录数据库。Memhub 会把原始对话逐步整理成项目时间线、项目规则与经验，以及跨项目的长期用户画像；同时提供项目 Todo、Web 管理界面和可复用 Skill。
+它从原始对话证据出发，构建项目时间线、长期项目知识和跨项目稳定画像，并把 Skill、Todo、检索、来源追踪与浏览器工作区统一到一个可自托管运行时中。
 
-当前发布线：**v0.2.x** · [查看 Releases](https://github.com/PhSanqi/Memhub/releases)
-
-本项目当前唯一 canonical 生产入口：**https://memhub.sanqi.org/**。旧的 `plugin.sanqi.org/memhub` 路径已退役，不再作为生产 Health、MCP、Capture 或 Watchdog 地址。下文自托管示例继续使用 `memory.example.com` 作为占位域名。
-
----
-
-## 你能用 Memhub 做什么
-
-| 能力 | 使用体验 |
-| --- | --- |
-| **跨对话记忆** | 新开一个会话，也能继续昨天的项目，不必重新解释背景。 |
-| **跨设备记忆** | Server Edition 下，Windows、Linux 和不同 AI 客户端可以使用同一个 Memhub 账号与记忆库。 |
-| **项目级记忆隔离** | 每个项目有自己的时间线、规则和经验，不会把所有历史上下文混在一起。 |
-| **项目 Todo** | 直接让 AI “记个待办”“标记完成”“重新打开”，Todo 不再藏在聊天或架构文档里。 |
-| **按时间回看项目** | L2 把项目经历整理成时间线，可以直接回答“这段时间我做了什么”。 |
-| **沉淀项目经验** | L3 保存项目长期有效的规则、偏好、踩坑经验和工作方式。 |
-| **跨项目用户画像** | L4 提炼多个项目反复出现的稳定习惯，让新项目也能理解你的工作方式。 |
-| **Web 管理界面** | 在浏览器里查看 Projects、Todo、L1/L2/L3/L4、Skills 和处理状态。 |
-| **本地优先 / 私有部署** | 可以完全单机运行，也可以部署自己的 Server。 |
-| **MCP + Plugin** | MCP 客户端可以直接使用；支持生命周期 Hook 的 Harness 还能自动召回与捕获对话。 |
+- **当前版本：** v0.2.2
+- **项目 canonical 线上入口：** https://memhub.sanqi.org/
+- **下载：** https://github.com/PhSanqi/Memhub/releases
 
 ---
 
-## 它解决的是这种体验
+## Memhub 解决什么
 
-你不需要记住工具名。正常情况下，可以直接和 AI 这样说：
+Memhub 不只回答“该记住什么”，还明确回答：
 
-> “继续昨天那个项目。”
+- **这是谁的记忆？** 一个稳定 account 代表一个人；设备和 Harness 是来源，不是不同用户。
+- **哪个项目可以使用？** 先确定项目边界，再做检索；其他项目的业务记忆不会因为“很相似”就混进来。
+- **这条记忆从哪里来？** 长期记忆保留回到 L1 原始对话的 evidence / provenance。
+- **模型到底应该拿多少上下文？** Retrieval 只在合法候选集里排序，再输出有预算的 Context Capsule。
+- **哪些内容应该是可执行能力？** 可复用流程进入 Skill，而不是伪装成第五层记忆。
 
-> “把‘补 Windows 安装测试’记成这个项目的待办。”
+## 记忆模型
 
-> “这个 Todo 已经完成了，标记一下。”
+```text
+L1  原始对话证据
+ │
+ ▼
+L2  项目时间线
+ │
+ ▼
+L3  项目长期规则、经验与 Current Truth
+ │
+ ├── 其他项目 L3 ─────┐
+ │                    ▼
+ └──────────────────► L4  跨项目稳定账号画像
 
-> “按时间告诉我这个项目最近做了什么。”
+Skill  ─────────────── 与 L1–L4 正交的可复用能力层
+```
 
-> “我在这个项目里已经确定过哪些长期规则？”
+| 层 | 范围 | 作用 |
+| --- | --- | --- |
+| **L1** | 项目/账号证据 | 原始对话与来源 |
+| **L2** | 项目 | 按时间组织的项目历史 |
+| **L3** | 项目 | 长期规则、偏好、经验与 Current Truth |
+| **L4** | 账号 | 由多个项目共同支持的稳定模式 |
+| **Skill** | 项目或账号 | 带执行生命周期与 telemetry 的可复用流程 |
 
-> “换到另一台机器继续，读取我这个账号的项目记忆。”
+项目 **Todo** 属于 Project Registry；**Branch** 是项目内部的工作流/任务上下文过滤器。它们都不是新的记忆层。
 
-Memhub 的目标是让这些动作变成同一个持续上下文的一部分，而不是每次都从零开始。
+## 运行结构
 
----
+```text
+AI Harness / MCP / Plugin
+          │
+          ▼
+      Memhub Gateway
+          │
+   ┌──────┼───────────────┐
+   ▼      ▼               ▼
+Identity  Project Router  Skill Router
+          │               │
+          ▼               ▼
+     Retrieval v1      Skill lifecycle
+          │
+          ▼
+   Context Capsule
+          │
+          ▼
+      Memory Core
 
-## 一张图看懂
+Capture → L1 → 有证据边界的蒸馏 → L2 → L3 → L4
+```
 
-~~~mermaid
-flowchart LR
-    A[ChatGPT / Codex / MCP Client] --> M[Memhub Account]
-    B[Linux Device] --> M
-    C[Windows Device] --> M
+Memhub 负责身份、项目范围、证据边界、canonical artifact ID、检索、任务生命周期、provenance 与持久化提交；连接进来的模型/Harness 负责语义综合。服务器不会静默调用某个订阅模型替你完成语义蒸馏。
 
-    M --> P1[Project A]
-    M --> P2[Project B]
-    M --> U[Cross-project Profile]
+## 版本选择
 
-    P1 --> T1[Timeline]
-    P1 --> R1[Rules & Experience]
-    P1 --> D1[Todos]
+| 版本 | 适合场景 | 网络模型 |
+| --- | --- | --- |
+| **Local** | 单台电脑、本地私有记忆 | 仅 loopback |
+| **Server** | 多设备或多个 AI 客户端共享一个账号 | loopback origin + 认证代理/Tunnel |
 
-    P2 --> T2[Timeline]
-    P2 --> R2[Rules & Experience]
-    P2 --> D2[Todos]
-~~~
+Local / Server 都支持 Linux 和 Windows。
 
-同一个人可以从不同客户端、不同设备进入同一个 Memhub 账号。设备和 Harness 只是入口，长期记忆最终汇总到这个人的账号里；项目内容则继续按项目隔离。
+### 快速安装
 
----
+从 [最新 GitHub Release](https://github.com/PhSanqi/Memhub/releases) 下载对应平台包。
 
-## Memhub 怎么整理记忆
+Complete Linux：
 
-~~~mermaid
-flowchart TD
-    L1[L1 · 原始对话] --> L2[L2 · 项目时间线]
-    L2 --> L3[L3 · 项目规则与经验]
-    L3 --> L4[L4 · 跨项目用户画像]
-    S[Skill · 可复用能力] -. 独立于记忆层 .-> L3
-~~~
-
-- **L1 · 原始对话**：保留实际发生过的对话，作为可追溯证据。
-- **L2 · 项目时间线**：按时间整理“这个项目做过什么、改过什么、决定过什么”。
-- **L3 · 项目规则与经验**：沉淀这个项目长期有效的偏好、规则、经验和 Current Truth。
-- **L4 · 跨项目用户画像**：只保留多个项目重复证明的稳定工作习惯与偏好。
-- **Skill**：可复用的执行方法，不属于更深一层记忆。
-
-Web 界面会直接把 L2 展示成时间流，把 L3/L4 展示成可读条目，而不是要求你去看内部 JSON。
-
----
-
-## 选择安装方式
-
-Memhub 提供 **Local Edition** 和 **Server Edition**，Linux / Windows 都支持。
-
-Release 同时提供两条安装路径：
-
-- **完整安装版（Complete）**：内置目标系统对应的 Node.js runtime、生产依赖和预构建 Memhub，不要求预先安装 Node/npm。
-- **便捷/源码安装版**：使用仓库里的 `install.sh` / `install.ps1`，必要时在目标机器安装依赖并完成 build。
-
-| 你想要的体验 | 推荐 |
-| --- | --- |
-| 只在这一台电脑使用 | **Local Edition** |
-| 不想配置公网、反代或服务器 | **Local Edition** |
-| 多台电脑共享同一套记忆 | **Server Edition** |
-| Windows + Linux 共用一个长期记忆账号 | **Server Edition** |
-| 多个 MCP 客户端共用记忆 | **Server Edition** |
-| 先快速试用，再考虑服务器 | 先装 **Local Edition** |
-
-### Local Edition
-
-所有内容都运行在本机，默认只监听 loopback。
-
-Linux Complete：
-
-~~~bash
+```bash
 bash install-complete.sh --edition local
-~~~
+# 或
+bash install-complete.sh --edition server --public-host memory.example.com
+```
 
-Windows Complete：
+Complete Windows：
 
-~~~powershell
+```powershell
 powershell -ExecutionPolicy Bypass -File .\install-complete.ps1 -Edition local
-~~~
+# 或
+powershell -ExecutionPolicy Bypass -File .\install-complete.ps1 -Edition server -PublicHost memory.example.com
+```
 
-便捷/源码安装：
+源码安装：
 
-Linux：
-
-~~~bash
+```bash
 git clone https://github.com/PhSanqi/Memhub.git
 cd Memhub
 bash editions/local/linux/install.sh
-~~~
+```
 
-Windows PowerShell：
+Server、Windows、认证、Cloudflare、迁移和架构说明统一从 [文档首页](docs/README.md) 进入。
 
-~~~powershell
-git clone https://github.com/PhSanqi/Memhub.git
-cd Memhub
-powershell -ExecutionPolicy Bypass -File .\editions\local\windows\install.ps1
-~~~
+## 连接 AI 客户端
 
-安装后，本地 MCP / Plugin 可以连接：
+Local Edition 默认 Bridge MCP：
 
-~~~text
+```text
 http://127.0.0.1:17861/mcp
-~~~
+```
 
-Local Edition 适合个人单机长期使用，不需要 VPS，也不需要 Cloudflare。
+Server Edition 使用部署时配置的认证 MCP 地址。仓库内置的 [Agent Plugin](adapters/plugin/README.md) 提供 MCP 配置，并可在兼容 Host 上接入对话生命周期 capture / recall。
 
-### Server Edition
+## 日常使用
 
-Server Edition 把长期记忆集中到你自己的服务器，各设备通过自己的身份连接同一个账号。
+```text
+“读取这个项目的 Current Truth，然后继续。”
+“把‘完成 Windows 安装测试’加入这个项目的 Todo。”
+“过去一周这个项目改了什么？”
+“给我看这条项目规则来自哪些证据。”
+“在另一台机器继续使用同一个 Memhub 账号。”
+```
 
-Linux Complete：
+当前模型侧 MCP 能力包括：
 
-~~~bash
-bash install-complete.sh --edition server --public-host memory.example.com
-~~~
-
-Windows Complete：
-
-~~~powershell
-powershell -ExecutionPolicy Bypass -File .\install-complete.ps1 -Edition server -PublicHost memory.example.com
-~~~
-
-便捷/源码安装：
-
-Linux Server：
-
-~~~bash
-git clone https://github.com/PhSanqi/Memhub.git
-cd Memhub
-MEMHUB_PUBLIC_HOST=memory.example.com bash editions/server/linux/install.sh
-~~~
-
-Windows Server：
-
-~~~powershell
-git clone https://github.com/PhSanqi/Memhub.git
-cd Memhub
-powershell -ExecutionPolicy Bypass -File .\editions\server\windows\install.ps1 -PublicHost memory.example.com
-~~~
-
-Server 默认仍只监听 loopback。公网入口建议放在 Cloudflare Access 或其他经过认证的反向代理后。
-
-更详细的安装与部署说明：
-
-- [Local Edition](editions/local/README.zh-CN.md)
-- [Server Edition](editions/server/README.zh-CN.md)
-- [Release 与 Complete 包](docs/EDITIONS.md)
-- [Release Packages](https://github.com/PhSanqi/Memhub/releases)
-
----
-
-## 安装后怎么接入 AI
-
-### MCP 客户端
-
-支持 MCP 的客户端直接连接 Memhub MCP 即可。Local Edition 默认通过本机 Bridge：
-
-~~~text
-http://127.0.0.1:17861/mcp
-~~~
-
-Server Edition 则连接你部署并完成认证保护的远程 MCP 地址。
-
-### Codex / Agent Plugin
-
-仓库内提供 <code>adapters/plugin/</code>，其中包含 MCP 配置、Memhub Skill，以及对支持生命周期 Hook 的 Harness 提供自动 context recall / turn capture。
-
-当前测试过的 Codex Agent Plugin 可以加载 MCP 与 Skill；Hook 的自动注册能力取决于宿主版本。详见 [Plugin README](adapters/plugin/README.md)。
-
-即使宿主不支持自动 Hook，MCP 本身仍然可以正常使用 Memhub 的查询、项目、Todo 和蒸馏能力。
-
----
-
-## 最方便的几个功能
-
-### 1. 跨对话继续工作
-
-在新的 AI 会话里直接说：
-
-~~~text
-读取这个项目的 Memhub Current Truth，然后继续上次的工作。
-~~~
-
-Memhub 会优先给 AI 当前项目的时间线、规则与经验，而不是把所有历史聊天一次性塞回来。
-
-### 2. 项目 Todo
-
-~~~text
-把“补 Windows 安装测试”加入这个项目的 Todo。
-~~~
-
-之后：
-
-~~~text
-现在还有哪些未完成 Todo？
-~~~
-
-或者：
-
-~~~text
-这个 Todo 做完了，标记完成。
-~~~
-
-Todo 是独立的一等项目状态，不依赖聊天摘要、README 或架构文档。
-
-### 3. 按时间回顾项目
-
-~~~text
-这个项目最近一周按时间都做了什么？
-~~~
-
-L2 会按时间整理项目进展，也可以直接在 Web Workspace 的 **L2** 页面浏览。
-
-### 4. 让 AI 记住项目规则
-
-~~~text
-这个项目以后 Linux 优先，Windows 也必须保持同一功能语义。
-~~~
-
-这类长期有效的信息可以进入项目 L3，而不是永远埋在某一次聊天里。
-
-### 5. 跨设备继续
-
-Server Edition 下，同一个人的不同设备可以绑定到同一个 Memhub 账号：
-
-~~~text
-Windows Codex ─┐
-Linux Codex   ─┼─→ same Memhub account
-Remote MCP    ─┘
-~~~
-
-记忆属于人，不属于某一台电脑或某一个聊天客户端。
-
----
+- `memmy_context`：受预算约束的账号/项目召回与 Skill candidate；
+- `memmy_turn`：L1 对话生命周期；
+- `memmy_project` / `memmy_project_list` / `memmy_project_manage`：项目解析与生命周期；
+- `memhub_todo`：项目 Todo；
+- `memhub_branch`：项目内部工作流上下文；
+- `memhub_skill`：Skill 加载、telemetry、修订与退役；
+- `memhub_distill`：有 evidence boundary 的 L2/L3/L4/Skill 蒸馏；
+- `memhub_result`：超大 MCP 结果的渐进式传输。
 
 ## Web Workspace
 
-Memhub 提供浏览器管理界面，用来查看和治理长期记忆：
+浏览器工作区提供：
 
-- **Overview**：项目、记忆层和当前未完成 Todo 概览；
-- **Projects**：项目列表、描述、Todo 和项目状态；
-- **L1**：原始对话记录；
-- **L2**：跨项目按日期查看“我做了什么”；
-- **L3**：每个项目的长期规则与经验；
-- **L4**：跨项目稳定用户画像；
-- **Skills**：可复用能力；
-- **Processing**：蒸馏任务与运行状态。
+- **Overview / Projects**：项目范围、Current Truth、Todo；
+- **L1 / L2 / L3 / L4**：原始证据、时间线、项目长期知识、跨项目画像；
+- **Skills**：可复用流程与执行状态；
+- **Processing**：蒸馏与运行状态；
+- **Admin**：账号/项目治理与高影响操作。
 
-Admin 视图额外提供治理能力；普通 User Workspace 只操作当前账号的数据。
+项目线上入口为 https://memhub.sanqi.org/。
 
----
+## 安全与隐私
 
-## 隐私与边界
+- Local 与 Server origin 默认只绑定 loopback。
+- Server 对公网发布时应放在带认证的反向代理/Tunnel 后面。
+- 人类身份和绑定设备最终解析到同一个稳定 `account_id`。
+- Project Router 先做范围治理，再进入 Retrieval；相关性不能扩大权限边界。
+- L4 只接受跨项目稳定证据，不用于推断敏感属性。
+- 破坏性项目操作和 Skill 修订/退役使用显式授权流程。
 
-Memhub 的核心原则是：**一个人的记忆可以跨设备，但不同项目不能因为方便而互相污染。**
+进一步阅读：[隐私边界](docs/architecture/privacy-boundary.md)、[身份与设备](docs/architecture/identity-and-devices.md)、[远程认证](docs/operations/remote-auth.md)。
 
-- Local Edition 可以完全只在本机运行。
-- Server Edition 默认只监听 loopback。
-- 公网部署需要独立的认证反向代理。
-- 人类 OAuth 身份和机器 Device 身份最终都映射到稳定的 Memhub 账号。
-- 项目级 L2/L3 不会静默进入另一个项目。
-- L4 只保存真正跨项目稳定的个人模式。
-- Plugin 配置不需要暴露 Memhub 内部 account_id。
+## 开发
 
-关于远程账号绑定，见 [Identity Linking](docs/IDENTITY_LINKING.md)。
+```bash
+npm ci
+npm run build
+npm test
+```
 
----
+常用检查：
 
-## 面向 Agent 的主要能力
-
-日常使用不需要记住这些名字，但如果你在做 Harness 集成，当前 MCP 提供：
-
-- **memmy_context**：读取账号 + 当前项目的相关长期上下文；
-- **memmy_turn**：记录一轮原始对话；
-- **memmy_project / memmy_project_list**：项目识别和绑定；
-- **memmy_project_manage**：受控的项目管理；
-- **memhub_todo**：查看、新增、完成、重开 Todo；
-- **memhub_distill**：把 L1 整理成 L2/L3/L4/Skill。
-
-更深入的实现、迁移和维护资料放在 [docs/](docs/) 中，主 README 不展开内部实现细节。
-
----
-
-## 维护与健康检查
-
-日常检查：
-
-~~~bash
+```bash
 npm run core:check
 npm run memory:audit
 npm run state:audit
-~~~
+npm run network:check
+npm run process:smoke
+```
 
-完整开发测试：
+## 文档
 
-~~~bash
-npm test
-~~~
+统一从 **[docs/README.md](docs/README.md)** 开始。
 
-涉及真实 migration / repair 时，请先阅读 [Core Migration](docs/CORE_MIGRATION.md)。
+文档按用途分为：
 
----
-
-## Release Packages
-
-每个正式 Release 都从同一个源码 commit 生成 Linux / Windows 的 Local / Server 包：
-
-~~~text
-Linux Local
-Linux Server
-Windows Local
-Windows Server
-~~~
-
-下载入口：
-
-**https://github.com/PhSanqi/Memhub/releases**
-
----
+- 产品与安装指南；
+- 架构和数据边界；
+- 部署与运维；
+- Maintainer 文档；
+- 内部 UI/Review contract；
+- `docs/archive/` 下保留的历史迁移/修复记录。
 
 ## 项目状态
 
-Memhub 仍在持续开发中。Memory Core 来源于开源 Memmy lineage，并在 Memhub 中作为长期记忆运行时的一部分继续维护。
-
-- [Changelog](CHANGELOG.md)
-- [Edition Design](docs/EDITIONS.md)
-- [Plugin](adapters/plugin/README.md)
-- [Identity Linking](docs/IDENTITY_LINKING.md)
-- [Upstream Notes](docs/UPSTREAM.md)
+Memhub 正在持续开发。Memory Core 源自开源 Memmy lineage，并作为 Memhub runtime 的一部分维护。版本变化见 [CHANGELOG](CHANGELOG.md)，上游说明见 [Upstream attribution](docs/maintainers/upstream.md)。
 
 ## License
 
