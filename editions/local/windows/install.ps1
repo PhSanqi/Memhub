@@ -51,7 +51,11 @@ if (!(Test-Path $MemoryEntry) -or !(Test-Path $McpEntry) -or !(Test-Path $Bridge
   throw "Build output is missing. Run without -SkipBuild or build Memory and Memhub first."
 }
 
-$MemoryToken = & $Node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))'
+$TokenBytes = New-Object byte[] 32
+$Rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try { $Rng.GetBytes($TokenBytes) } finally { $Rng.Dispose() }
+$MemoryToken = -join ($TokenBytes | ForEach-Object { $_.ToString("x2") })
+if ($MemoryToken -notmatch '^[0-9a-f]{64}$') { throw "Failed to generate a valid Memory token" }
 $Config = @{
   memmyMemory = @{
     version = 1

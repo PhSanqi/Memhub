@@ -50,7 +50,11 @@ if (-not $SkipBuild -and (!(Test-Path $MemoryEntry) -or !(Test-Path $McpEntry)))
 }
 if (!(Test-Path $MemoryEntry) -or !(Test-Path $McpEntry)) { throw "Build output is missing." }
 
-$MemoryToken = & $Node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))'
+$TokenBytes = New-Object byte[] 32
+$Rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try { $Rng.GetBytes($TokenBytes) } finally { $Rng.Dispose() }
+$MemoryToken = -join ($TokenBytes | ForEach-Object { $_.ToString("x2") })
+if ($MemoryToken -notmatch '^[0-9a-f]{64}$') { throw "Failed to generate a valid Memory token" }
 $Config = @{
   memmyMemory = @{
     version = 1; userId = "local-user"; roleRouting = @{ summary = "follow"; evolution = "follow" }
