@@ -4,7 +4,7 @@ import { access, readFile } from "node:fs/promises";
 const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 const pluginJson = JSON.parse(await readFile(new URL("../adapters/plugin/plugin.json", import.meta.url), "utf8"));
 assert.equal(pluginJson.version, packageJson.version, "plugin and runtime release versions must stay aligned");
-assert.equal(packageJson.version, "0.2.2", "release regression expects the v0.2.2 line");
+assert.equal(packageJson.version, "0.2.3", "release regression expects the v0.2.3 line");
 
 const editions = [
   {
