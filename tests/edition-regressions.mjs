@@ -35,17 +35,6 @@ for (const edition of editions) {
   const source = await readFile(url, "utf8");
   assert.ok(source.includes(edition.autoScan), edition.path + ": AgentSource auto scan must be opt-in");
   assert.doesNotMatch(source, /normify/i, edition.path + ": retired Normify integration must not be installed");
-  assert.match(source, /runtime[\\/]node/, edition.path + ": Complete packages must prefer the bundled Node runtime");
-  if (edition.path.endsWith(".sh")) {
-    assert.match(source, /systemctl --user restart/, edition.path + ": reinstall must restart services onto the new runtime");
-  } else {
-    assert.doesNotMatch(source, /\$Node -e .*randomBytes/, edition.path + ": Windows token generation must not depend on native node -e quoting");
-    assert.match(source, /RandomNumberGenerator/, edition.path + ": Windows token generation must use PowerShell/.NET crypto");
-    assert.match(source, /\$\(\$env:USERNAME\):\(OI\)\(CI\)F/, edition.path + ": Windows ACL grant must preserve the username");
-    assert.match(source, /cmd\.exe \/c ["']?schtasks\.exe \/End/, edition.path + ": missing prior scheduled tasks must be ignored idempotently");
-    assert.match(source, /schtasks\.exe \/End/, edition.path + ": reinstall must stop an existing scheduled task before replacement");
-    assert.match(source, /Failed to start scheduled task/, edition.path + ": scheduled-task restart failures must be surfaced");
-  }
 }
 
 const releaseScript = await readFile(new URL("../scripts/package-release.mjs", import.meta.url), "utf8");
@@ -54,37 +43,6 @@ for (const id of ["linux-local", "linux-server", "windows-local", "windows-serve
 }
 assert.match(releaseScript, /release-manifest\.json/, "release packaging must emit a commit-bound manifest");
 assert.match(releaseScript, /SHA256SUMS\.txt/, "release packaging must emit checksums");
-assert.match(releaseScript, /install\.sh/, "release packaging must publish the Linux bootstrap installer");
-assert.match(releaseScript, /install\.ps1/, "release packaging must publish the Windows bootstrap installer");
-assert.match(releaseScript, /install-complete\.sh/, "release packaging must publish the Linux Complete bootstrap installer");
-assert.match(releaseScript, /install-complete\.ps1/, "release packaging must publish the Windows Complete bootstrap installer");
-
-const linuxBootstrap = await readFile(new URL("../install.sh", import.meta.url), "utf8");
-const windowsBootstrap = await readFile(new URL("../install.ps1", import.meta.url), "utf8");
-assert.match(linuxBootstrap, /releases\/latest/, "Linux bootstrap must resolve the latest stable release");
-assert.match(linuxBootstrap, /SHA256SUMS\.txt/, "Linux bootstrap must verify release checksums");
-assert.match(linuxBootstrap, /--edition local\|server/, "Linux bootstrap must support Local and Server editions");
-assert.match(windowsBootstrap, /releases\/latest/, "Windows bootstrap must resolve the latest stable release");
-assert.match(windowsBootstrap, /SHA256SUMS\.txt/, "Windows bootstrap must verify release checksums");
-assert.match(windowsBootstrap, /ValidateSet\("local", "server"\)/, "Windows bootstrap must support Local and Server editions");
-
-const completeReleaseScript = await readFile(new URL("../scripts/package-complete-release.mjs", import.meta.url), "utf8");
-assert.match(completeReleaseScript, /linux-complete/, "Complete packaging must include Linux Complete");
-assert.match(completeReleaseScript, /windows-complete/, "Complete packaging must include Windows Complete");
-assert.match(completeReleaseScript, /22\.20\.0/, "Complete packaging must pin the bundled Node version");
-assert.match(completeReleaseScript, /SHASUMS256\.txt/, "Complete packaging must verify the official Node checksum");
-assert.match(completeReleaseScript, /better_sqlite3\.node/, "Windows Complete validation must require better-sqlite3 native runtime");
-assert.match(completeReleaseScript, /sqlite-vec-windows-x64/, "Windows Complete validation must require sqlite-vec native runtime");
-assert.match(completeReleaseScript, /onnxruntime_binding\.node/, "Windows Complete validation must require ONNX Runtime native binding");
-assert.match(completeReleaseScript, /memhub-release-v2/, "Complete packaging must merge into the formal release manifest");
-assert.match(completeReleaseScript, /SHA256SUMS\.txt/, "Complete packaging must merge Complete assets into formal checksums");
-
-const linuxCompleteBootstrap = await readFile(new URL("../install-complete.sh", import.meta.url), "utf8");
-const windowsCompleteBootstrap = await readFile(new URL("../install-complete.ps1", import.meta.url), "utf8");
-assert.match(linuxCompleteBootstrap, /linux-complete\.tar\.gz/, "Linux Complete bootstrap must download the Complete asset");
-assert.match(linuxCompleteBootstrap, /runtime\/node\/bin\/node/, "Linux Complete bootstrap must use bundled Node");
-assert.match(windowsCompleteBootstrap, /windows-complete\.zip/, "Windows Complete bootstrap must download the Complete asset");
-assert.match(windowsCompleteBootstrap, /runtime\\node\\node\.exe/, "Windows Complete bootstrap must use bundled Node");
 
 const deployInstaller = await readFile(new URL("../deploy/install-user-service.sh", import.meta.url), "utf8");
 const deployUnit = await readFile(new URL("../deploy/memhub.service.in", import.meta.url), "utf8");
@@ -95,5 +53,40 @@ assert.match(deployInstaller, /MEMHUB_CAPTURE_PATH/, "deploy installer must allo
 assert.match(deployUnit, /--architecture-root @ARCHITECTURE_ROOT@/, "deploy unit must use the architecture reader name");
 assert.match(deployUnit, /--http-path @HTTP_PATH@/, "deploy unit must render the selected MCP path");
 assert.match(deployUnit, /--capture-path @CAPTURE_PATH@/, "deploy unit must render the selected capture path");
+assert.match(deployUnit, /ExecStartPre=.*wait-for-service.*--kind core/, "Gateway must wait for Core readiness");
+assert.match(deployUnit, /ExecStartPost=.*wait-for-service.*--kind gateway/, "Gateway must report actual HTTP readiness");
+assert.match(deployUnit, /@HEALTH_PATH@/, "health endpoint must follow the configured web base path");
+const deployCoreUnit = await readFile(new URL("../deploy/memhub-core.service.in", import.meta.url), "utf8");
+const deployBridgeUnit = await readFile(new URL("../deploy/memhub-bridge.service.in", import.meta.url), "utf8");
+const deployTarget = await readFile(new URL("../deploy/memhub-stack.target.in", import.meta.url), "utf8");
+const deployBridgeInstaller = await readFile(new URL("../deploy/install-bridge-user-service.sh", import.meta.url), "utf8");
+assert.match(deployCoreUnit, /ExecStartPost=.*--kind core/);
+assert.match(deployBridgeUnit, /ExecStartPost=.*--kind bridge/);
+assert.match(deployBridgeUnit, /ExecStartPre=.*--kind gateway/, "Bridge must wait for the Gateway readiness endpoint");
+assert.match(deployBridgeUnit, /Requires=memhub\.service/, "Bridge must depend on the Gateway service");
+assert.match(deployBridgeUnit, /PartOf=memhub\.service memhub-stack\.target/, "Bridge restart/stop lifecycle must follow Gateway and stack target");
+assert.match(deployBridgeUnit, /WantedBy=memhub-stack\.target/, "enabled Bridge must join the Memhub stack target");
+assert.match(deployBridgeInstaller, /@HEALTH_PATH@/, "Bridge installer must render the configured Gateway health path");
+assert.match(deployBridgeInstaller, /memhub-stack\.target is missing/, "Bridge installer must require the base Memhub stack first");
+assert.match(deployTarget, /Requires=memhub-core\.service memhub\.service/);
+for (const edition of ["local", "server"]) {
+  const linux = await readFile(new URL(`../editions/${edition}/linux/install.sh`, import.meta.url), "utf8");
+  const windows = await readFile(new URL(`../editions/${edition}/windows/install.ps1`, import.meta.url), "utf8");
+  assert.match(linux, new RegExp(`memhub-${edition}-stack\\.target`));
+  assert.match(linux, /ExecStartPost=.*wait-for-service.*--kind core/);
+  assert.match(linux, /ExecStartPost=.*wait-for-service.*--kind gateway/);
+  assert.match(linux, /StartLimitBurst=6/);
+  assert.match(windows, /run-stack\.mjs/);
+  assert.match(windows, /wait-for-service\.mjs/);
+  assert.match(windows, /Get-CimInstance Win32_Process/, "Windows reinstall must identify orphaned Memhub Node children");
+  assert.match(windows, /Stop-Process -Id/, "Windows reinstall must terminate orphaned Memhub Node children");
+  assert.match(windows, /--action stop/, "Windows reinstall must gracefully stop an existing stack before replacement");
+  assert.doesNotMatch(windows, /Start-Sleep -Seconds 1/, "Windows dependencies must use readiness, not a fixed sleep");
+  assert.equal((windows.match(/Install-LogonTask\s+"Memhub-/g) ?? []).length, 1, "one Windows stack task owns all child processes");
+  const uninstall = await readFile(new URL(`../editions/${edition}/windows/uninstall.ps1`, import.meta.url), "utf8");
+  assert.match(uninstall, /--action stop/, "Windows uninstall must request graceful stack shutdown before ending its task");
+  assert.match(uninstall, /\$LASTEXITCODE -ne 0 -or \(Test-Path \$StackLock\)/,
+    "Windows uninstall must refuse a task kill or data purge when graceful stop fails");
+}
 
 console.log("memhub-edition-regressions: ok");

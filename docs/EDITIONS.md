@@ -114,7 +114,9 @@ Memhub/
 │   └── coworker/
 ├── editions/
 │   ├── server/           # authenticated HTTP deployment
-│   └── local/            # all-local launcher/bundle
+│   ├── local/            # all-local launcher/bundle
+├── install-complete.sh   # self-contained Linux release installer
+├── install-complete.ps1 # self-contained Windows release installer
 └── docs/
 ```
 
@@ -126,6 +128,8 @@ Suggested artifacts:
 
 - `memhub-server` — server deployment bundle;
 - `memhub-local` — standalone local bundle;
+- `memhub-vX.Y.Z-linux-x64-complete.tar.gz` — self-contained Linux package with Node runtime, native dependencies and prebuilt Memhub; selects Local or Server at install time;
+- `memhub-vX.Y.Z-windows-x64-complete.zip` — self-contained Windows package with the same semantics. Packaging installs target-specific Windows native modules and validates their PE/x64 format; final release acceptance still requires a Windows runtime smoke test.
 - `memhub-plugin` — portable adapter package where the host supports Agent Plugins;
 - `memhub` — installer/manager CLI that selects edition and installs host adapters.
 

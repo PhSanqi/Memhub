@@ -1,0 +1,8 @@
+# systemctl edit cloudflared.service
+[Service]
+Environment=TUNNEL_TRANSPORT_PROTOCOL=auto
+Environment=TUNNEL_RETRIES=5
+Environment=TUNNEL_GRACE_PERIOD=30s
+Environment=TUNNEL_METRICS=127.0.0.1:20241
+Environment=TUNNEL_LOGLEVEL=info
+Environment=TUNNEL_LOG_OUTPUT=json

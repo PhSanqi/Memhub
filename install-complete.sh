@@ -78,7 +78,7 @@ else
 fi
 [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Could not resolve a stable Memhub release tag: $TAG" >&2; exit 2; }
 
-ASSET="memhub-${TAG}-linux-complete.tar.gz"
+ASSET="memhub-${TAG}-linux-x64-complete.tar.gz"
 BASE_URL="https://github.com/$REPO/releases/download/$TAG"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/memhub-complete.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT

@@ -1,5 +1,7 @@
 export * from "./architecture-source.js";
 export * from "./embedded-memory-core.js";
+export * from "./process-stack.js";
+export * from "./service-readiness.js";
 export * from "./auth.js";
 export * from "./binding-store.js";
 export * from "./bridge.js";

@@ -1,0 +1,23 @@
+# Example for a locally managed Cloudflare Tunnel.
+# For remotely managed tunnels, configure the route origin settings in the
+# Cloudflare dashboard and add the equivalent run parameters to the service.
+tunnel: REPLACE_WITH_TUNNEL_UUID
+credentials-file: /home/USER/.cloudflared/REPLACE_WITH_TUNNEL_UUID.json
+protocol: auto
+retries: 5
+grace-period: 30s
+metrics: 127.0.0.1:20241
+loglevel: info
+output: json
+
+originRequest:
+  # Memhub is a loopback origin. Fail quickly if the local gateway is down.
+  connectTimeout: 5s
+  keepAliveTimeout: 90s
+  keepAliveConnections: 100
+  tcpKeepAlive: 30s
+
+ingress:
+  - hostname: memory.example.com
+    service: http://127.0.0.1:3001
+  - service: http_status:404

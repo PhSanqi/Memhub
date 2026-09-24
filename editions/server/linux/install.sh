@@ -8,38 +8,23 @@ SERVER_STATE="$STATE_ROOT/server"
 MEMORY_DIR="$STATE_ROOT/memory"
 CONFIG_PATH="$STATE_ROOT/memory-config.yaml"
 ENV_PATH="$STATE_ROOT/server.env"
-BUNDLED_NODE="$REPO_ROOT/runtime/node/bin/node"
-BUNDLED_NPM_CLI="$REPO_ROOT/runtime/node/lib/node_modules/npm/bin/npm-cli.js"
-if [[ -z "${NODE:-}" ]]; then
-  if [[ -x "$BUNDLED_NODE" ]]; then NODE="$BUNDLED_NODE"; else NODE="$(command -v node || true)"; fi
-fi
+BUNDLED_NODE="$REPO_ROOT/runtime/node"
+NODE="${NODE:-$([[ -x "$BUNDLED_NODE" ]] && printf '%s' "$BUNDLED_NODE" || command -v node || true)}"
 NPM="${NPM:-$(command -v npm || true)}"
 USERNAME="${MEMHUB_USERNAME:-owner}"
 EMAIL="${MEMHUB_EMAIL:-}"
 PUBLIC_HOST="${MEMHUB_PUBLIC_HOST:-}"
 
 [[ -n "$NODE" ]] || { echo "Node.js 20+ is required" >&2; exit 2; }
-NODE_MAJOR="$("$NODE" -p 'process.versions.node.split(".")[0]')"
-[[ "$NODE_MAJOR" =~ ^[0-9]+$ ]] && (( NODE_MAJOR >= 20 )) || { echo "Node.js 20+ is required" >&2; exit 2; }
-
-run_npm() {
-  if [[ "$NODE" == "$BUNDLED_NODE" && -f "$BUNDLED_NPM_CLI" ]]; then
-    "$NODE" "$BUNDLED_NPM_CLI" "$@"
-  elif [[ -n "$NPM" ]]; then
-    "$NPM" "$@"
-  else
-    echo "npm is required when dependencies or build output are missing" >&2
-    return 2
-  fi
-}
-
 if [[ ! -d "$REPO_ROOT/node_modules" ]]; then
+  [[ -n "$NPM" ]] || { echo "npm is required because bundled dependencies are missing" >&2; exit 2; }
   echo "[memhub] dependencies missing; installing from lockfile"
-  (cd "$REPO_ROOT" && ONNXRUNTIME_NODE_INSTALL_CUDA=skip run_npm ci --workspaces=false)
+  (cd "$REPO_ROOT" && ONNXRUNTIME_NODE_INSTALL_CUDA=skip npm ci --workspaces=false)
 fi
 if [[ ! -f "$REPO_ROOT/vendor/memory-core/src/server/index.js" || ! -f "$REPO_ROOT/dist/mcp.js" ]]; then
+  [[ -n "$NPM" ]] || { echo "npm is required because bundled build output is missing" >&2; exit 2; }
   echo "[memhub] build output missing; building Memhub"
-  (cd "$REPO_ROOT" && run_npm run build)
+  (cd "$REPO_ROOT" && npm run build)
 fi
 
 mkdir -p "$STATE_ROOT" "$SERVER_STATE" "$MEMORY_DIR" "$HOME/.config/systemd/user"
@@ -88,13 +73,20 @@ cat > "$HOME/.config/systemd/user/memhub-core.service" <<EOF_UNIT
 [Unit]
 Description=Memhub Embedded Memory Core
 After=network.target
+PartOf=memhub-server-stack.target
+StartLimitIntervalSec=120
+StartLimitBurst=6
 
 [Service]
 Type=simple
 WorkingDirectory=$REPO_ROOT
 ExecStart=$NODE $REPO_ROOT/vendor/memory-core/src/server/index.js --config $CONFIG_PATH --host 127.0.0.1 --port 18960 --db $MEMORY_DIR/memory.sqlite
+ExecStartPost=$NODE $REPO_ROOT/scripts/wait-for-service.mjs --url http://127.0.0.1:18960/health --kind core --timeout-ms 20000
 Restart=on-failure
 RestartSec=3s
+TimeoutStartSec=35s
+TimeoutStopSec=15s
+KillMode=control-group
 UMask=0077
 
 [Install]
@@ -109,22 +101,40 @@ Description=Memhub Server Gateway
 After=memhub-core.service network-online.target
 Requires=memhub-core.service
 Wants=network-online.target
+PartOf=memhub-core.service memhub-server-stack.target
+StartLimitIntervalSec=120
+StartLimitBurst=6
 
 [Service]
 Type=simple
 EnvironmentFile=$ENV_PATH
+ExecStartPre=$NODE $REPO_ROOT/scripts/wait-for-service.mjs --url http://127.0.0.1:18960/health --kind core --timeout-ms 20000
 ExecStart=$NODE $REPO_ROOT/dist/mcp.js --http 3001 --http-path /memhub/mcp --capture-path /memhub/capture --state-root $SERVER_STATE --memory-url http://127.0.0.1:18960 $EXTRA_HOST_ARGS
+ExecStartPost=$NODE $REPO_ROOT/scripts/wait-for-service.mjs --url http://127.0.0.1:3001/memhub/health --kind gateway --timeout-ms 20000
 Restart=on-failure
 RestartSec=3s
+TimeoutStartSec=50s
+TimeoutStopSec=15s
+KillMode=control-group
 UMask=0077
 
 [Install]
 WantedBy=default.target
 EOF_UNIT
 
+cat > "$HOME/.config/systemd/user/memhub-server-stack.target" <<EOF_UNIT
+[Unit]
+Description=Memhub Server Stack (Memory Core, Gateway)
+Requires=memhub-core.service memhub-server.service
+After=memhub-core.service memhub-server.service
+
+[Install]
+WantedBy=default.target
+EOF_UNIT
+
 systemctl --user daemon-reload
-systemctl --user enable memhub-core.service memhub-server.service >/dev/null
-systemctl --user restart memhub-core.service memhub-server.service
+systemctl --user disable memhub-core.service memhub-server.service >/dev/null 2>&1 || true
+systemctl --user enable --now memhub-server-stack.target
 
 echo "[memhub] Server Edition installed on loopback"
 echo "[memhub] Origin MCP:     http://127.0.0.1:3001/memhub/mcp"

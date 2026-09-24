@@ -6,6 +6,7 @@ import {
   type ProjectArchitectureSource
 } from "./architecture-source.js";
 import { JsonConversationProjectBindingStore } from "./binding-store.js";
+import { JsonProjectBranchStore } from "./branch-store.js";
 import { ContextRouter } from "./context-router.js";
 import { LocalMemoryRestClient } from "./local-memory-client.js";
 import { defaultMemoryUserId, MemoryRestContextSource } from "./memory-source.js";
@@ -16,6 +17,7 @@ export interface MemhubRuntimeOptions {
   memoryEndpoint?: string;
   memoryToken?: string;
   bindingsPath?: string;
+  branchesPath?: string;
   architectureRoot?: string;
   disableArchitecture?: boolean;
   projectRegistryPath?: string;
@@ -40,6 +42,7 @@ export interface MemhubRuntime {
   memory: MemoryRestContextSource;
   architecture: ProjectArchitectureSource;
   projects: JsonProjectRegistry;
+  branches: JsonProjectBranchStore;
   source: MemhubSourceContext;
 }
 
@@ -73,14 +76,19 @@ export function createMemhubRuntime(options: MemhubRuntimeOptions = {}): MemhubR
       rootDir: architectureRoot
     });
   const bindings = new JsonConversationProjectBindingStore(bindingsPath);
+  const branches = new JsonProjectBranchStore(resolve(
+    options.branchesPath ??
+    process.env.MEMHUB_BRANCHES ??
+    join(dirname(bindingsPath), "project-branches.json")
+  ));
   const projects = new JsonProjectRegistry(resolve(
     options.projectRegistryPath ??
     process.env.MEMHUB_PROJECT_REGISTRY ??
     join(dirname(bindingsPath), "project-registry.json")
   ));
-  const router = new ContextRouter(memory, architecture, bindings, projects);
+  const router = new ContextRouter(memory, architecture, bindings, projects, branches);
   const source = options.source ?? { platform: "local", transport: "local" };
-  return { accountId, userId, memoryClient, router, memory, architecture, projects, source };
+  return { accountId, userId, memoryClient, router, memory, architecture, projects, branches, source };
 }
 
 function requireNonEmpty(value: string, field: string): string {

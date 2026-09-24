@@ -1,56 +1,32 @@
 # Changelog
 
-## v0.2.2 — 2026-09-21
+## v0.2.2 — 2026-09-22
 
-Memhub 0.2.2 adds self-contained Complete installers alongside the existing lightweight bootstrap path.
+Memhub 0.2.2 focuses on runtime stability, concurrent-state safety, bounded long-context transport, and self-contained installation packages.
 
-### Complete installation
+### Stability and concurrency
 
-- Adds **Linux Complete** and **Windows Complete** packages with a bundled Node.js 22.20.0 runtime.
-- Complete packages include production dependencies and prebuilt native runtime components so users do not need a preinstalled Node/npm for normal installation.
-- Both Complete packages support Local and Server installation modes from the same archive.
-- Adds `install-complete.sh` and `install-complete.ps1` as stable Complete bootstrap assets.
-- Complete bootstraps verify SHA-256 before extraction and then use the bundled runtime from the package itself.
+- Shared JSON read-modify-write stores now use path-scoped in-process and cross-process locks; project bindings, todos, device/account state, capture metadata, distillation jobs, and Bridge queue updates have concurrent regression coverage.
+- L1 checkpoint summaries can advance while a turn is incomplete, while completed source evidence remains immutable.
+- Project/workspace scope is explicit across the primary project-scoped MCP tools; current workspace evidence outranks stale conversation bindings and conflicting scope is rejected.
+- Project merge/delete now respects distillation-job lifecycle. Pending, leased, or failed jobs prevent project deletion; historical project aliases remain valid provenance after merge.
+- `npm run stability:check` records typecheck, full tests, state audit, core check, and release checks under the private Memhub diagnostics directory.
 
-### Quick installation
+### Long content and network transport
 
-- Existing `install.sh` / `install.ps1` remain the smaller **Quick Install** path.
-- Quick Install still expects Node.js 20+ and npm on the target machine, then downloads the smaller Local/Server package for that platform.
+- JSON HTTP bodies are limited by UTF-8 byte size with explicit `400 invalid_json_body` and `413 request_body_too_large` errors.
+- Bridge MCP/context/lifecycle responses stream with backpressure; upstream timeout and connection failures are classified separately.
+- `memmy_context` now exposes a bounded host-facing view instead of allowing one oversized memory or architecture document to expand the tool response without limit.
+- Large distillation evidence supports incremental `evidence_offset` / `evidence_chunk_chars` reads under the same job lease.
+- Memhub and Bridge HTTP origins use longer keepalive intervals aligned with Cloudflare Tunnel origin connection reuse, and Memhub exposes a minimal health endpoint.
+- `npm run network:check` inspects origin/public health plus available cloudflared Prometheus metrics without requiring Cloudflare account API access.
 
-### Release verification
+### Complete packages
 
-- Release metadata now distinguishes Quick packages, Quick/Complete bootstraps, and Complete packages in one manifest/checksum set.
-- Linux Complete is smoke-tested without relying on the user's Node/npm installation.
-- Windows Complete has a dedicated GitHub Windows runner smoke that executes `install-complete.ps1 -PrepareOnly` against the generated Windows package and bundled Node runtime.
-
-## v0.2.1 — 2026-09-21
-
-Memhub 0.2.1 focuses on installation, first-run ergonomics, and the reliability improvements shipped on main after v0.2.0.
-
-### Installation
-
-- Adds stable `install.sh` and `install.ps1` bootstrap assets to every Release.
-- The bootstrap resolves the latest stable Release, selects the requested Local/Server package for the current OS, verifies SHA-256, installs the archive into a persistent application directory, and then runs the existing edition installer.
-- Linux and Windows both support Local and Server installs without cloning the repository first.
-- Manual Git clone installation remains available for development and troubleshooting.
-
-### Release packaging
-
-- Release manifests now include bootstrap installer checksums.
-- `SHA256SUMS.txt` covers the four platform archives plus both bootstrap installers.
-
-### Workspace and Todos
-
-- Adds `memhub_todo` as a first-class MCP surface for listing, adding, completing, and reopening project Todos.
-- The Web Workspace shows pending Todos directly and renders L2 as a chronological activity timeline, with readable L3 project rules/experience and L4 cross-project profile views.
-- Control Plane job summaries avoid repeatedly transferring large distillation evidence payloads during normal UI refreshes.
-
-### Bridge and Plugin reliability
-
-- Capture queue uploads use claim files so a concurrent Stop update cannot be deleted by an older flush.
-- PostCompact and SessionEnd drain pending capture work before closing lifecycle state.
-- Colon-bearing L1 evidence IDs are preserved end-to-end.
-- Codex Plugin Skill metadata uses the host-recognized `description` field.
+- Linux Complete and Windows Complete packages bundle the target-OS Node.js runtime, production `node_modules`, and prebuilt Memhub output.
+- One Complete archive supports both Local and Server installation and does not require Node/npm on the destination host.
+- Complete artifacts are built natively on their target operating system so native modules such as `better-sqlite3` match the host ABI.
+- Existing `install.sh` / `install.ps1` remain the convenience/source installation path.
 
 ## v0.2.0 — 2026-09-20
 

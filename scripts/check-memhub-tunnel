@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Dedicated Memhub connector only. Never restart other Cloudflare tunnels or alter the host proxy.
+LOCAL_URL="${MEMHUB_TUNNEL_WATCHDOG_LOCAL_URL:-http://127.0.0.1:3001/health}"
+PUBLIC_URL="${MEMHUB_TUNNEL_WATCHDOG_PUBLIC_URL:-}"
+METRICS_URL="${MEMHUB_TUNNEL_WATCHDOG_METRICS_URL:-http://127.0.0.1:20241/metrics}"
+STATE_DIR="${MEMHUB_TUNNEL_WATCHDOG_STATE_DIR:-$HOME/.memmy/memhub/diagnostics/network/watchdog}"
+TUNNEL_SERVICE="${MEMHUB_TUNNEL_WATCHDOG_SERVICE:-cloudflared.service}"
+[[ -n "$PUBLIC_URL" ]] || { echo 'watchdog: MEMHUB_TUNNEL_WATCHDOG_PUBLIC_URL is required' >&2; exit 2; }
+mkdir -p "$STATE_DIR"
+exec 9>"$STATE_DIR/watchdog.lock"
+flock -n 9 || exit 0
+
+read_count() {
+  local value=0
+  [[ ! -f "$1" ]] || read -r value < "$1" || value=0
+  [[ "$value" =~ ^[0-9]+$ ]] || value=0
+  printf '%s' "$value"
+}
+write_count() {
+  printf '%s\n' "$2" > "$1.tmp.$$"
+  mv -f "$1.tmp.$$" "$1"
+}
+probe_local() {
+  local code
+  code="$(curl --noproxy '*' -sS -o /dev/null --max-time 4 --connect-timeout 2 --max-redirs 0 -w '%{http_code}' "$LOCAL_URL" 2>/dev/null || true)"
+  [[ "$code" == 200 ]]
+}
+probe_public_full() {
+  local code size output="$STATE_DIR/watchdog-probe-$$.html"
+  if ! code="$(curl -sS -o "$output" --max-time 12 --connect-timeout 4 --max-redirs 0 -w '%{http_code}' "$PUBLIC_URL" 2>/dev/null)"; then
+    rm -f "$output"
+    return 1
+  fi
+  size="$(wc -c < "$output" 2>/dev/null || echo 0)"
+  rm -f "$output"
+  [[ "$code" == 200 && "$size" =~ ^[0-9]+$ && "$size" -ge 50000 ]]
+}
+read_ha() {
+  local payload value
+  payload="$(curl --noproxy '*' -fsS --max-time 3 "$METRICS_URL" 2>/dev/null)" || return 1
+  value="$(printf '%s\n' "$payload" | awk '$1 ~ /^cloudflared_tunnel_ha_connections(\{.*\})?$/ && NF == 2 {print $2}')"
+  [[ "$value" =~ ^[0-4]$ ]] || return 1
+  printf '%s' "$value"
+}
+
+HA_COUNT="$STATE_DIR/watchdog-ha-failures"
+BODY_COUNT="$STATE_DIR/watchdog-body-failures"
+LAST_RESTART="$STATE_DIR/watchdog-last-restart"
+
+if ! probe_local; then
+  write_count "$HA_COUNT" 0
+  write_count "$BODY_COUNT" 0
+  echo 'watchdog: local Memhub origin unhealthy; dedicated tunnel restart suppressed'
+  exit 0
+fi
+
+# Unknown metrics must not trigger a restart. A failed full-body probe alone may be
+# caused by a broader external incident; require a valid connector identity/HA reading.
+if ! ha="$(read_ha)"; then
+  write_count "$HA_COUNT" 0
+  write_count "$BODY_COUNT" 0
+  echo 'watchdog: dedicated tunnel metrics unavailable or invalid; restart suppressed'
+  exit 0
+fi
+
+reason=""
+if [[ "$ha" == 4 ]]; then
+  write_count "$HA_COUNT" 0
+else
+  ha_count=$(( $(read_count "$HA_COUNT") + 1 ))
+  write_count "$HA_COUNT" "$ha_count"
+  echo "watchdog: dedicated Memhub HA degraded ($ha/4; observation $ha_count/3)"
+  (( ha_count >= 3 )) && reason=ha-degraded
+fi
+
+if probe_public_full; then
+  write_count "$BODY_COUNT" 0
+else
+  body_count=$(( $(read_count "$BODY_COUNT") + 1 ))
+  write_count "$BODY_COUNT" "$body_count"
+  echo "watchdog: public Landing full-body probe failed ($body_count/3)"
+  (( body_count >= 3 )) && reason="${reason:+$reason,}public-body-incomplete"
+fi
+[[ -n "$reason" ]] || exit 0
+
+now="$(date +%s)"
+last="$(read_count "$LAST_RESTART")"
+if (( now < last + 600 )); then
+  echo "watchdog: $reason; restart cooldown active"
+  exit 0
+fi
+write_count "$LAST_RESTART" "$now"
+write_count "$HA_COUNT" 0
+write_count "$BODY_COUNT" 0
+echo "watchdog: restarting only $TUNNEL_SERVICE after $reason"
+systemctl --user restart "$TUNNEL_SERVICE"
+
+# A successful restart command is not proof of recovery.
+attempts="${MEMHUB_TUNNEL_WATCHDOG_RECOVERY_ATTEMPTS:-15}"
+delay="${MEMHUB_TUNNEL_WATCHDOG_RECOVERY_DELAY:-2}"
+for ((i=1; i<=attempts; i++)); do
+  if probe_local && ha="$(read_ha)" && [[ "$ha" == 4 ]] && probe_public_full; then
+    echo 'watchdog: recovered; dedicated HA=4/4, origin healthy and public Landing body complete'
+    exit 0
+  fi
+  sleep "$delay"
+done
+echo 'watchdog: restart completed but full HA/origin/public-body recovery is unverified' >&2
+exit 1

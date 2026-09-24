@@ -102,6 +102,8 @@ export class ImportJobProcessor {
                 ...(request.sourceArtifactId?.trim() ? { source_artifact_id: request.sourceArtifactId.trim() } : {}),
                 ...(readOnlySkill ? {
                     read_only: true,
+                    source_namespace_tenant_id: request.namespace?.tenantId ?? context.namespace.tenantId ?? null,
+                    source_namespace_project_id: request.namespace?.projectId ?? context.namespace.projectId ?? null,
                     source_agent_id: sourceAgentId,
                     source_skill_id: request.sourceSkillId?.trim() || request.turnId?.trim() || undefined,
                     source_skill_path: request.sourceSkillPath?.trim() || undefined,
@@ -182,6 +184,9 @@ export class ImportJobProcessor {
                         sourceAgentId,
                         sourceSkillIdentity,
                         currentMemoryId: inserted.id,
+                        userId: inserted.userId,
+                        projectId: request.namespace?.projectId ?? context.namespace.projectId ?? "",
+                        tenantId: request.namespace?.tenantId ?? context.namespace.tenantId ?? inserted.userId,
                         at
                     })) {
                         d.runtime.appendChange({

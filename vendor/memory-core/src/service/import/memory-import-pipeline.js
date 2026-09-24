@@ -23,6 +23,9 @@ const IMPORT_TOOL_PAYLOAD_MAX_CHARS = 20_000;
 export function memoryAddKey(request, layer, title) {
     if (layer === "Skill" && request.sourceAgentId && (request.sourceSkillId || request.sourceSkillPath)) {
         return `skill.import:${stableHash([
+            request.namespace?.tenantId ?? request.namespace?.userId ?? "",
+            request.namespace?.userId ?? "",
+            request.namespace?.projectId ?? "",
             request.sourceAgentId,
             request.sourceSkillId ?? request.sourceSkillPath,
             request.sourceSkillVersion ?? request.sourceContentHash ?? stableHash(request.content)

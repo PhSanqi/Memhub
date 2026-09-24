@@ -4,13 +4,7 @@
   "version": "0.2.2",
   "description": "Private long-term memory, project context and automatic turn capture through a local Memhub Bridge.",
   "license": "MIT",
-  "keywords": [
-    "memory",
-    "context",
-    "mcp",
-    "architecture",
-    "capture"
-  ],
+  "keywords": ["memory", "context", "mcp", "architecture", "capture"],
   "extensions": {
     "com.openai": {
       "hooks": "./hooks/hooks.json"

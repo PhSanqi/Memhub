@@ -5,26 +5,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
-$BundledNode = Join-Path $RepoRoot "runtime\node\node.exe"
-$BundledNpmCli = Join-Path $RepoRoot "runtime\node\node_modules\npm\bin\npm-cli.js"
-if ($env:NODE) { $Node = $env:NODE }
-elseif (Test-Path $BundledNode) { $Node = $BundledNode }
-else { $Node = (Get-Command node -ErrorAction Stop).Source }
+$BundledNode = Join-Path $RepoRoot "runtime\node.exe"
+$NodeCommand = Get-Command node -ErrorAction SilentlyContinue
+$Node = if (Test-Path $BundledNode) { $BundledNode } elseif ($NodeCommand) { $NodeCommand.Source } else { throw "Node.js 20+ is required" }
 $NpmCommand = Get-Command npm -ErrorAction SilentlyContinue
-$Npm = if ($NpmCommand) { $NpmCommand.Source } else { "" }
-$NodeMajor = [int](& $Node -p "process.versions.node.split('.')[0]")
-if ($NodeMajor -lt 20) { throw "Node.js 20+ is required" }
-
-function Invoke-Npm([string[]]$Arguments) {
-  if ($Node -eq $BundledNode -and (Test-Path $BundledNpmCli)) {
-    & $Node $BundledNpmCli @Arguments
-  } elseif ($Npm) {
-    & $Npm @Arguments
-  } else {
-    throw "npm is required when dependencies or build output are missing"
-  }
-  if ($LASTEXITCODE -ne 0) { throw "npm $($Arguments -join ' ') failed" }
-}
+$Npm = if ($NpmCommand) { $NpmCommand.Source } else { $null }
 $ServerState = Join-Path $StateRoot "server"
 $MemoryDir = Join-Path $StateRoot "memory"
 $ConfigPath = Join-Path $StateRoot "memory-config.yaml"
@@ -37,11 +22,13 @@ $McpEntry = Join-Path $RepoRoot "dist\mcp.js"
 $BridgeEntry = Join-Path $RepoRoot "dist\bridge.js"
 $NodeModules = Join-Path $RepoRoot "node_modules"
 if (-not (Test-Path $NodeModules)) {
+  if (-not $Npm) { throw "npm is required because bundled dependencies are missing" }
   Push-Location $RepoRoot
   try {
     $PreviousCudaInstall = $env:ONNXRUNTIME_NODE_INSTALL_CUDA
     $env:ONNXRUNTIME_NODE_INSTALL_CUDA = "skip"
-    Invoke-Npm @("ci", "--workspaces=false")
+    & $Npm ci --workspaces=false
+    if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
   } finally {
     if ($null -eq $PreviousCudaInstall) { Remove-Item Env:ONNXRUNTIME_NODE_INSTALL_CUDA -ErrorAction SilentlyContinue }
     else { $env:ONNXRUNTIME_NODE_INSTALL_CUDA = $PreviousCudaInstall }
@@ -49,19 +36,18 @@ if (-not (Test-Path $NodeModules)) {
   }
 }
 if (-not $SkipBuild -and (!(Test-Path $MemoryEntry) -or !(Test-Path $McpEntry) -or !(Test-Path $BridgeEntry))) {
+  if (-not $Npm) { throw "npm is required because bundled build output is missing" }
   Push-Location $RepoRoot
   try {
-    Invoke-Npm @("run", "build")
+    & $Npm run build
+    if ($LASTEXITCODE -ne 0) { throw "Memhub build failed" }
   } finally { Pop-Location }
 }
 if (!(Test-Path $MemoryEntry) -or !(Test-Path $McpEntry) -or !(Test-Path $BridgeEntry)) {
   throw "Build output is missing. Run without -SkipBuild or build Memory and Memhub first."
 }
 
-$MemoryTokenBytes = New-Object byte[] 32
-$MemoryTokenRng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-try { $MemoryTokenRng.GetBytes($MemoryTokenBytes) } finally { $MemoryTokenRng.Dispose() }
-$MemoryToken = -join ($MemoryTokenBytes | ForEach-Object { $_.ToString("x2") })
+$MemoryToken = & $Node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))'
 $Config = @{
   memmyMemory = @{
     version = 1
@@ -101,44 +87,57 @@ if ($NeedsDevice) {
   Remove-Item Env:MEMHUB_DEVICE_TOKEN -ErrorAction SilentlyContinue
 }
 
-$MemoryLauncher = Join-Path $RuntimeDir "memory.cmd"
-$GatewayLauncher = Join-Path $RuntimeDir "gateway.cmd"
-$BridgeLauncher = Join-Path $RuntimeDir "bridge.cmd"
+$EnvPath = Join-Path $StateRoot "local.env"
+@(
+  "MEMHUB_ACCOUNT_ID=$AccountId"
+  "MEMHUB_OWNER_ACCOUNT_ID=$AccountId"
+  "MEMHUB_OWNER_USER_ID=local-user"
+  "MEMHUB_MEMORY_TOKEN=$MemoryToken"
+  "MEMHUB_MEMORY_URL=http://127.0.0.1:18960"
+  "MEMHUB_STATE_ROOT=$ServerState"
+  "MEMHUB_BINDINGS=$StateRoot\conversation-project-bindings.json"
+) | Set-Content -Encoding UTF8 $EnvPath
+$StackLauncher = Join-Path $RuntimeDir "stack-local.cmd"
+$StackEntry = Join-Path $RepoRoot "scripts\run-stack.mjs"
+$StackLock = Join-Path $StateRoot ".local-stack.lock"
 @"
 @echo off
-"$Node" "$MemoryEntry" --config "$ConfigPath" --host 127.0.0.1 --port 18960 --db "$MemoryDir\memory.sqlite"
-"@ | Set-Content -Encoding ASCII $MemoryLauncher
-@"
-@echo off
-set "MEMHUB_ACCOUNT_ID=$AccountId"
-set "MEMHUB_OWNER_ACCOUNT_ID=$AccountId"
-set "MEMHUB_OWNER_USER_ID=local-user"
-set "MEMHUB_MEMORY_TOKEN=$MemoryToken"
-set "MEMHUB_MEMORY_URL=http://127.0.0.1:18960"
-set "MEMHUB_STATE_ROOT=$ServerState"
-set "MEMHUB_BINDINGS=$StateRoot\conversation-project-bindings.json"
-"$Node" "$McpEntry" --http 3001 --http-path /memhub/mcp --capture-path /memhub/capture --state-root "$ServerState" --memory-url http://127.0.0.1:18960
-"@ | Set-Content -Encoding ASCII $GatewayLauncher
-@"
-@echo off
-set "MEMHUB_BRIDGE_HOME=$StateRoot"
-"$Node" "$BridgeEntry" serve --port 17861
-"@ | Set-Content -Encoding ASCII $BridgeLauncher
+"$Node" "$StackEntry" --mode local --home "$StateRoot"
+"@ | Set-Content -Encoding ASCII $StackLauncher
 
-try { & icacls.exe $StateRoot /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)F" | Out-Null } catch {}
+try { & icacls.exe $StateRoot /inheritance:r /grant:r "$env:USERNAME:(OI)(CI)F" | Out-Null } catch {}
 
 function Install-LogonTask([string]$Name, [string]$Launcher) {
-  & cmd.exe /c "schtasks.exe /End /TN $Name >NUL 2>&1" | Out-Null
   & schtasks.exe /Create /F /SC ONLOGON /TN $Name /TR ('"' + $Launcher + '"') | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Failed to create scheduled task $Name" }
   & schtasks.exe /Run /TN $Name | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "Failed to start scheduled task $Name" }
 }
-Install-LogonTask "Memhub-Memory" $MemoryLauncher
-Start-Sleep -Seconds 1
-Install-LogonTask "Memhub-Local" $GatewayLauncher
-Start-Sleep -Seconds 1
-Install-LogonTask "Memhub-Bridge" $BridgeLauncher
+if (Test-Path $StackLock) {
+  & $Node $StackEntry --mode local --home $StateRoot --action stop | Out-Null
+  if ($LASTEXITCODE -ne 0 -or (Test-Path $StackLock)) {
+    throw "Existing Memhub Local Stack did not stop cleanly; refusing unsafe reinstall"
+  }
+}
+foreach ($Task in @("Memhub-Local-Stack", "Memhub-Memory", "Memhub-Local", "Memhub-Bridge")) {
+  & schtasks.exe /End /TN $Task 2>$null | Out-Null
+  & schtasks.exe /Delete /F /TN $Task 2>$null | Out-Null
+}
+function Stop-MemhubNodeProcesses {
+  $Needles = @($MemoryEntry, $McpEntry, $BridgeEntry) | ForEach-Object { $_.ToLowerInvariant() }
+  Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
+    $CommandLine = [string]$_.CommandLine
+    if (-not $CommandLine) { return }
+    $Lower = $CommandLine.ToLowerInvariant()
+    if ($Needles | Where-Object { $Lower.Contains($_) }) {
+      try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {}
+    }
+  }
+}
+Stop-MemhubNodeProcesses
+Start-Sleep -Milliseconds 500
+Install-LogonTask "Memhub-Local-Stack" $StackLauncher
+& $Node (Join-Path $RepoRoot "scripts\wait-for-service.mjs") --url http://127.0.0.1:17861/health --kind bridge --timeout-ms 30000
+if ($LASTEXITCODE -ne 0) { throw "Memhub Local Stack did not become ready" }
 
 Write-Host "[memhub] Local Edition installed"
 Write-Host "[memhub] MCP for plugins: http://127.0.0.1:17861/mcp"
