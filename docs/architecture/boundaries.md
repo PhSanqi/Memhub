@@ -51,6 +51,9 @@ Current high-level tools:
 - `memmy_project_manage`
 - `memhub_todo`
 - `memmy_project`
+- `memhub_branch`
+- `memhub_skill`
+- `memhub_result`
 
 Project mutation uses plan -> explicit authorization -> execute. Destructive Control Plane actions remain outside ordinary recall flow.
 

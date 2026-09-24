@@ -130,8 +130,8 @@ async function main() {
 
   const packDir = await uniquePackDir();
   await mkdir(packDir, { recursive: true });
-  await copyFile(resolve(repo, "DESIGN.md"), join(packDir, "DESIGN.md"));
-  await copyFile(resolve(repo, "BRIEF.md"), join(packDir, "BRIEF.md"));
+  await copyFile(resolve(repo, "docs/internal/web-design-contract.md"), join(packDir, "DESIGN.md"));
+  await copyFile(resolve(repo, "docs/internal/web-redesign-brief.md"), join(packDir, "BRIEF.md"));
 
   const cdp = new CdpPipe(chrome); await cdp.start();
   const metrics = { generatedAt: new Date().toISOString(), chromium: chrome, method: "Chrome DevTools Protocol over --remote-debugging-pipe / Emulation.setDeviceMetricsOverride", viewports: {}, states: {} };
