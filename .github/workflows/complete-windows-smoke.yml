@@ -25,7 +25,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: memhub-windows-complete-smoke
-          path: complete-smoke/memhub-*-windows-complete.zip
+          path: complete-smoke/memhub-*-windows-*-complete.zip
           if-no-files-found: error
           retention-days: 1
 
@@ -97,7 +97,7 @@ jobs:
             } while ($true)
           }
 
-          $zip = Get-ChildItem "$env:RUNNER_TEMP\memhub-complete-artifact\memhub-*-windows-complete.zip" | Select-Object -First 1
+          $zip = Get-ChildItem "$env:RUNNER_TEMP\memhub-complete-artifact\memhub-*-windows-*-complete.zip" | Select-Object -First 1
           if (-not $zip) { throw "Windows Complete artifact missing" }
           $extract = Join-Path $env:RUNNER_TEMP 'memhub-complete-extract'
           Expand-Archive -Path $zip.FullName -DestinationPath $extract -Force
