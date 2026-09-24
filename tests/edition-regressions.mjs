@@ -60,6 +60,9 @@ const deployCoreUnit = await readFile(new URL("../deploy/memhub-core.service.in"
 const deployBridgeUnit = await readFile(new URL("../deploy/memhub-bridge.service.in", import.meta.url), "utf8");
 const deployTarget = await readFile(new URL("../deploy/memhub-stack.target.in", import.meta.url), "utf8");
 const deployBridgeInstaller = await readFile(new URL("../deploy/install-bridge-user-service.sh", import.meta.url), "utf8");
+const cloudflareGuide = await readFile(new URL("../docs/CLOUDFLARE_TUNNEL.md", import.meta.url), "utf8");
+const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
+const readmeZh = await readFile(new URL("../README.zh-CN.md", import.meta.url), "utf8");
 assert.match(deployCoreUnit, /ExecStartPost=.*--kind core/);
 assert.match(deployBridgeUnit, /ExecStartPost=.*--kind bridge/);
 assert.match(deployBridgeUnit, /ExecStartPre=.*--kind gateway/, "Bridge must wait for the Gateway readiness endpoint");
@@ -69,6 +72,10 @@ assert.match(deployBridgeUnit, /WantedBy=memhub-stack\.target/, "enabled Bridge 
 assert.match(deployBridgeInstaller, /@HEALTH_PATH@/, "Bridge installer must render the configured Gateway health path");
 assert.match(deployBridgeInstaller, /memhub-stack\.target is missing/, "Bridge installer must require the base Memhub stack first");
 assert.match(deployTarget, /Requires=memhub-core\.service memhub\.service/);
+for (const [name, source] of [["README.md", readme], ["README.zh-CN.md", readmeZh], ["docs/CLOUDFLARE_TUNNEL.md", cloudflareGuide]]) {
+  assert.match(source, /https:\/\/memhub\.sanqi\.org\//, name + ": canonical production route must be explicit");
+  assert.match(source, /plugin\.sanqi\.org\/memhub/, name + ": retired route must be explicitly documented as retired");
+}
 for (const edition of ["local", "server"]) {
   const linux = await readFile(new URL(`../editions/${edition}/linux/install.sh`, import.meta.url), "utf8");
   const windows = await readFile(new URL(`../editions/${edition}/windows/install.ps1`, import.meta.url), "utf8");
