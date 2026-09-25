@@ -40,6 +40,7 @@ export interface DistillationJob {
   updated_at: string;
   leased_until?: string;
   leased_by?: string;
+  lease_token?: string;
   completed_at?: string;
   failure?: string;
   failed_at?: string;
@@ -193,6 +194,7 @@ export async function leaseDistillationJob(
     target?: DistillationTarget;
     harness: string;
     leaseSeconds?: number;
+    useLeaseToken?: boolean;
   }
 ): Promise<DistillationJob | null> {
   return withMutation(stateRoot, async () => {
@@ -203,6 +205,7 @@ export async function leaseDistillationJob(
         job.status = "pending";
         delete job.leased_until;
         delete job.leased_by;
+        delete job.lease_token;
       }
     }
     const job = store.jobs.find((item) =>
@@ -219,6 +222,8 @@ export async function leaseDistillationJob(
     job.status = "leased";
     job.attempts = (job.attempts ?? 0) + 1;
     job.leased_by = input.harness;
+    if (input.useLeaseToken) job.lease_token = randomUUID();
+    else delete job.lease_token;
     job.leased_until = new Date(now + seconds * 1000).toISOString();
     job.updated_at = new Date(now).toISOString();
     await saveStore(stateRoot, store);
@@ -231,11 +236,12 @@ export async function completeDistillationJob(
   accountId: string,
   jobId: string,
   result: { kind: DistillationTarget | "noop"; resultId?: string; content?: string },
-  leaseOwner: string
+  leaseOwner: string,
+  leaseToken?: string
 ): Promise<DistillationJob> {
   let completed!: DistillationJob;
   await mutateJob(stateRoot, accountId, jobId, (job) => {
-    assertActiveDistillationLease(job, leaseOwner);
+    assertActiveDistillationLease(job, leaseOwner, leaseToken);
     job.status = "completed";
     job.completed_at = new Date().toISOString();
     job.updated_at = job.completed_at;
@@ -244,6 +250,7 @@ export async function completeDistillationJob(
     if (result.content) job.result_content = result.content;
     delete job.leased_until;
     delete job.leased_by;
+    delete job.lease_token;
     delete job.failure;
     delete job.failed_at;
     completed = structuredClone(job);
@@ -256,20 +263,22 @@ export async function failDistillationJob(
   accountId: string,
   jobId: string,
   message: string,
-  leaseOwner: string
+  leaseOwner: string,
+  leaseToken?: string
 ): Promise<void> {
   await mutateJob(stateRoot, accountId, jobId, (job) => {
-    assertActiveDistillationLease(job, leaseOwner);
+    assertActiveDistillationLease(job, leaseOwner, leaseToken);
     job.status = "failed";
     job.failure = message.slice(0, 2000);
     job.failed_at = new Date().toISOString();
     job.updated_at = job.failed_at;
     delete job.leased_until;
     delete job.leased_by;
+    delete job.lease_token;
   });
 }
 
-export function assertActiveDistillationLease(job: DistillationJob, leaseOwner: string): void {
+export function assertActiveDistillationLease(job: DistillationJob, leaseOwner: string, leaseToken?: string): void {
   if (job.status !== "leased") throw new Error(`distillation job is not leased: ${job.status}`);
   if (!job.leased_until || Date.parse(job.leased_until) <= Date.now()) {
     throw new Error("distillation job lease has expired");
@@ -277,6 +286,29 @@ export function assertActiveDistillationLease(job: DistillationJob, leaseOwner: 
   if (job.leased_by !== leaseOwner) {
     throw new Error(`distillation job is leased by another harness: ${job.leased_by ?? "unknown"}`);
   }
+  if (job.lease_token && job.lease_token !== leaseToken) {
+    throw new Error("distillation job lease token is missing or stale");
+  }
+}
+
+export async function renewDistillationJobLease(
+  stateRoot: string,
+  accountId: string,
+  jobId: string,
+  leaseOwner: string,
+  leaseToken: string,
+  leaseSeconds = 300
+): Promise<DistillationJob> {
+  let renewed!: DistillationJob;
+  await mutateJob(stateRoot, accountId, jobId, (job) => {
+    assertActiveDistillationLease(job, leaseOwner, leaseToken);
+    if (!job.lease_token) throw new Error("legacy distillation lease cannot be renewed without a token");
+    const seconds = Math.max(30, Math.min(900, Math.trunc(leaseSeconds)));
+    job.leased_until = new Date(Math.max(Date.parse(job.leased_until!), Date.now() + seconds * 1000)).toISOString();
+    job.updated_at = new Date().toISOString();
+    renewed = structuredClone(job);
+  });
+  return renewed;
 }
 
 export async function retryDistillationJob(stateRoot: string, accountId: string, jobId: string): Promise<DistillationJob> {
@@ -289,6 +321,7 @@ export async function retryDistillationJob(stateRoot: string, accountId: string,
     delete job.failed_at;
     delete job.leased_until;
     delete job.leased_by;
+    delete job.lease_token;
     retried = structuredClone(job);
   });
   return retried;
@@ -431,6 +464,7 @@ function migrateV1Job(item: Record<string, unknown>): DistillationJob {
     updated_at: String(item.updated_at ?? item.created_at ?? new Date(0).toISOString()),
     ...(typeof item.leased_until === "string" ? { leased_until: item.leased_until } : {}),
     ...(typeof item.leased_by === "string" ? { leased_by: item.leased_by } : {}),
+    ...(typeof item.lease_token === "string" ? { lease_token: item.lease_token } : {}),
     ...(typeof item.completed_at === "string" ? { completed_at: item.completed_at } : {}),
     ...(typeof item.failure === "string" ? { failure: item.failure } : {}),
     ...(typeof item.failed_at === "string" ? { failed_at: item.failed_at } : {}),
