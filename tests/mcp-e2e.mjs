@@ -1029,7 +1029,11 @@ async function testLocalAdmin(memoryPort) {
     const updatePolicy = await adminAction({ action: "set-distillation-config", auto_enabled: true, turn_threshold: 12, idle_minutes: 45 });
     assert.equal(updatePolicy.status, 200);
     const processingAfter = await fetch(`http://127.0.0.1:${port}/memhub/admin/api?kind=processing`, { headers: { authorization } });
-    assert.deepEqual((await processingAfter.json()).config, { auto_enabled: true, turn_threshold: 12, idle_minutes: 45 });
+    const updatedConfig = (await processingAfter.json()).config;
+    assert.equal(updatedConfig.auto_enabled, true);
+    assert.equal(updatedConfig.turn_threshold, 12);
+    assert.equal(updatedConfig.idle_minutes, 45);
+    assert.ok(Number.isFinite(Date.parse(updatedConfig.auto_since)));
     const userOverview = await fetch(`http://127.0.0.1:${port}/memhub/user/api?kind=overview`, { headers: { authorization } });
     assert.equal(userOverview.status, 200);
     const userOverviewPayload = await userOverview.json();
@@ -1305,6 +1309,7 @@ async function testHttp(memoryPort) {
       body: JSON.stringify(captureEvent)
     });
     assert.equal(direct.status, 201);
+    assert.match(direct.headers.get("x-memhub-request-id") ?? "", /^[0-9a-f-]{36}$/);
     const duplicate = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
       method: "POST",
       headers: {
@@ -1371,6 +1376,26 @@ async function testHttp(memoryPort) {
       requests.filter((entry) => entry.url?.startsWith("/api/v1/turns/") && entry.url.endsWith("/complete")).length,
       completeBeforePartial + 1
     );
+
+    const sessionRequestsBefore = requests.filter((entry) => entry.url === "/api/v1/sessions/open").length;
+    for (const [index, workspacePath] of ["/workspace/first", "/workspace/second"].entries()) {
+      const response = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${createdDevice.token}` },
+        body: JSON.stringify({
+          event_id: `capture-workspace-${index + 1}`, host: "codex",
+          conversation_id: "workspace-changing-conversation", continuity_id: "workspace-changing-continuity",
+          timestamp: `2026-09-18T08:02:0${index}.000Z`, project_hint: "aide",
+          workspace_path: workspacePath, user_text: `workspace user ${index}`, assistant_text: `workspace answer ${index}`,
+          capture_status: "complete"
+        })
+      });
+      assert.equal(response.status, 201, "workspace changes must not collide on session.open idempotency");
+    }
+    const sessionRequests = requests.filter((entry) => entry.url === "/api/v1/sessions/open").slice(sessionRequestsBefore);
+    assert.equal(sessionRequests.length, 2);
+    assert.equal(sessionRequests[0].body.sessionId, sessionRequests[1].body.sessionId);
+    assert.notEqual(sessionRequests[0].body.requestId, sessionRequests[1].body.requestId);
 
     assert.equal((await listDistillationJobs(stateRoot, "acct-test")).length, distillationCountBaseline);
     const capturesForDistillation = await listCaptureEvents(stateRoot, "acct-test");
@@ -1464,7 +1489,7 @@ async function testHttp(memoryPort) {
     const replay = await queue.flush(await (await import("../dist/bridge.js")).loadBridgeConfig(bridgeRoot));
     assert.equal(replay.sent, 1);
     assert.equal(replay.pending, 0);
-    assert.equal(await countCaptureEvents(stateRoot), captureCountBaseline + 3);
+    assert.equal(await countCaptureEvents(stateRoot), captureCountBaseline + 5);
 
     const raceRoot = join(root, "bridge-race");
     const raceQueue = new MemhubBridgeQueue(raceRoot);
@@ -1728,6 +1753,59 @@ async function testHttp(memoryPort) {
     assert.equal(thresholdJobs.length, 2);
     assert.deepEqual(thresholdJobs[0].evidence_refs.sort(), ["l1:capture-threshold-1", "l1:capture-threshold-2"]);
     assert.deepEqual(thresholdJobs[1].evidence_refs.sort(), ["l1:capture-threshold-3", "l1:capture-threshold-4"]);
+    const discoveryClient = new Client({ name: "memhub-discovery-test", version: "1.0.0" });
+    const discoveryTransport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`));
+    try {
+      await discoveryClient.connect(discoveryTransport);
+      const discovered = await discoveryClient.callTool({ name: "memhub_distill", arguments: { action: "discover", dry_run: true } });
+      const report = JSON.parse(discovered.content[0].text);
+      assert.equal(report.source, "complete_ingested_capture_only");
+      assert.equal(report.auto_enabled, true);
+      assert.equal(report.queued, 0);
+      assert.ok(report.already_queued >= 4);
+      for (let index = 1; index <= 2; index += 1) {
+        const opened = await discoveryClient.callTool({ name: "memmy_turn", arguments: {
+          action: "open", conversation_id: "mcp-auto-conversation", project: "aide", user_text: `MCP user ${index}`
+        } });
+        const eventId = JSON.parse(opened.content[0].text).turn.event_id;
+        const committed = await discoveryClient.callTool({ name: "memmy_turn", arguments: {
+          action: "commit", event_id: eventId, conversation_id: "mcp-auto-conversation",
+          project: "aide", assistant_text: `MCP assistant ${index}`
+        } });
+        assert.equal(JSON.parse(committed.content[0].text).turn.ingested, true);
+      }
+      assert.equal((await listDistillationJobs(stateRoot, "acct-test"))
+        .filter((job) => job.conversation_id === "mcp-auto-conversation").length, 1);
+    } finally {
+      await discoveryClient.close();
+    }
+
+    const jobsPath = join(stateRoot, "distillation", "jobs.json");
+    const savedJobs = await readFile(jobsPath, "utf8");
+    let faultResponse;
+    try {
+      await writeFile(jobsPath, "{invalid-json");
+      faultResponse = await postCapture({
+        event_id: "capture-queue-fault-1", host: "codex", conversation_id: "queue-fault-conversation",
+        timestamp: "2026-09-18T08:04:10.000Z", project_hint: "aide",
+        user_text: "queue failure must not undo L1", assistant_text: "L1 was committed", capture_status: "complete"
+      });
+      assert.equal(faultResponse.status, 201);
+      const body = await faultResponse.json();
+      assert.equal(body.ingestion.ingested, true);
+      assert.ok(body.distillation_queue_error);
+    } finally {
+      await writeFile(jobsPath, savedJobs);
+    }
+    const recovered = await postCapture({
+      event_id: "capture-queue-fault-2", host: "codex", conversation_id: "queue-fault-conversation",
+      timestamp: "2026-09-18T08:04:11.000Z", project_hint: "aide",
+      user_text: "next complete L1", assistant_text: "queue recovered", capture_status: "complete"
+    });
+    assert.equal(recovered.status, 201);
+    assert.deepEqual((await listDistillationJobs(stateRoot, "acct-test"))
+      .filter((job) => job.conversation_id === "queue-fault-conversation")[0]?.evidence_refs.sort(),
+      ["l1:capture-queue-fault-1", "l1:capture-queue-fault-2"]);
 
     const longCapturePayload = JSON.stringify({
       event_id: "capture-long-utf8",
@@ -1808,6 +1886,8 @@ function acceptIdempotent(body, operation, response) {
 }
 
 async function exerciseClient(client, conversationId, stateRoot) {
+  const packageVersion = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).version;
+  assert.equal(client.getServerVersion()?.version, packageVersion);
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["memhub_branch", "memhub_distill", "memhub_result", "memhub_skill", "memhub_todo", "memmy_context", "memmy_project", "memmy_project_list", "memmy_project_manage", "memmy_turn"]);
   assert.match(listed.tools.find((tool) => tool.name === "memmy_context")?.description ?? "", /conversation_id.*不要伪造|不要伪造.*conversation_id/);

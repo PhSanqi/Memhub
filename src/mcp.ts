@@ -28,7 +28,7 @@ import {
 import { verifyCloudflareAccessJwt } from "./cloudflare.js";
 import {
   authenticateDevice,
-  listIdleCaptureGroups,
+  listCaptureIndexEntries,
   createDevice,
   isCaptureIngested,
   listCaptureEvents,
@@ -39,11 +39,11 @@ import {
   storeCaptureEvent
 } from "./capture.js";
 import { captureSessionId, ingestCaptureIntoMemory } from "./capture-ingest.js";
+import { discoverDistillationJobs } from "./distillation-discovery.js";
 import {
   assertActiveDistillationLease,
   completeDistillationJob,
   enqueueDerivedDistillationJob,
-  enqueueDistillationJob,
   failDistillationJob,
   getDistillationConfig,
   leaseDistillationJob,
@@ -77,7 +77,7 @@ import { enrichSkillCandidateReliability, skillSelectionMetadataFromBody } from 
 import { tokenizeRetrievalText } from "./retrieval-ranker.js";
 import { JsonResultTransport } from "./result-transport.js";
 
-const VERSION = "0.2.2";
+const VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 const projectMutationAuthorizations = new Map<string, {
   accountId: string;
   operation: "create" | "update" | "delete" | "merge";
@@ -245,8 +245,25 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         }
       }
     });
+    let distillation: unknown;
+    let distillation_queue_error: string | undefined;
+    if (action === "commit" && result.turn.ingested && result.project_id) {
+      try {
+        distillation = await maybeQueueThresholdDistillation({
+          stateRoot,
+          accountId: runtime.accountId,
+          projectId: result.project_id,
+          conversationId
+        });
+      } catch (error) {
+        distillation_queue_error = error instanceof Error ? error.message : String(error);
+        console.error("[memhub] turn distillation queue:", distillation_queue_error);
+      }
+    }
     return jsonResult({
       ...result,
+      ...(distillation ? { distillation } : {}),
+      ...(distillation_queue_error ? { distillation_queue_error } : {}),
       binding_available: Boolean(transportConversationId),
       transport_conversation_id: transportConversationId ?? null
     });
@@ -670,7 +687,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
-        action: { type: "string", enum: ["next", "submit", "skip"], description: "next 领取待整理 evidence；submit 提交目标层产物；skip 表示当前证据不足以升级。" },
+        action: { type: "string", enum: ["discover", "next", "submit", "skip"], description: "discover 扫描已入库的完整 L1 证据；next 领取 evidence；submit 提交；skip 表示证据不足。" },
         kind: { type: "string", enum: ["l2", "l3", "l4", "skill"], description: "目标层。next 可省略以领取任意待办；submit 必须与 job target 一致。" },
         content: { type: "string", description: "完整目标层内容" },
         scope: { type: "string", enum: ["account", "project"], description: "L2/L3 必须 project；L4 必须 account；Skill 可两者。" },
@@ -700,6 +717,16 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     if (args.inspect_contract === true) return jsonResult({ contract: distillationContract() });
     const action = optionalString(args.action);
     const sourceHarness = optionalString(args.source_harness) ?? runtime.source.platform ?? "mcp-harness";
+    if (action === "discover") {
+      const report = await discoverDistillationJobs({
+        stateRoot,
+        accountId: runtime.accountId,
+        resolveProject: (hint) => runtime.projects.resolve(runtime.accountId, hint),
+        enqueue: args.dry_run !== true,
+        ...(optionalString(args.conversation_id) ? { conversationId: optionalString(args.conversation_id) } : {})
+      });
+      return jsonResult({ ...report, instructions: "Discover scans only completed, ingested, project-resolved captures. It cannot read uncaptured ChatGPT history or invoke a model." });
+    }
     if (action === "next") {
       const requestedJobId = optionalString(args.job_id);
       const evidenceOffset = optionalInteger(args.evidence_offset) ?? 0;
@@ -729,18 +756,43 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
           conversationId: optionalString(args.conversation_id)
         })).projectId;
       }
-      const job = await leaseDistillationJob(stateRoot, runtime.accountId, {
+      const leaseInput = {
         projectId: projectFilter,
         target: optionalString(args.kind) as "l2" | "l3" | "l4" | "skill" | undefined,
         harness: sourceHarness,
         leaseSeconds: optionalInteger(args.lease_seconds)
-      });
-      if (!job) return jsonResult({
-        job: null,
-        contract: distillationContract(),
-        instructions: "No pending distillation job for this account/scope."
-      });
-      return jsonResult(distillationNextPayload(job, evidenceOffset, evidenceChunkChars));
+      };
+      let job = await leaseDistillationJob(stateRoot, runtime.accountId, leaseInput);
+      let discovery: Awaited<ReturnType<typeof discoverDistillationJobs>> | undefined;
+      let discovery_error: string | undefined;
+      if (!job && (await getDistillationConfig(stateRoot)).auto_enabled) {
+        try {
+          discovery = await discoverDistillationJobs({
+            stateRoot,
+            accountId: runtime.accountId,
+            resolveProject: (hint) => runtime.projects.resolve(runtime.accountId, hint),
+            enqueue: true
+          });
+        } catch (error) {
+          discovery_error = error instanceof Error ? error.message : String(error);
+          console.error("[memhub] on-demand distillation discovery:", discovery_error);
+        }
+        job = await leaseDistillationJob(stateRoot, runtime.accountId, leaseInput);
+      }
+      if (!job) {
+        const config = await getDistillationConfig(stateRoot);
+        return jsonResult({
+          job: null,
+          queue_state: "idle",
+          auto_enabled: config.auto_enabled,
+          discovery_available: true,
+          ...(discovery ? { discovery } : {}),
+          ...(discovery_error ? { discovery_error } : {}),
+          contract: distillationContract(),
+          instructions: "No pending job. This does not establish that all conversations were captured or ingested. Call action=discover to reconcile eligible L1 evidence, then call next again."
+        });
+      }
+      return jsonResult({ ...distillationNextPayload(job, evidenceOffset, evidenceChunkChars), ...(discovery ? { discovery } : {}) });
     }
     if (action === "skip") {
       const jobId = requiredString(args.job_id, "job_id");
@@ -750,7 +802,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       await completeDistillationJob(stateRoot, runtime.accountId, jobId, { kind: "noop" }, sourceHarness);
       return jsonResult({ ok: true, job_id: jobId, skipped: true, reason: "no durable artifact justified by evidence" });
     }
-    if (action !== undefined && action !== "submit") throw new TypeError("action must be next, submit, or skip");
+    if (action !== undefined && action !== "submit") throw new TypeError("action must be discover, next, submit, or skip");
     const jobId = optionalString(args.job_id);
     const job = jobId
       ? (await listDistillationJobs(stateRoot, runtime.accountId)).find((item) => item.job_id === jobId)
@@ -1493,6 +1545,17 @@ async function serveHttp(
   };
 
   const http = createServer((request, response) => {
+    const requestId = randomUUID();
+    const startedAt = Date.now();
+    response.setHeader("x-memhub-request-id", requestId);
+    response.once("finish", () => {
+      if (response.statusCode < 400) return;
+      console.error(JSON.stringify({
+        component: "memhub-gateway", request_id: requestId,
+        method: request.method, route: (request.url ?? "/").split("?", 1)[0],
+        status: response.statusCode, duration_ms: Date.now() - startedAt
+      }));
+    });
     void (async () => {
       const url = new URL(request.url ?? "/", "http://localhost");
       if (!validateHost(request, response) || !validateOrigin(request, response)) return;
@@ -1796,13 +1859,6 @@ async function serveHttp(
             });
             if (ingestion.ingested) {
               await markCaptureIngested(options.stateRoot, device.account_id, stored.event.event_id);
-              const distillation = await maybeQueueThresholdDistillation({
-                stateRoot: options.stateRoot,
-                accountId: device.account_id,
-                projectId,
-                conversationId: stored.event.conversation_id
-              });
-              if (distillation) ingestion = { ...ingestion, distillation } as typeof ingestion & { distillation: unknown };
             }
           } catch (error) {
             response.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
@@ -1812,6 +1868,21 @@ async function serveHttp(
               message: error instanceof Error ? error.message : String(error)
             }));
             return;
+          }
+        }
+        let distillation_queue_error: string | undefined;
+        if (ingestion.ingested && projectId) {
+          try {
+            const distillation = await maybeQueueThresholdDistillation({
+              stateRoot: options.stateRoot,
+              accountId: device.account_id,
+              projectId,
+              conversationId: stored.event.conversation_id
+            });
+            if (distillation) ingestion = { ...ingestion, distillation } as typeof ingestion & { distillation: unknown };
+          } catch (error) {
+            distillation_queue_error = error instanceof Error ? error.message : String(error);
+            console.error("[memhub] capture distillation queue:", distillation_queue_error);
           }
         }
         response.writeHead(stored.created ? 201 : 200, {
@@ -1824,7 +1895,8 @@ async function serveHttp(
           updated: stored.updated,
           event_id: stored.event.event_id,
           device_id: device.device_id,
-          ingestion
+          ingestion,
+          ...(distillation_queue_error ? { distillation_queue_error } : {})
         }));
         return;
       }
@@ -2196,25 +2268,12 @@ async function maybeQueueThresholdDistillation(input: {
 }): Promise<unknown | null> {
   const config = await getDistillationConfig(input.stateRoot);
   if (!config.auto_enabled || !input.projectId) return null;
-  const jobs = await listDistillationJobs(input.stateRoot, input.accountId);
-  const used = new Set(jobs.filter((job) => job.conversation_id === input.conversationId && job.project_id === input.projectId).flatMap((job) => job.evidence_refs));
-  const allCaptures = (await listCaptureEvents(input.stateRoot, input.accountId, {
-    conversationId: input.conversationId,
-    ingested: true,
-    completeOnly: true
-  }))
-    .filter((item) => item.user_text && item.assistant_text)
-    .filter((item) => input.projectId ? !item.project_hint || item.project_hint === input.projectId : !item.project_hint);
-  if (allCaptures.length < config.turn_threshold || allCaptures.length % config.turn_threshold !== 0) return null;
-  const captures = allCaptures.filter((item) => !used.has(`l1:${item.event_id}`));
-  if (captures.length === 0) return null;
-  return enqueueDistillationJob({
+  return discoverDistillationJobs({
     stateRoot: input.stateRoot,
     accountId: input.accountId,
-    projectId: input.projectId,
     conversationId: input.conversationId,
-    captures,
-    reason: "turn_threshold"
+    resolveProject: async (hint) => hint === input.projectId ? input.projectId : null,
+    enqueue: true
   });
 }
 
@@ -2224,26 +2283,22 @@ async function queueIdleDistillation(
 ): Promise<void> {
   const config = await getDistillationConfig(stateRoot);
   if (!config.auto_enabled) return;
-  const cutoffIso = new Date(Date.now() - config.idle_minutes * 60_000).toISOString();
-  const groups = await listIdleCaptureGroups(stateRoot, cutoffIso);
-  for (const group of groups) {
-    const accountId = group.account_id;
-    const conversationId = group.conversation_id;
-    const runtime = runtimeForAccount(accountId);
-    const projectId = await runtime.projects.resolve(accountId, group.project_id);
-    if (!projectId) continue;
-    const jobs = await listDistillationJobs(stateRoot, accountId);
-    const used = new Set(jobs.filter((job) => job.conversation_id === conversationId && job.project_id === projectId).flatMap((job) => job.evidence_refs));
-    const fullConversation = await listCaptureEvents(stateRoot, accountId, {
-      conversationId,
-      projectId: group.project_id,
-      ingested: true,
-      completeOnly: true
-    });
-    const scoped = fullConversation.filter((item) => !used.has(`l1:${item.event_id}`));
-    if (scoped.length === 0) continue;
-    await enqueueDistillationJob({ stateRoot, accountId, projectId, conversationId, captures: scoped, reason: "idle" });
+  const entries = await listCaptureIndexEntries(stateRoot, undefined, { ingested: true, completeOnly: true });
+  const failures: Error[] = [];
+  for (const accountId of new Set(entries.map((item) => item.account_id))) {
+    try {
+      const runtime = runtimeForAccount(accountId);
+      await discoverDistillationJobs({
+        stateRoot,
+        accountId,
+        resolveProject: (hint) => runtime.projects.resolve(accountId, hint),
+        enqueue: true
+      });
+    } catch (error) {
+      failures.push(new Error(`account ${accountId}: ${error instanceof Error ? error.message : String(error)}`));
+    }
   }
+  if (failures.length) throw new AggregateError(failures, "distillation discovery failed for one or more accounts");
 }
 
 async function runDeviceCommand(argv: string[]): Promise<void> {

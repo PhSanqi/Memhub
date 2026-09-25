@@ -10,6 +10,7 @@ export interface DistillationConfig {
   auto_enabled: boolean;
   turn_threshold: number;
   idle_minutes: number;
+  auto_since?: string;
 }
 
 export interface DistillationEvidenceItem {
@@ -67,9 +68,19 @@ export async function getDistillationConfig(stateRoot: string): Promise<Distilla
 }
 
 export async function setDistillationConfig(stateRoot: string, patch: Partial<DistillationConfig>): Promise<DistillationConfig> {
-  const next = normalizeConfig({ ...(await getDistillationConfig(stateRoot)), ...patch });
-  await atomicJson(join(resolve(stateRoot), "distillation", "config.json"), next);
-  return next;
+  const path = join(resolve(stateRoot), "distillation", "config.json");
+  // A read/modify/write without the same cross-process lock loses concurrent
+  // admin changes and can silently reset the cutover boundary.
+  return withFileMutationLock(path, async () => {
+    const previous = await getDistillationConfig(stateRoot);
+    const next = normalizeConfig({
+      ...previous,
+      ...patch,
+      ...(patch.auto_enabled === true && !previous.auto_enabled ? { auto_since: new Date().toISOString() } : {})
+    });
+    await atomicJson(path, next);
+    return next;
+  });
 }
 
 export async function listDistillationJobs(stateRoot: string, accountId?: string): Promise<DistillationJob[]> {
@@ -337,10 +348,15 @@ function uniqueEvidence(items: DistillationEvidenceItem[]): DistillationEvidence
 }
 
 function normalizeConfig(value: Partial<DistillationConfig>): DistillationConfig {
+  const threshold = Number.isFinite(value.turn_threshold) ? Math.trunc(value.turn_threshold!) : 8;
+  const idleMinutes = Number.isFinite(value.idle_minutes) ? Math.trunc(value.idle_minutes!) : 30;
   return {
     auto_enabled: value.auto_enabled === true,
-    turn_threshold: Math.max(2, Math.min(100, Math.trunc(value.turn_threshold ?? 8))),
-    idle_minutes: Math.max(5, Math.min(1440, Math.trunc(value.idle_minutes ?? 30)))
+    turn_threshold: Math.max(2, Math.min(100, threshold)),
+    idle_minutes: Math.max(5, Math.min(1440, idleMinutes)),
+    ...(typeof value.auto_since === "string" && Number.isFinite(Date.parse(value.auto_since))
+      ? { auto_since: new Date(value.auto_since).toISOString() }
+      : {})
   };
 }
 
