@@ -688,6 +688,12 @@ async function testLocalAdmin(memoryPort) {
     while (!stderr.includes("listening on http://127.0.0.1:") && Date.now() < deadline) {
       await new Promise((resolveWait) => setTimeout(resolveWait, 25));
     }
+    const forwardedHttp = await rawHttp(port, "/memhub?source=http", {
+      host: "memhub.example.test",
+      "x-forwarded-proto": "http"
+    });
+    assert.equal(forwardedHttp.status, 308);
+    assert.equal(forwardedHttp.headers.location, "https://memhub.example.test/memhub?source=http");
     const partialCapture = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-memhub-device-token": device.token },
@@ -707,6 +713,7 @@ async function testLocalAdmin(memoryPort) {
     const authorization = `Basic ${Buffer.from(`memhub:${token}`).toString("base64")}`;
     const authenticated = await fetch(`http://127.0.0.1:${port}/memhub/admin`, { headers: { authorization } });
     assert.equal(authenticated.status, 200);
+    assert.equal(authenticated.headers.get("strict-transport-security"), "max-age=3600");
     assert.equal(authenticated.headers.get("x-frame-options"), "DENY");
     assert.match(authenticated.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
     assert.equal(authenticated.headers.get("referrer-policy"), "no-referrer");
@@ -2737,9 +2744,21 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
   assert.equal(aideQueued.created, true);
   const aideNext = parseTool(await client.callTool({
     name: "memhub_distill",
-    arguments: { action: "next", kind: "l2", scope: "project", project: "aide", source_harness: harnessA }
+    arguments: { action: "next", kind: "l2", scope: "project", project: "aide", source_harness: harnessA, lease_token_supported: true }
   }));
   assert.equal(aideNext.job.job_id, aideQueued.job.job_id);
+  assert.ok(aideNext.job.lease_token);
+  const missingToken = await client.callTool({
+    name: "memhub_distill",
+    arguments: { action: "next", job_id: aideNext.job.job_id, source_harness: harnessA }
+  });
+  assert.equal(missingToken.isError, true);
+  assert.match(missingToken.content[0].text, /lease token is missing or stale/i);
+  const renewed = parseTool(await client.callTool({
+    name: "memhub_distill",
+    arguments: { action: "renew", job_id: aideNext.job.job_id, source_harness: harnessA, lease_token: aideNext.job.lease_token, lease_seconds: 600 }
+  }));
+  assert.equal(renewed.lease_token, aideNext.job.lease_token);
   const wrongOwner = await client.callTool({
     name: "memhub_distill",
     arguments: {
@@ -2758,7 +2777,8 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
       job_id: aideNext.job.job_id,
       content: "AIDE timeline v1: the project binding was validated before memory changes.",
       project_description: "AIDE is an AI development environment focused on project-scoped orchestration and safe routing of work between harnesses.",
-      source_harness: harnessA
+      source_harness: harnessA,
+      lease_token: aideNext.job.lease_token
     }
   }));
   assert.equal(aideL2V1.kind, "l2");

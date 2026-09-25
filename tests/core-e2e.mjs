@@ -19,7 +19,7 @@ import { assertLoopbackMemoryEndpoint } from "../dist/local-memory-client.js";
 import { MemoryRestContextSource } from "../dist/memory-source.js";
 import { resolveProjectScope } from "../dist/project-scope.js";
 import { countCaptureEvents, createDevice, listCaptureEvents, normalizeCaptureEvent } from "../dist/capture.js";
-import { enqueueDerivedDistillationJob, listDistillationJobs } from "../dist/distillation-jobs.js";
+import { completeDistillationJob, enqueueDerivedDistillationJob, failDistillationJob, leaseDistillationJob, listDistillationJobs, renewDistillationJobLease } from "../dist/distillation-jobs.js";
 import { EmbeddedMemoryCore } from "../dist/embedded-memory-core.js";
 import { JsonProjectRegistry, projectSimilarity } from "../dist/project-registry.js";
 import { JsonResultTransport } from "../dist/result-transport.js";
@@ -435,6 +435,30 @@ try {
   )));
   const leasedIds = leaseResults.filter((value) => value !== "null");
   assert.deepEqual(leasedIds, [seededLeaseJob.job.job_id]);
+
+  const tokenRoot = join(root, "lease-token-fencing");
+  const tokenJob = await enqueueDerivedDistillationJob({
+    stateRoot: tokenRoot, accountId: "acct", target: "l3", projectId: "memhub",
+    evidence: [{ ref: "artifact:token-lease", kind: "artifact", timestamp: "2026-09-22T00:00:00.000Z", project_id: "memhub", layer: "L2", content: "token lease evidence" }]
+  });
+  const firstLease = await leaseDistillationJob(tokenRoot, "acct", { projectId: "memhub", harness: "same-harness", useLeaseToken: true });
+  assert.equal(firstLease.job_id, tokenJob.job.job_id);
+  assert.ok(firstLease.lease_token);
+  await assert.rejects(completeDistillationJob(tokenRoot, "acct", firstLease.job_id, { kind: "noop" }, "same-harness"), /token is missing or stale/);
+  await assert.rejects(renewDistillationJobLease(tokenRoot, "acct", firstLease.job_id, "same-harness", "wrong-token"), /token is missing or stale/);
+  const renewedLease = await renewDistillationJobLease(tokenRoot, "acct", firstLease.job_id, "same-harness", firstLease.lease_token, 600);
+  assert.equal(renewedLease.lease_token, firstLease.lease_token);
+  assert.ok(Date.parse(renewedLease.leased_until) > Date.parse(firstLease.leased_until));
+  const tokenStorePath = join(tokenRoot, "distillation", "jobs.json");
+  const tokenStore = JSON.parse(await readFile(tokenStorePath, "utf8"));
+  tokenStore.jobs[0].leased_until = "2020-01-01T00:00:00.000Z";
+  await writeFile(tokenStorePath, JSON.stringify(tokenStore));
+  const secondLease = await leaseDistillationJob(tokenRoot, "acct", { projectId: "memhub", harness: "same-harness", useLeaseToken: true });
+  assert.notEqual(secondLease.lease_token, firstLease.lease_token);
+  await assert.rejects(failDistillationJob(tokenRoot, "acct", firstLease.job_id, "stale", "same-harness", firstLease.lease_token), /token is missing or stale/);
+  await completeDistillationJob(tokenRoot, "acct", secondLease.job_id, { kind: "noop" }, "same-harness", secondLease.lease_token);
+  assert.equal((await listDistillationJobs(tokenRoot, "acct"))[0].status, "completed");
+  assert.equal((await listDistillationJobs(tokenRoot, "acct"))[0].lease_token, undefined);
 
   const concurrentBridgeRoot = join(root, "cross-process-bridge");
   const bridgeBaseArgs = [concurrentBridgeRoot, "bridge-race-event", "bridge-race-conv"];

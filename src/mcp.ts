@@ -48,6 +48,7 @@ import {
   getDistillationConfig,
   leaseDistillationJob,
   listDistillationJobs,
+  renewDistillationJobLease,
   retryDistillationJob,
   setDistillationConfig,
   type DistillationJob
@@ -687,7 +688,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
-        action: { type: "string", enum: ["discover", "next", "submit", "skip"], description: "discover 扫描已入库的完整 L1 证据；next 领取 evidence；submit 提交；skip 表示证据不足。" },
+        action: { type: "string", enum: ["discover", "next", "renew", "submit", "skip"], description: "discover 扫描完整 L1；next 领取；renew 续租；submit 提交；skip 证据不足。" },
         kind: { type: "string", enum: ["l2", "l3", "l4", "skill"], description: "目标层。next 可省略以领取任意待办；submit 必须与 job target 一致。" },
         content: { type: "string", description: "完整目标层内容" },
         scope: { type: "string", enum: ["account", "project"], description: "L2/L3 必须 project；L4 必须 account；Skill 可两者。" },
@@ -705,6 +706,8 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         ,confidence: { type: "number", minimum: 0, maximum: 1 }
         ,job_id: { type: "string", description: "提交通过 next 或 Control Plane 领取的 distillation job" }
         ,lease_seconds: { type: "integer", minimum: 30, maximum: 900 }
+        ,lease_token_supported: { type: "boolean", description: "新客户端显式启用 opaque lease token；旧客户端默认保持原有 harness lease 协议" }
+        ,lease_token: { type: "string", description: "next 返回的 opaque lease token；启用后 next 续取、renew、submit、skip 均须原样提供" }
         ,evidence_offset: { type: "integer", minimum: 0, description: "大 evidence job 分片读取偏移；action=next + job_id 时继续读取同一 lease" }
         ,evidence_chunk_chars: { type: "integer", minimum: 10000, maximum: 200000, description: "大 evidence 每次最多返回字符数；默认 120000" }
         ,inspect_contract: { type: "boolean", description: "只返回 Memhub 蒸馏规则，不写入任何内容" }
@@ -717,6 +720,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     if (args.inspect_contract === true) return jsonResult({ contract: distillationContract() });
     const action = optionalString(args.action);
     const sourceHarness = optionalString(args.source_harness) ?? runtime.source.platform ?? "mcp-harness";
+    const leaseToken = optionalString(args.lease_token);
     if (action === "discover") {
       const report = await discoverDistillationJobs({
         stateRoot,
@@ -738,7 +742,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       if (requestedJobId) {
         const job = (await listDistillationJobs(stateRoot, runtime.accountId)).find((item) => item.job_id === requestedJobId);
         if (!job) throw new Error("distillation job not found for account");
-        assertActiveDistillationLease(job, sourceHarness);
+        assertActiveDistillationLease(job, sourceHarness, leaseToken);
         const requestedKind = optionalString(args.kind);
         if (requestedKind && requestedKind !== job.target) throw new Error(`distillation target mismatch: job expects ${job.target}`);
         const requestedScope = optionalString(args.scope);
@@ -761,6 +765,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         target: optionalString(args.kind) as "l2" | "l3" | "l4" | "skill" | undefined,
         harness: sourceHarness,
         leaseSeconds: optionalInteger(args.lease_seconds)
+        ,useLeaseToken: args.lease_token_supported === true
       };
       let job = await leaseDistillationJob(stateRoot, runtime.accountId, leaseInput);
       let discovery: Awaited<ReturnType<typeof discoverDistillationJobs>> | undefined;
@@ -794,21 +799,27 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       }
       return jsonResult({ ...distillationNextPayload(job, evidenceOffset, evidenceChunkChars), ...(discovery ? { discovery } : {}) });
     }
+    if (action === "renew") {
+      const jobId = requiredString(args.job_id, "job_id");
+      if (!leaseToken) throw new TypeError("lease_token is required for renewal");
+      const renewed = await renewDistillationJobLease(stateRoot, runtime.accountId, jobId, sourceHarness, leaseToken, optionalInteger(args.lease_seconds) ?? 300);
+      return jsonResult({ ok: true, job_id: jobId, leased_until: renewed.leased_until, lease_token: renewed.lease_token });
+    }
     if (action === "skip") {
       const jobId = requiredString(args.job_id, "job_id");
       const job = (await listDistillationJobs(stateRoot, runtime.accountId)).find((item) => item.job_id === jobId);
       if (!job) throw new Error("distillation job not found for account");
-      assertActiveDistillationLease(job, sourceHarness);
-      await completeDistillationJob(stateRoot, runtime.accountId, jobId, { kind: "noop" }, sourceHarness);
+      assertActiveDistillationLease(job, sourceHarness, leaseToken);
+      await completeDistillationJob(stateRoot, runtime.accountId, jobId, { kind: "noop" }, sourceHarness, leaseToken);
       return jsonResult({ ok: true, job_id: jobId, skipped: true, reason: "no durable artifact justified by evidence" });
     }
-    if (action !== undefined && action !== "submit") throw new TypeError("action must be discover, next, submit, or skip");
+    if (action !== undefined && action !== "submit") throw new TypeError("action must be discover, next, renew, submit, or skip");
     const jobId = optionalString(args.job_id);
     const job = jobId
       ? (await listDistillationJobs(stateRoot, runtime.accountId)).find((item) => item.job_id === jobId)
       : undefined;
     if (jobId && !job) throw new Error("distillation job not found for account");
-    if (job) assertActiveDistillationLease(job, sourceHarness);
+    if (job) assertActiveDistillationLease(job, sourceHarness, leaseToken);
     const kind = (optionalString(args.kind) ?? job?.target) as "l2" | "l3" | "l4" | "skill" | undefined;
     if (!kind || !["l2", "l3", "l4", "skill"].includes(kind)) {
       throw new TypeError("kind must be l2, l3, l4, or skill");
@@ -879,6 +890,12 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     }
     let result: unknown;
     try {
+      // Evidence validation can take time; recheck the durable lease immediately before the external write.
+      if (jobId) {
+        const currentLease = (await listDistillationJobs(stateRoot, runtime.accountId)).find((item) => item.job_id === jobId);
+        if (!currentLease) throw new Error("distillation job not found for account");
+        assertActiveDistillationLease(currentLease, sourceHarness, leaseToken);
+      }
       const canonicalArtifactId = optionalString(args.artifact_id) ??
         (kind === "l2"
           ? `project-timeline:${projectId}`
@@ -935,7 +952,8 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
           runtime.accountId,
           jobId,
           error instanceof Error ? error.message : String(error),
-          sourceHarness
+          sourceHarness,
+          leaseToken
         ).catch(() => undefined);
       }
       throw error;
@@ -947,7 +965,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         kind,
         resultId,
         content
-      }, sourceHarness);
+      }, sourceHarness, leaseToken);
       if (kind === "l2" && projectId) {
         queuedNext = await enqueueDerivedDistillationJob({
           stateRoot,
@@ -1559,6 +1577,16 @@ async function serveHttp(
     void (async () => {
       const url = new URL(request.url ?? "/", "http://localhost");
       if (!validateHost(request, response) || !validateOrigin(request, response)) return;
+      const forwardedProto = singleHeader(request.headers["x-forwarded-proto"])?.split(",", 1)[0]?.trim().toLowerCase();
+      const requestHost = singleHeader(request.headers.host)?.split(":", 1)[0]?.toLowerCase();
+      if (options.publicHost && requestHost === options.publicHost.toLowerCase() && forwardedProto === "http") {
+        response.writeHead(308, {
+          location: `https://${options.publicHost}${request.url ?? "/"}`,
+          "cache-control": "no-store"
+        }).end();
+        return;
+      }
+      response.setHeader("strict-transport-security", "max-age=3600");
       if (url.pathname === healthPath) {
         if (request.method !== "GET" && request.method !== "HEAD") {
           response.writeHead(405, { allow: "GET, HEAD" }).end();
