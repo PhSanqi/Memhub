@@ -14,7 +14,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node tests/core-e2e.mjs && npm run context:check && node tests/process-stack-e2e.mjs && node tests/stack-runtime-smoke.mjs && node tests/network-report-e2e.mjs && node tests/deploy-systemd-e2e.mjs && node tests/openai-adapter-e2e.mjs && node tests/vendor-regressions.mjs && node tests/edition-regressions.mjs && node --test tests/cloudflare-watchdog.mjs",
-    "context:check": "node tests/retrieval-ranker-e2e.mjs && node tests/memory-source-retrieval-e2e.mjs && node tests/skill-router-e2e.mjs && node tests/skill-telemetry-e2e.mjs && node tests/skill-version-scope-e2e.mjs && node tests/distillation-discovery-e2e.mjs && node tests/file-mutation-lock-e2e.mjs && node tests/mcp-e2e.mjs",
+    "context:check": "node tests/retrieval-ranker-e2e.mjs && node tests/memory-source-retrieval-e2e.mjs && node tests/skill-router-e2e.mjs && node tests/skill-telemetry-e2e.mjs && node tests/skill-version-scope-e2e.mjs && node tests/distillation-discovery-e2e.mjs && node tests/file-mutation-lock-e2e.mjs && node tests/stability-state-e2e.mjs && node tests/vendor-manifest-e2e.mjs && node tests/mcp-e2e.mjs",
     "core:check": "node scripts/core-migration.mjs check",
     "core:preflight": "node scripts/core-migration.mjs preflight",
     "core:verify": "node scripts/core-migration.mjs verify",

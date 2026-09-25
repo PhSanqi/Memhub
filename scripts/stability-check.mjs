@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir, hostname, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { detectCoreDatabase } from "./stability-state.mjs";
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
@@ -31,7 +31,7 @@ const startedAt = new Date();
 const results = [];
 
 for (const [name, args] of steps) {
-  if (name === "core-check" && !existsSync(join(stateRoot, "core", "memory.sqlite"))) {
+  if (name === "core-check" && !detectCoreDatabase()) {
     results.push(await skippedStep(name, "Memory Core state is not initialized on this host"));
     continue;
   }
