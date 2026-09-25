@@ -5,7 +5,6 @@ import { dirname, resolve } from "node:path";
 
 const processMutationTails = new Map<string, Promise<void>>();
 const LOCK_TIMEOUT_MS = 15_000;
-const STALE_LOCK_MS = 300_000;
 const RETRY_MS = 10;
 
 interface LockOwner {
@@ -52,12 +51,10 @@ async function withCrossProcessLock<T>(targetPath: string, run: () => Promise<T>
       break;
     } catch (error) {
       if (!isLockContentionError(error)) throw error;
-      if (await staleLockCanBeRemoved(lockPath)) {
-        await unlink(lockPath).catch((unlinkError) => {
-          if ((unlinkError as NodeJS.ErrnoException)?.code !== "ENOENT") throw unlinkError;
-        });
-        continue;
-      }
+      // Serialize recovery as well as normal writes. Without a recovery
+      // guard, two contenders can both observe a dead owner; the slower one
+      // may unlink the faster contender's newly acquired live lock.
+      if (await staleLockCanBeRemoved(lockPath) && await reclaimDeadLocalLock(lockPath)) continue;
       if (Date.now() >= deadline) throw new Error(`timed out waiting for state lock: ${targetPath}`);
       await delay(RETRY_MS);
     }
@@ -70,6 +67,30 @@ async function withCrossProcessLock<T>(targetPath: string, run: () => Promise<T>
   }
 }
 
+async function reclaimDeadLocalLock(lockPath: string): Promise<boolean> {
+  const guardPath = `${lockPath}.reclaim`;
+  let guard;
+  try {
+    guard = await open(guardPath, "wx", 0o600);
+  } catch (error) {
+    if (isLockContentionError(error)) return false;
+    throw error;
+  }
+  try {
+    // Recheck only after acquiring the guard: the owner may have changed.
+    if (!(await staleLockCanBeRemoved(lockPath))) return false;
+    await unlink(lockPath).catch((error) => {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+    });
+    return true;
+  } finally {
+    await guard.close();
+    await unlink(guardPath).catch((error) => {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+    });
+  }
+}
+
 function isLockContentionError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException)?.code;
   if (code === "EEXIST") return true;
@@ -77,9 +98,8 @@ function isLockContentionError(error: unknown): boolean {
 }
 
 async function staleLockCanBeRemoved(lockPath: string): Promise<boolean> {
-  let lockStat;
   try {
-    lockStat = await stat(lockPath);
+    await stat(lockPath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return true;
     throw error;
@@ -89,8 +109,13 @@ async function staleLockCanBeRemoved(lockPath: string): Promise<boolean> {
   try {
     owner = JSON.parse(await readFile(lockPath, "utf8")) as Partial<LockOwner>;
   } catch {
-    return Date.now() - lockStat.mtimeMs >= STALE_LOCK_MS;
+    // A malformed owner is not evidence that its writer is dead. In
+    // particular, a writer can be between O_EXCL and writing its metadata.
+    return false;
   }
+  // Filesystems may be shared across hosts. Age alone must never authorize
+  // deleting another host's live lock: there is no reliable remote PID check.
+  if (owner.host !== hostname() || !owner.token || !Number.isInteger(owner.pid)) return false;
   if (owner.host === hostname() && Number.isInteger(owner.pid)) {
     try {
       process.kill(owner.pid!, 0);
@@ -101,7 +126,7 @@ async function staleLockCanBeRemoved(lockPath: string): Promise<boolean> {
       return false;
     }
   }
-  return Date.now() - lockStat.mtimeMs >= STALE_LOCK_MS;
+  return false;
 }
 
 async function releaseOwnedLock(lockPath: string, token: string): Promise<void> {
