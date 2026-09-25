@@ -57,13 +57,14 @@ export async function ingestCaptureIntoMemory(input: {
     namespace
   };
 
-  // requestId and request body are stable for this scoped host conversation.
-  // Per-turn metadata belongs on completeTurn, not session open.
+  // A session may be resumed by many turns with different workspace metadata.
+  // Use a stable per-event requestId so an earlier session.open idempotency key
+  // cannot conflict with the next turn's request body.
   await runtime.memoryClient.openSession({
     ...common,
     requestId: deterministicId(
       "mhcap_req",
-      `${runtime.accountId}\0${event.host}\0${event.continuity_id}\0${projectId ?? "global"}:session`
+      `${runtime.accountId}\0${event.host}\0${event.event_id}:session`
     ),
     source: "memhub-capture",
     sessionId,

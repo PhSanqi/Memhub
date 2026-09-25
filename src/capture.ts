@@ -225,6 +225,16 @@ export async function isCaptureIngested(stateRoot: string, accountId: string, ev
   }
 }
 
+export async function captureIngestedAt(stateRoot: string, accountId: string, eventId: string): Promise<string | null> {
+  try {
+    const timestamp = (await readFile(`${captureEventPath(stateRoot, accountId, eventId)}.ingested`, "utf8")).trim();
+    return Number.isFinite(Date.parse(timestamp)) ? new Date(timestamp).toISOString() : null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 export async function markCaptureIngested(stateRoot: string, accountId: string, eventId: string): Promise<void> {
   await withCaptureIndexMutation(stateRoot, async () => {
     await ensureCaptureIndexUnlocked(stateRoot, accountId);
