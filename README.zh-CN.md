@@ -14,7 +14,7 @@ Memhub 为 ChatGPT、Codex、MCP 客户端和其他 AI Harness 提供跨对话�
 
 它从原始对话证据出发，构建项目时间线、长期项目知识和跨项目稳定画像，并把 Skill、Todo、检索、来源追踪与浏览器工作区统一到一个可自托管运行时中。
 
-- **当前版本：** v0.2.5
+- **当前版本：** v0.2.6
 - **项目 canonical 线上入口：** https://memory.example.com/
 - **下载：** https://github.com/PhSanqi/Memhub/releases
 
@@ -120,6 +120,10 @@ git clone https://github.com/PhSanqi/Memhub.git
 cd Memhub
 bash editions/local/linux/install.sh
 ```
+
+Linux Local/Server 安装脚本**仅用于全新安装**：发现已有 StateRoot 或 Memhub
+systemd 单元时会拒绝执行，不会轮换凭据或覆盖数据。不要通过重复运行安装脚本来升级现有部署；
+应保留现有状态，并使用另行审查的迁移流程。
 
 Server、Windows、认证、Cloudflare、迁移和架构说明统一从 [文档首页](docs/README.md) 进入。
 

@@ -15,7 +15,7 @@ import { JsonConversationProjectBindingStore } from "../dist/binding-store.js";
 import { JsonProjectBranchStore } from "../dist/branch-store.js";
 import { buildContextCapsule } from "../dist/context-capsule.js";
 import { ContextRouter } from "../dist/context-router.js";
-import { assertLoopbackMemoryEndpoint } from "../dist/local-memory-client.js";
+import { assertLoopbackMemoryEndpoint, LocalMemoryRestClient, MemoryCoreHttpError } from "../dist/local-memory-client.js";
 import { MemoryRestContextSource } from "../dist/memory-source.js";
 import { resolveProjectScope } from "../dist/project-scope.js";
 import { countCaptureEvents, createDevice, listCaptureEvents, normalizeCaptureEvent } from "../dist/capture.js";
@@ -47,6 +47,32 @@ function runNodeEval(code, args) {
 }
 
 try {
+  const conflictingCore = new LocalMemoryRestClient({
+    endpoint: "http://127.0.0.1:18960",
+    fetchImpl: async () => new Response(JSON.stringify({ error: "idempotency key reused with a different request body" }), {
+      status: 409, headers: { "content-type": "application/json" }
+    })
+  });
+  await assert.rejects(conflictingCore.openSession({ requestId: "test-conflict" }), (error) =>
+    error instanceof MemoryCoreHttpError && error.status === 409 && /idempotency key/.test(error.message));
+  const coreToken = "core-token-test-secret";
+  let observedCoreAuthorization = "";
+  const unauthorizedCore = new LocalMemoryRestClient({
+    endpoint: "http://127.0.0.1:18960",
+    token: coreToken,
+    fetchImpl: async (_url, init) => {
+      observedCoreAuthorization = init?.headers?.authorization ?? "";
+      return new Response(JSON.stringify({ error: "invalid memory service token" }), {
+        status: 401, headers: { "content-type": "application/json" }
+      });
+    }
+  });
+  await assert.rejects(unauthorizedCore.openSession({ requestId: "test-core-auth" }), (error) =>
+    error instanceof MemoryCoreHttpError &&
+    error.status === 401 &&
+    /invalid memory service token/.test(error.message) &&
+    !error.message.includes(coreToken));
+  assert.equal(observedCoreAuthorization, `Bearer ${coreToken}`);
   assert.equal(resolveProjectScope({}).recallScope, "global_only");
   assert.equal(resolveProjectScope({ conversationProjectId: "ExampleProject" }).projectId, "ExampleProject");
   const conflict = resolveProjectScope({ conversationProjectId: "ExampleProject", workspaceProjectId: "memmy" });
@@ -453,6 +479,24 @@ try {
   const tokenStore = JSON.parse(await readFile(tokenStorePath, "utf8"));
   tokenStore.jobs[0].leased_until = "2020-01-01T00:00:00.000Z";
   await writeFile(tokenStorePath, JSON.stringify(tokenStore));
+  const unrelatedJob = await enqueueDerivedDistillationJob({
+    stateRoot: tokenRoot, accountId: "acct", target: "l3", projectId: "other-project",
+    evidence: [{ ref: "artifact:other-lease", kind: "artifact", timestamp: "2026-09-22T00:00:00.000Z", project_id: "other-project", layer: "L2", content: "unrelated lease evidence" }]
+  });
+  const unrelatedLease = await leaseDistillationJob(tokenRoot, "acct", {
+    projectId: "other-project", target: "l3", harness: "other-harness", useLeaseToken: true
+  });
+  assert.equal(unrelatedLease.job_id, unrelatedJob.job.job_id);
+  const afterUnrelatedLease = (await listDistillationJobs(tokenRoot, "acct"))
+    .find((job) => job.job_id === firstLease.job_id);
+  assert.equal(afterUnrelatedLease.status, "leased",
+    "leasing unrelated work must not sweep an expired generation to pending");
+  assert.equal(afterUnrelatedLease.lease_token, firstLease.lease_token,
+    "leasing unrelated work must preserve the in-flight generation token");
+  await completeDistillationJob(
+    tokenRoot, "acct", unrelatedLease.job_id, { kind: "noop" },
+    "other-harness", unrelatedLease.lease_token
+  );
   const secondLease = await leaseDistillationJob(tokenRoot, "acct", { projectId: "memhub", harness: "same-harness", useLeaseToken: true });
   assert.notEqual(secondLease.lease_token, firstLease.lease_token);
   await assert.rejects(failDistillationJob(tokenRoot, "acct", firstLease.job_id, "stale", "same-harness", firstLease.lease_token), /token is missing or stale/);

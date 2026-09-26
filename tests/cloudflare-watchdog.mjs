@@ -7,6 +7,9 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 const script = fileURLToPath(new URL('../scripts/check-memhub-tunnel', import.meta.url));
+// The watchdog is a Bash/systemd service; running its fixture on Windows
+// exercises neither the script nor its mocked executables.
+const watchdogTest = process.platform === 'linux' ? test : test.skip;
 
 function fixture(t) {
   const dir = mkdtempSync(path.join(tmpdir(), 'memhub-tunnel-watchdog-'));
@@ -67,13 +70,13 @@ printf '%s\\n' "$*" >> "$MOCK_RESTART_LOG"
   };
 }
 
-test('healthy connector and complete public Landing cause no restart', t => {
+watchdogTest('healthy connector and complete public Landing cause no restart', t => {
   const f=fixture(t);
   assert.equal(f.run().status,0);
   assert.deepEqual(f.restarts(),[]);
 });
 
-test('three partial HA observations restart only dedicated Memhub connector', t => {
+watchdogTest('three partial HA observations restart only dedicated Memhub connector', t => {
   const f=fixture(t);
   for(let i=0;i<2;i++) { assert.equal(f.run({MOCK_HA:'2'}).status,0); assert.deepEqual(f.restarts(),[]); }
   const result=f.run({MOCK_HA:'2'});
@@ -82,7 +85,7 @@ test('three partial HA observations restart only dedicated Memhub connector', t 
   assert.deepEqual(f.restarts(),['--user restart sanqi-plugin-cloudflared.service']);
 });
 
-test('200 with truncated Landing body triggers recovery only after three observations', t => {
+watchdogTest('200 with truncated Landing body triggers recovery only after three observations', t => {
   const f=fixture(t);
   for(let i=0;i<2;i++) { assert.equal(f.run({MOCK_PUBLIC_MODE:'partial'}).status,0); assert.deepEqual(f.restarts(),[]); }
   const result=f.run({MOCK_PUBLIC_MODE:'partial'});
@@ -91,7 +94,7 @@ test('200 with truncated Landing body triggers recovery only after three observa
   assert.deepEqual(f.restarts(),['--user restart sanqi-plugin-cloudflared.service']);
 });
 
-test('200 partial body with failed curl exit is not treated as complete', t => {
+watchdogTest('200 partial body with failed curl exit is not treated as complete', t => {
   const f=fixture(t);
   for(let i=0;i<2;i++) { assert.equal(f.run({MOCK_PUBLIC_MODE:'timedout'}).status,0); assert.deepEqual(f.restarts(),[]); }
   const result=f.run({MOCK_PUBLIC_MODE:'timedout'});
@@ -100,19 +103,19 @@ test('200 partial body with failed curl exit is not treated as complete', t => {
   assert.deepEqual(f.restarts(),['--user restart sanqi-plugin-cloudflared.service']);
 });
 
-test('missing or malformed HA metrics never restart the connector', t => {
+watchdogTest('missing or malformed HA metrics never restart the connector', t => {
   const f=fixture(t);
   for(let i=0;i<4;i++) assert.match(f.run({MOCK_HA:i%2?'invalid':'missing',MOCK_PUBLIC_MODE:'partial'}).output,/metrics unavailable or invalid/);
   assert.deepEqual(f.restarts(),[]);
 });
 
-test('unhealthy local Memhub suppresses connector restart', t => {
+watchdogTest('unhealthy local Memhub suppresses connector restart', t => {
   const f=fixture(t);
   for(let i=0;i<4;i++) assert.match(f.run({MOCK_LOCAL_HTTP:'503',MOCK_HA:'0',MOCK_PUBLIC_MODE:'partial'}).output,/restart suppressed/);
   assert.deepEqual(f.restarts(),[]);
 });
 
-test('failed recovery respects cooldown and does not restart again', t => {
+watchdogTest('failed recovery respects cooldown and does not restart again', t => {
   const f=fixture(t);
   for(let i=0;i<3;i++) f.run({MOCK_HA:'0',MOCK_STILL_BAD:'1'});
   assert.deepEqual(f.restarts(),['--user restart sanqi-plugin-cloudflared.service']);

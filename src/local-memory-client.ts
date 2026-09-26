@@ -30,6 +30,14 @@ export interface LocalMemoryRestClientOptions {
   fetchImpl?: typeof fetch;
 }
 
+/** Preserve the upstream status without parsing an error message or URL. */
+export class MemoryCoreHttpError extends Error {
+  constructor(readonly status: number, detail: string) {
+    super(`memory core HTTP ${status}: ${detail}`);
+    this.name = "MemoryCoreHttpError";
+  }
+}
+
 /**
  * Minimal Memhub client for the loopback Memory Core API.
  * Keeping this client local avoids linking the MCP gateway to Memory's
@@ -106,7 +114,7 @@ export class LocalMemoryRestClient {
     const text = await response.text();
     const payload = text ? safeJson(text) : undefined;
     if (!response.ok) {
-      throw new Error(`memory core HTTP ${response.status}: ${safeErrorPayload(payload, text)}`);
+      throw new MemoryCoreHttpError(response.status, safeErrorPayload(payload, text));
     }
     return payload;
   }

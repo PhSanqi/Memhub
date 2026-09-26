@@ -14,7 +14,7 @@ import { MemhubBridgeQueue, bridgeRetryDelayMs, saveBridgeConfig } from "../dist
 import { FileProjectArchitectureSource } from "../dist/architecture-source.js";
 import { JsonProjectRegistry } from "../dist/project-registry.js";
 import { addAccount, ensureLocalAdminToken, setAccountRole } from "../dist/auth.js";
-import { createDevice, countCaptureEvents, listCaptureEvents } from "../dist/capture.js";
+import { createDevice, countCaptureEvents, isCaptureIngested, listCaptureEvents, revokeDevice, storeCaptureEvent } from "../dist/capture.js";
 import { defaultMemoryUserId } from "../dist/memory-source.js";
 import {
   completeDistillationJob,
@@ -23,6 +23,7 @@ import {
   failDistillationJob,
   leaseDistillationJob,
   listDistillationJobs,
+  quarantineDistillationJobAfterCoreCommit,
   retryDistillationJob,
   setDistillationConfig
 } from "../dist/distillation-jobs.js";
@@ -196,7 +197,10 @@ function consoleHtmlWithBrowserMocks(html) {
     l3:{total:1,items:[{id:"l3-browser-1",project_id:"alpha",title:"Alpha durable rules",summary:"Durable project rules",body:"- Preserve root overflow at zero.\\n- Keep mobile navigation discoverable.\\n- Verify browser evidence before acceptance.",updatedAt:"2026-09-21T08:25:00.000Z"}]},
     l4:{total:1,items:[{id:"l4-browser-1",title:"Cross-project profile",summary:"Stable cross-project working profile",body:"- Prefers evidence-backed verification.\\n- Prefers minimal sufficient architecture.",updatedAt:"2026-09-21T08:30:00.000Z"}]},
     skills:{total:1,items:[{id:"skill-browser-1",title:"Responsive review",summary:"Reusable frontend review procedure",status:"active"}]},
-    processing:{config:{auto_enabled:true,turn_threshold:8,idle_minutes:30},items:[{job_id:"job-browser-1",target:"l2",project_id:"alpha",reason:"threshold",evidence_refs:["l1:browser"],status:"failed",failure:"Simulated L2 evidence mismatch",failed_at:"2026-09-21T08:35:00.000Z",attempts:2,updated_at:"2026-09-21T08:35:00.000Z"}]},
+    processing:{config:{auto_enabled:true,turn_threshold:8,idle_minutes:30},items:[
+      {job_id:"job-browser-1",target:"l2",project_id:"alpha",reason:"threshold",evidence_refs:["l1:browser"],status:"failed",failure:"Simulated L2 evidence mismatch",failure_kind:"core_error",failed_at:"2026-09-21T08:35:00.000Z",attempts:2,updated_at:"2026-09-21T08:35:00.000Z"},
+      {job_id:"job-browser-ambiguous",target:"l2",project_id:"beta",reason:"threshold",evidence_refs:["l1:ambiguous"],status:"failed",failure:"Ambiguous Core commit requires manual reconciliation",failure_kind:"ambiguous_core_commit",failed_at:"2026-09-21T08:34:00.000Z",attempts:1,updated_at:"2026-09-21T08:34:00.000Z"}
+    ]},
     accounts:{total:1,items:[{account_id:"acct-browser",username:"browser-admin",cloudflare_email:"operator.long.identity@example.org",role:"admin",status:"active"}]}
   };
   const serialized=JSON.stringify(payloads).replaceAll("<","\\u003c");
@@ -232,7 +236,7 @@ async function runConsoleBrowserScenario({chromium,html,page,width,full}) {
     "if("+JSON.stringify(page)+"==='workspace'){const ps=d.getElementById('project-select');ps.value='';ps.dispatchEvent(new Event('change',{bubbles:true}));await settle();await clickView('overview');check('all-projects-portfolio',d.querySelectorAll('.portfolio-record').length>=2,String(d.querySelectorAll('.portfolio-record').length));check('overview-title-continue',/Continue working|继续工作/.test(d.getElementById('workspace-title')?.textContent||''));await clickView('l2');check('subview-title-specific',!/Continue working|继续工作/.test(d.getElementById('workspace-title')?.textContent||'')&&/Project chronology|项目时间线/.test(d.getElementById('workspace-title')?.textContent||''))}",
     "if(!"+fullFlag+"){await clickView(\'processing\');await settle(260);check(\'mobile-view-processing\',d.getElementById(\'mobile-view-select\')?.value===\'processing\');check(\'root-overflow-after-nav\',d.documentElement.scrollWidth===d.documentElement.clientWidth);out.textContent=JSON.stringify({checks});return}",
     "for(const v of ['overview','projects','l1','l2','l3','l4','processing']){await clickView(v);check('rendered-'+v,!!d.getElementById('items')?.textContent.trim())}",
-    "if("+JSON.stringify(page)+"==='admin'){await clickView('overview');check('overview-single-heading',d.getElementById('view-title').getClientRects().length===0);check('overview-followup-wide',d.querySelector('.overview-todos')?.getBoundingClientRect().width>=d.querySelector('.admin-health-card')?.getBoundingClientRect().width-1);await clickView('processing');const toggle=d.getElementById('cfg-auto');check('policy-switch-semantic',toggle?.getAttribute('role')==='switch'&&toggle?.closest('label')?.textContent.includes('Automatic'));check('processing-failure-summary',d.querySelector('.job-error')?.textContent.includes('evidence mismatch'));check('processing-retry-action',!!d.querySelector('.job-quick-retry'));d.querySelector('.job-row')?.click();await settle(40);check('processing-detail-failure',d.querySelector('.job-failure-detail')?.textContent.includes('evidence mismatch'));w.closeDrawer();await settle(30);await clickView('accounts');check('account-email-primary',d.querySelector('.account-identity')?.textContent==='operator.long.identity@example.org');check('account-uuid-secondary',d.querySelector('.account-record-meta code')?.textContent==='acct-browser');check('account-no-default-json',!d.querySelector('.account-record pre'));d.querySelector('.account-record-main')?.click();await settle(40);check('account-structured-detail',!!d.querySelector('.account-detail')&&d.getElementById('drawer-title')?.textContent.includes('operator.long.identity@example.org'));w.closeDrawer()}",
+    "if("+JSON.stringify(page)+"==='admin'){await clickView('overview');check('overview-single-heading',d.getElementById('view-title').getClientRects().length===0);check('overview-followup-wide',d.querySelector('.overview-todos')?.getBoundingClientRect().width>=d.querySelector('.admin-health-card')?.getBoundingClientRect().width-1);await clickView('processing');const toggle=d.getElementById('cfg-auto');check('policy-switch-semantic',toggle?.getAttribute('role')==='switch'&&toggle?.closest('label')?.textContent.includes('Automatic'));check('processing-failure-summary',d.querySelector('.job-error')?.textContent.includes('evidence mismatch'));check('processing-retry-action',d.querySelectorAll('.job-quick-retry').length===1);check('processing-ambiguous-no-quick-retry',d.querySelectorAll('.job-entry').length===2&&d.querySelectorAll('.job-entry')[1]?.querySelector('.job-quick-retry')===null);d.querySelector('.job-row')?.click();await settle(40);check('processing-detail-failure',d.querySelector('.job-failure-detail')?.textContent.includes('evidence mismatch'));w.closeDrawer();await settle(30);d.querySelectorAll('.job-row')[1]?.click();await settle(40);check('processing-ambiguous-drawer-no-retry',!d.querySelector('#drawer-body [data-retry-index]'));w.closeDrawer();await settle(30);await clickView('accounts');check('account-email-primary',d.querySelector('.account-identity')?.textContent==='operator.long.identity@example.org');check('account-uuid-secondary',d.querySelector('.account-record-meta code')?.textContent==='acct-browser');check('account-no-default-json',!d.querySelector('.account-record pre'));d.querySelector('.account-record-main')?.click();await settle(40);check('account-structured-detail',!!d.querySelector('.account-detail')&&d.getElementById('drawer-title')?.textContent.includes('operator.long.identity@example.org'));w.closeDrawer()}",
     "await clickView('projects');check('long-project-content',d.querySelector('.project-ledger-record p')?.textContent.length>80);w.__browserMock.delayNextGet=true;d.querySelector('aside button[data-view=\\\"l1\\\"]')?.click();check('loading-state-visible',!!d.querySelector('.loading-state'));await settle(230);check('loading-state-clears',!d.querySelector('.loading-state'));",
     "w.__browserMock.failNext=true;d.getElementById('refresh').click();await settle(110);check('load-error-visible',!!d.querySelector('.load-error'));check('load-error-retry',!!d.querySelector('.load-error button'));check('load-error-details',!!d.querySelector('.load-error details'));d.querySelector('.load-error button').click();await settle();check('load-error-recovers',!d.querySelector('.load-error'));",
     "await clickView('projects');const card=d.querySelector('.project-ledger-record');card.focus();card.click();await settle(40);const drawer=d.getElementById('drawer');check('drawer-open',!drawer.classList.contains('hidden'));const labelled=drawer.getAttribute('aria-labelledby');check('drawer-accessible-name',!!(labelled&&d.getElementById(labelled)?.textContent.trim()));check('drawer-focus-enters',drawer.contains(d.activeElement));check('background-inert',d.getElementById('main-content').hasAttribute('inert'));let fs=[...drawer.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),summary,[tabindex]:not([tabindex=\\\"-1\\\"])')].filter(e=>e.getClientRects().length);fs.at(-1).focus();d.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}));check('drawer-tab-trap',d.activeElement===fs[0]);",
@@ -302,6 +306,14 @@ const memoryRecords = new Map();
 const memoryById = new Map();
 const rawTurnRecords = [];
 let memorySequence = 0;
+let captureVsRecoveryCoreEntered;
+let releaseCaptureVsRecoveryCore;
+const captureVsRecoveryCoreStarted = new Promise((resolve) => {
+  captureVsRecoveryCoreEntered = resolve;
+});
+const captureVsRecoveryCoreGate = new Promise((resolve) => {
+  releaseCaptureVsRecoveryCore = resolve;
+});
 const memory = createServer(async (request, response) => {
   let raw = "";
   for await (const chunk of request) raw += chunk;
@@ -464,6 +476,20 @@ const memory = createServer(async (request, response) => {
     return;
   }
   if (request.url?.startsWith("/api/v1/turns/") && request.url.endsWith("/complete")) {
+    if (body.query === "http and recover racing on same event") {
+      captureVsRecoveryCoreEntered();
+      await captureVsRecoveryCoreGate;
+    }
+    if (body.query === "inject core idempotency conflict") {
+      response.statusCode = 409;
+      response.end(JSON.stringify({ error: "idempotency key reused with different request body" }));
+      return;
+    }
+    if (body.query === "inject core transient failure") {
+      response.statusCode = 500;
+      response.end(JSON.stringify({ error: "injected transient core failure" }));
+      return;
+    }
     if (!acceptIdempotent(body, "turn.complete", response)) return;
     response.end(JSON.stringify({ l1MemoryId: `l1-${body.sessionId}`, status: "captured" }));
     return;
@@ -1019,6 +1045,70 @@ async function testLocalAdmin(memoryPort) {
       body: JSON.stringify({ action: "add-project-todo", project: "ui-beta", text: "must fail" })
     });
     assert.equal(userTodoMutation.status, 403);
+    const retryCandidate = await enqueueDerivedDistillationJob({
+      stateRoot,
+      accountId: account.account_id,
+      target: "l3",
+      projectId: "ui-beta",
+      evidence: [{
+        ref: "artifact:ui-beta-retry-authorization",
+        kind: "artifact",
+        timestamp: "2026-09-26T00:00:00.000Z",
+        project_id: "ui-beta",
+        layer: "L2",
+        content: "Retry authorization boundary fixture."
+      }]
+    });
+    const retryHarness = "ui-retry-authorization-harness";
+    const retryLease = await leaseDistillationJob(stateRoot, account.account_id, {
+      projectId: "ui-beta", target: "l3", harness: retryHarness
+    });
+    assert.equal(retryLease?.job_id, retryCandidate.job.job_id);
+    await failDistillationJob(
+      stateRoot, account.account_id, retryCandidate.job.job_id,
+      "simulated retryable admin failure", retryHarness
+    );
+    const forbiddenUserRetry = await fetch(`http://127.0.0.1:${port}/memhub/user/action`, {
+      method: "POST",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({ action: "retry-distillation", id: retryCandidate.job.job_id })
+    });
+    assert.equal(forbiddenUserRetry.status, 403,
+      "workspace user cannot bypass the Admin-only retry control by posting directly");
+    const allowedAdminRetry = await adminAction({
+      action: "retry-distillation", id: retryCandidate.job.job_id
+    });
+    assert.equal(allowedAdminRetry.status, 200);
+    assert.equal((await allowedAdminRetry.json()).job.status, "pending");
+    const ambiguousCandidate = await enqueueDerivedDistillationJob({
+      stateRoot,
+      accountId: account.account_id,
+      target: "skill",
+      projectId: "ui-beta",
+      evidence: [{
+        ref: "artifact:ui-beta-ambiguous-retry",
+        kind: "artifact",
+        timestamp: "2026-09-26T00:00:00.000Z",
+        project_id: "ui-beta",
+        layer: "L2",
+        content: "Ambiguous retry boundary fixture."
+      }]
+    });
+    const ambiguousHarness = "ui-ambiguous-retry-harness";
+    const ambiguousLease = await leaseDistillationJob(stateRoot, account.account_id, {
+      projectId: "ui-beta", target: "skill", harness: ambiguousHarness, useLeaseToken: true
+    });
+    assert.equal(ambiguousLease?.job_id, ambiguousCandidate.job.job_id);
+    await quarantineDistillationJobAfterCoreCommit(
+      stateRoot, account.account_id, ambiguousCandidate.job.job_id,
+      "Memory Core returned success without a stable result id; ambiguous commit requires manual reconciliation before retry",
+      ambiguousHarness, ambiguousLease.lease_token
+    );
+    const ambiguousAdminRetry = await adminAction({
+      action: "retry-distillation", id: ambiguousCandidate.job.job_id
+    });
+    assert.equal(ambiguousAdminRetry.status, 409);
+    assert.equal((await ambiguousAdminRetry.json()).error, "manual_reconciliation_required");
     const nonJsonAdminMutation = await fetch(`http://127.0.0.1:${port}/memhub/admin/action`, {
       method: "POST",
       headers: { authorization, "content-type": "text/plain" },
@@ -1307,6 +1397,20 @@ async function testHttp(memoryPort) {
       user_text: "continue implementation",
       assistant_text: "implemented capture protocol"
     };
+    const missingDeviceAuth = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(captureEvent)
+    });
+    assert.equal(missingDeviceAuth.status, 401);
+    assert.equal((await missingDeviceAuth.json()).error, "missing_device_token");
+    assert.match(missingDeviceAuth.headers.get("x-memhub-request-id") ?? "", /^[0-9a-f-]{36}$/);
+    const invalidDeviceAuth = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer mhdev_invalid-test-token" },
+      body: JSON.stringify(captureEvent)
+    });
+    assert.equal(invalidDeviceAuth.status, 403);
+    assert.equal((await invalidDeviceAuth.json()).error, "invalid_or_revoked_device");
+    assert.match(invalidDeviceAuth.headers.get("x-memhub-request-id") ?? "", /^[0-9a-f-]{36}$/);
     const direct = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
       method: "POST",
       headers: {
@@ -1498,6 +1602,163 @@ async function testHttp(memoryPort) {
     assert.equal(replay.pending, 0);
     assert.equal(await countCaptureEvents(stateRoot), captureCountBaseline + 5);
 
+    const conflictCapture = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${createdDevice.token}` },
+      body: JSON.stringify({
+        event_id: "capture-core-conflict", host: "codex", conversation_id: "capture-core-conflict",
+        continuity_id: "capture-core-conflict", timestamp: "2026-09-18T08:10:00.000Z",
+        project_hint: "ExampleProject", user_text: "inject core idempotency conflict",
+        assistant_text: "Core returns an explicit 409", capture_status: "complete"
+      })
+    });
+    assert.equal(conflictCapture.status, 409);
+    assert.match(conflictCapture.headers.get("x-memhub-request-id") ?? "", /^[0-9a-f-]{36}$/);
+    const conflictBody = await conflictCapture.json();
+    assert.equal(conflictBody.error, "capture_ingest_conflict");
+    assert.equal(conflictBody.event_id, "capture-core-conflict");
+    assert.equal((await listCaptureEvents(stateRoot, "acct-test"))
+      .find((item) => item.event_id === "capture-core-conflict")?.ingested, false,
+      "a failed Core write must leave the durable capture un-ingested");
+    const transientCapture = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${createdDevice.token}` },
+      body: JSON.stringify({
+        event_id: "capture-core-transient", host: "codex", conversation_id: "capture-core-transient",
+        continuity_id: "capture-core-transient", timestamp: "2026-09-18T08:11:00.000Z",
+        project_hint: "ExampleProject", user_text: "inject core transient failure",
+        assistant_text: "Core returns an explicit 500", capture_status: "complete"
+      })
+    });
+    assert.equal(transientCapture.status, 503);
+    assert.match(transientCapture.headers.get("x-memhub-request-id") ?? "", /^[0-9a-f-]{36}$/);
+    assert.equal((await transientCapture.json()).error, "capture_ingest_failed");
+    assert.equal((await listCaptureEvents(stateRoot, "acct-test"))
+      .find((item) => item.event_id === "capture-core-transient")?.ingested, false);
+    assert.equal(stderr.includes(createdDevice.token), false, "Gateway logs must not leak device tokens");
+    const recoveryClient = new Client({ name: "memhub-capture-recovery-test", version: "1.0.0" });
+    await recoveryClient.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
+    const recoveryCapture = {
+      event_id: "capture-recover-target", host: "codex", conversation_id: "capture-recover-chat",
+      continuity_id: "capture-recover-chat", timestamp: "2026-09-18T08:20:00.000Z",
+      project_hint: "ExampleProject", user_text: "recovered user", assistant_text: "recovered assistant",
+      capture_status: "complete"
+    };
+    await storeCaptureEvent(stateRoot, createdDevice.device, recoveryCapture);
+    const completedBeforeDryRun = requests.filter((item) =>
+      item.url?.startsWith("/api/v1/turns/") && item.url.endsWith("/complete")).length;
+    const recoveryArgs = { action: "recover_ingest", event_id: recoveryCapture.event_id, project: "ExampleProject" };
+    const dryRecovery = JSON.parse((await recoveryClient.callTool({
+      name: "memhub_distill", arguments: { ...recoveryArgs, dry_run: true }
+    })).content[0].text);
+    assert.equal(dryRecovery.dry_run, true);
+    assert.equal(dryRecovery.already_ingested, false);
+    assert.equal(await isCaptureIngested(stateRoot, "acct-test", recoveryCapture.event_id), false);
+    assert.equal(requests.filter((item) =>
+      item.url?.startsWith("/api/v1/turns/") && item.url.endsWith("/complete")).length,
+      completedBeforeDryRun, "dry-run must not call Core");
+    await storeCaptureEvent(stateRoot, createdDevice.device, {
+      ...recoveryCapture, event_id: "capture-recover-partial", assistant_text: undefined,
+      capture_status: "partial"
+    });
+    const revoked = await createDevice(stateRoot, "acct-test", "revoked recovery device");
+    await storeCaptureEvent(stateRoot, revoked.device, {
+      ...recoveryCapture, event_id: "capture-recover-revoked"
+    });
+    await revokeDevice(stateRoot, revoked.device.device_id);
+    for (const invalidArgs of [
+      { ...recoveryArgs, project: "memhub" },
+      { ...recoveryArgs, workspace_project: "memhub" },
+      { ...recoveryArgs, event_id: "missing-event" },
+      { ...recoveryArgs, event_id: "capture-recover-partial" },
+      { ...recoveryArgs, event_id: "capture-recover-revoked" }
+    ]) {
+      const rejected = await recoveryClient.callTool({ name: "memhub_distill", arguments: invalidArgs });
+      assert.equal(rejected.isError, true, "unknown or mismatched capture must fail closed");
+    }
+    const completedBeforeRecovery = requests.filter((item) =>
+      item.url?.startsWith("/api/v1/turns/") && item.url.endsWith("/complete")).length;
+    const recoveredCapture = JSON.parse((await recoveryClient.callTool({
+      name: "memhub_distill", arguments: recoveryArgs
+    })).content[0].text);
+    assert.equal(recoveredCapture.ok, true);
+    assert.equal(recoveredCapture.ingested, true);
+    assert.equal(recoveredCapture.already_ingested, false);
+    assert.equal(await isCaptureIngested(stateRoot, "acct-test", recoveryCapture.event_id), true);
+    assert.equal(requests.filter((item) =>
+      item.url?.startsWith("/api/v1/turns/") && item.url.endsWith("/complete")).length,
+      completedBeforeRecovery + 1);
+    const recoveredAgain = JSON.parse((await recoveryClient.callTool({
+      name: "memhub_distill", arguments: recoveryArgs
+    })).content[0].text);
+    assert.equal(recoveredAgain.already_ingested, true);
+    assert.equal(requests.filter((item) =>
+      item.url?.startsWith("/api/v1/turns/") && item.url.endsWith("/complete")).length,
+      completedBeforeRecovery + 1, "recovery of marked evidence must not rewrite Core");
+    const conflictingRecovery = await recoveryClient.callTool({
+      name: "memhub_distill", arguments: { ...recoveryArgs, event_id: "capture-core-conflict" }
+    });
+    assert.equal(conflictingRecovery.isError, true);
+    assert.equal(await isCaptureIngested(stateRoot, "acct-test", "capture-core-conflict"), false);
+
+    // One HTTP Capture and one MCP recover_ingest can enter from different
+    // transports while the first Core completeTurn response is held. They
+    // must share the same durable per-event attempt lock; the second path
+    // must observe the marker rather than issue another Core completeTurn.
+    const transportRaceEvent = {
+      event_id: "capture-http-versus-recover", host: "codex",
+      conversation_id: "capture-http-versus-recover",
+      continuity_id: "capture-http-versus-recover",
+      timestamp: "2026-09-18T08:25:00.000Z",
+      project_hint: "ExampleProject",
+      user_text: "http and recover racing on same event",
+      assistant_text: "only one Core completion",
+      capture_status: "complete"
+    };
+    const raceCompletionBefore = requests.filter((entry) =>
+      entry.url?.startsWith("/api/v1/turns/") &&
+      entry.url.endsWith("/complete") &&
+      entry.body?.query === transportRaceEvent.user_text).length;
+    const httpRace = fetch(`http://127.0.0.1:${port}/memhub/capture`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${createdDevice.token}` },
+      body: JSON.stringify(transportRaceEvent)
+    });
+    try {
+      await Promise.race([
+        captureVsRecoveryCoreStarted,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("HTTP Core race gate not entered")), 5_000))
+      ]);
+      const recoverRace = recoveryClient.callTool({
+        name: "memhub_distill",
+        arguments: {
+          action: "recover_ingest",
+          event_id: transportRaceEvent.event_id,
+          project: "ExampleProject"
+        }
+      });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      assert.equal(requests.filter((entry) =>
+        entry.url?.startsWith("/api/v1/turns/") &&
+        entry.url.endsWith("/complete") &&
+        entry.body?.query === transportRaceEvent.user_text).length, raceCompletionBefore + 1,
+      "MCP recovery must not send a second Core completion while HTTP holds the same event attempt");
+      releaseCaptureVsRecoveryCore();
+      const httpResult = await httpRace;
+      assert.equal(httpResult.status, 201, await httpResult.text());
+      const recoveredRace = JSON.parse((await recoverRace).content[0].text);
+      assert.equal(recoveredRace.already_ingested, true);
+      assert.equal(await isCaptureIngested(stateRoot, "acct-test", transportRaceEvent.event_id), true);
+      assert.equal(requests.filter((entry) =>
+        entry.url?.startsWith("/api/v1/turns/") &&
+        entry.url.endsWith("/complete") &&
+        entry.body?.query === transportRaceEvent.user_text).length, raceCompletionBefore + 1,
+      "HTTP/MCP concurrent replay must create exactly one Core completion");
+    } finally {
+      releaseCaptureVsRecoveryCore();
+    }
+    await recoveryClient.close();
+
     const raceRoot = join(root, "bridge-race");
     const raceQueue = new MemhubBridgeQueue(raceRoot);
     const raceRequests = [];
@@ -1544,6 +1805,66 @@ async function testHttp(memoryPort) {
       assert.equal(raceRequests[1].assistant_text, "assistant half");
     } finally {
       await new Promise((resolveClose) => raceServer.close(resolveClose));
+    }
+
+    // Bridge cannot infer failure from a dropped acknowledgement: the
+    // upstream may have durably accepted the event before the connection
+    // disappeared. Preserve the same event ID and content for retry instead
+    // of deleting or altering the claimed queue item.
+    const ambiguousRoot = join(root, "bridge-ambiguous-core-ack");
+    const ambiguousQueue = new MemhubBridgeQueue(ambiguousRoot);
+    const committed = new Map();
+    const attempts = [];
+    const ambiguousUpstream = createServer(async (request, response) => {
+      let raw = "";
+      for await (const chunk of request) raw += chunk;
+      const event = JSON.parse(raw);
+      attempts.push(raw);
+      const prior = committed.get(event.event_id);
+      if (prior && prior !== raw) {
+        response.writeHead(409).end();
+        return;
+      }
+      committed.set(event.event_id, raw);
+      if (attempts.length === 1) {
+        // The logical Core commit happened, but the Bridge receives no ACK.
+        response.destroy();
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ accepted: true, duplicate: Boolean(prior) }));
+    });
+    const ambiguousPort = await freePort();
+    await new Promise((resolveListen) => ambiguousUpstream.listen(
+      ambiguousPort, "127.0.0.1", resolveListen
+    ));
+    try {
+      await saveBridgeConfig(ambiguousRoot, {
+        captureEndpoint: `http://127.0.0.1:${ambiguousPort}/capture`,
+        deviceToken: createdDevice.token
+      });
+      await ambiguousQueue.enqueue({
+        event_id: "ambiguous-bridge-ack", host: "codex",
+        conversation_id: "ambiguous-bridge-ack", continuity_id: "ambiguous-bridge-ack",
+        timestamp: "2026-09-18T09:00:00.000Z",
+        project_hint: "ExampleProject", user_text: "bridge user", assistant_text: "bridge assistant",
+        capture_status: "complete"
+      });
+      const ambiguousConfig = await (await import("../dist/bridge.js"))
+        .loadBridgeConfig(ambiguousRoot);
+      const first = await ambiguousQueue.flush(ambiguousConfig);
+      assert.equal(first.sent, 0);
+      assert.equal(first.pending, 1, "lost ACK must preserve durable Bridge evidence");
+      assert.ok(first.stopped_on_error);
+      const replay = await ambiguousQueue.flush(ambiguousConfig);
+      assert.equal(replay.sent, 1);
+      assert.equal(replay.pending, 0);
+      assert.equal(attempts.length, 2);
+      assert.equal(attempts[0], attempts[1],
+        "replay after ambiguous Core commit must reuse identical payload");
+      assert.equal(committed.size, 1, "upstream idempotency must preserve one event");
+    } finally {
+      await new Promise((resolveClose) => ambiguousUpstream.close(resolveClose));
     }
 
     const backoffRoot = join(root, "bridge-backoff");
@@ -1904,6 +2225,24 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.match(listed.tools.find((tool) => tool.name === "memmy_project_list")?.description ?? "", /description.*禁止盲目新建/);
   assert.match(listed.tools.find((tool) => tool.name === "memmy_project_manage")?.description ?? "", /action=plan.*明确授权.*action=execute/);
   assert.match(listed.tools.find((tool) => tool.name === "memhub_todo")?.description ?? "", /Project Registry.*唯一事实源|唯一事实源.*Project Registry/);
+  // MCP tools/list is the authoritative, schema-derived help source; do not maintain a second parameter registry.
+  for (const [name, actions, required] of [
+    ["memmy_project_manage", ["plan", "execute"], ["action"]],
+    ["memhub_todo", ["list", "add", "complete", "reopen"], ["action"]],
+    ["memhub_skill", ["load", "record", "status"], ["action", "skill_id"]],
+    ["memhub_distill", ["audit", "discover", "recover_ingest", "reconcile_derived", "reconcile_l4", "next", "renew", "submit", "skip"], []]
+  ]) {
+    const schema = listed.tools.find((tool) => tool.name === name)?.inputSchema;
+    assert.ok(schema, `${name} must expose its live input schema`);
+    for (const action of actions) assert.ok(schema.properties.action.enum.includes(action), `${name} schema must advertise ${action}`);
+    assert.deepEqual(schema.required ?? [], required);
+    assert.equal(schema.additionalProperties, false);
+  }
+  const distillHelp = listed.tools.find((tool) => tool.name === "memhub_distill").inputSchema;
+  assert.equal(distillHelp.properties.event_id.type, "string");
+  assert.equal(distillHelp.properties.lease_token.type, "string");
+  assert.equal(distillHelp.properties.lease_token_supported.type, "boolean");
+  assert.equal(distillHelp.properties.lease_seconds.minimum, 30);
   let projectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "ExampleProject" } })).content[0].text);
   if (!projectList.projects.some((project) => project.project === "ExampleProject")) {
     const createPlan = JSON.parse((await client.callTool({
@@ -1924,6 +2263,13 @@ async function exerciseClient(client, conversationId, stateRoot) {
     projectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "ExampleProject" } })).content[0].text);
   }
   assert.ok(projectList.projects.some((project) => project.project === "ExampleProject"));
+  const distillationAudit = JSON.parse((await client.callTool({
+    name: "memhub_distill", arguments: { action: "audit" }
+  })).content[0].text);
+  assert.equal(distillationAudit.source, "read_only_durable_state");
+  assert.equal(distillationAudit.account_scoped, true);
+  assert.equal(distillationAudit.bridge.inspected, false,
+    "Gateway must not inspect an unrelated default Bridge home without explicit service configuration");
   assert.equal(projectList.matches[0]?.project, "ExampleProject");
   let workspaceProjectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "memhub" } })).content[0].text);
   if (!workspaceProjectList.projects.some((project) => project.project === "memhub")) {
@@ -2056,6 +2402,11 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: { action: "list", project: "ExampleProject", status: "all" }
   })).content[0].text);
   assert.equal(baselineTodos.project, "ExampleProject");
+  const blankTodo = await client.callTool({
+    name: "memhub_todo", arguments: { action: "add", project: "ExampleProject", text: "   " }
+  });
+  assert.equal(blankTodo.isError, true);
+  assert.match(blankTodo.content[0].text, /text.*required|text.*non-empty/i);
   const baselinePendingCount = baselineTodos.pending_count;
   const baselineTotalCount = baselineTodos.total;
   const addedTodo = JSON.parse((await client.callTool({
@@ -2093,6 +2444,13 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(completedTodo.todo.status, "done");
   assert.ok(completedTodo.todo.completedAt);
   assert.equal(completedTodo.pending_count, baselinePendingCount);
+  const repeatedComplete = JSON.parse((await client.callTool({
+    name: "memhub_todo",
+    arguments: { action: "complete", project: "ExampleProject", todo_id: addedTodo.todo.id }
+  })).content[0].text);
+  assert.equal(repeatedComplete.todo.completedAt, completedTodo.todo.completedAt);
+  assert.equal(repeatedComplete.todo.updatedAt, completedTodo.todo.updatedAt);
+  assert.equal(repeatedComplete.pending_count, baselinePendingCount);
   const reopenedTodo = JSON.parse((await client.callTool({
     name: "memhub_todo",
     arguments: { action: "reopen", project: "ExampleProject", todo_id: addedTodo.todo.id }
@@ -2160,13 +2518,34 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(unresolved.recallScope, "global_only");
   assert.ok(unresolved.projectCandidates.some((project) => project.project === "ExampleProject"));
   assert.ok(unresolved.projectCandidates.every((project) => project.relevantTodos === undefined));
+  const unchangedUpdate = await client.callTool({
+    name: "memmy_project_manage",
+    arguments: { action: "plan", operation: "update", project: "ExampleProject", name: projectList.projects.find((item) => item.project === "ExampleProject").name }
+  });
+  assert.equal(unchangedUpdate.isError, true);
+  assert.match(unchangedUpdate.content[0].text, /no effective changes/);
+  const invalidAliases = await client.callTool({
+    name: "memmy_project_manage",
+    arguments: { action: "plan", operation: "update", project: "ExampleProject", aliases: ["valid", 42] }
+  });
+  assert.equal(invalidAliases.isError, true);
+  const blankAlias = await client.callTool({
+    name: "memmy_project_manage",
+    arguments: { action: "plan", operation: "update", project: "ExampleProject", aliases: ["valid", ""] }
+  });
+  assert.equal(blankAlias.isError, true);
+  assert.match(blankAlias.content[0].text, /aliases must contain only non-empty strings/);
+  const updatedDescription = projectList.projects.find((item) => item.project === "ExampleProject").description ===
+    "ExampleProject project used by MCP integration tests (verified)."
+    ? "ExampleProject project used by MCP integration tests (reverified)."
+    : "ExampleProject project used by MCP integration tests (verified).";
   const updatePlanResult = await client.callTool({
     name: "memmy_project_manage",
     arguments: {
       action: "plan",
       operation: "update",
       project: "ExampleProject",
-      description: "ExampleProject project used by MCP integration tests."
+      description: updatedDescription
     }
   });
   const updatePlan = JSON.parse(updatePlanResult.content[0].text);
@@ -2598,6 +2977,12 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(loadedSkill.metadata.loadRequired, true);
   assert.equal(loadedSkill.metadata.scope, "project:ExampleProject");
 
+  const invalidSkillRecord = await client.callTool({
+    name: "memhub_skill", arguments: { action: "record", skill_id: skillRecord.id, stage: "success" }
+  });
+  assert.equal(invalidSkillRecord.isError, true);
+  assert.match(invalidSkillRecord.content[0].text, /execution_id/);
+
   const invokedSkill = JSON.parse((await client.callTool({
     name: "memhub_skill",
     arguments: {
@@ -2783,12 +3168,42 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
   }));
   assert.equal(exampleL2V1.kind, "l2");
   assert.equal(exampleL2V1.next_layer_job.job.target, "l3");
+  const derivedDryRun = parseTool(await client.callTool({
+    name: "memhub_distill",
+    arguments: {
+      action: "reconcile_derived",
+      job_id: exampleNext.job.job_id,
+      project: "ExampleProject"
+    }
+  }));
+  assert.equal(derivedDryRun.dry_run, true, "reconcile_derived must default to read-only");
+  assert.equal(derivedDryRun.already_queued, true);
+  assert.equal(derivedDryRun.derived_job_id, exampleL2V1.next_layer_job.job.job_id);
+  const foreignRepair = await client.callTool({
+    name: "memhub_distill",
+    arguments: {
+      action: "reconcile_derived",
+      job_id: exampleNext.job.job_id,
+      project: "nonexistent-project",
+      dry_run: false
+    }
+  });
+  assert.equal(foreignRepair.isError, true, "foreign or unknown projects cannot repair another project's queue");
+  const missingRepairProject = await client.callTool({
+    name: "memhub_distill",
+    arguments: {
+      action: "reconcile_derived",
+      job_id: exampleNext.job.job_id,
+      dry_run: false
+    }
+  });
+  assert.equal(missingRepairProject.isError, true, "repair requires an explicit project");
   const exampleAfterDistilledDescription = parseTool(await client.callTool({
     name: "memmy_project_list",
     arguments: { query: "ExampleProject" }
   })).projects.find((project) => project.project === "ExampleProject");
   assert.ok(exampleAfterDistilledDescription);
-  assert.equal(exampleAfterDistilledDescription.description, "ExampleProject project used by MCP integration tests.");
+  assert.match(exampleAfterDistilledDescription.description, /^ExampleProject project used by MCP integration tests \((?:re)?verified\)\.$/);
   assert.equal(exampleAfterDistilledDescription.descriptionSource, "manual");
   assert.match(exampleAfterDistilledDescription.distilledDescription, /AI development environment focused on project-scoped orchestration/);
   const exampleL2Id = exampleL2V1.memory.id;
@@ -2894,6 +3309,18 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
   }));
   assert.equal(betaL3.next_layer_job.job.target, "l4");
   const betaL3Id = betaL3.memory.id;
+  const l4RepairDryRun = parseTool(await client.callTool({
+    name: "memhub_distill",
+    arguments: {
+      action: "reconcile_l4",
+      job_id: betaL3Next.job.job_id
+    }
+  }));
+  assert.equal(l4RepairDryRun.dry_run, true, "reconcile_l4 must default to read-only");
+  assert.equal(l4RepairDryRun.already_queued, true);
+  assert.equal(l4RepairDryRun.derived_job_id, betaL3.next_layer_job.job.job_id);
+  assert.equal(l4RepairDryRun.current_projects.length, 2);
+  assert.equal(l4RepairDryRun.core_replayed, false);
 
   const l4NextV1 = parseTool(await client.callTool({
     name: "memhub_distill",
@@ -2986,6 +3413,17 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
   }));
   assert.equal(exampleL3V2.memory.id, exampleL3Id);
   assert.equal(exampleL3V2.next_layer_job.job.target, "l4");
+  const staleL4Repair = await client.callTool({
+    name: "memhub_distill",
+    arguments: {
+      action: "reconcile_l4",
+      job_id: exampleL3Next.job.job_id,
+      dry_run: false
+    }
+  });
+  assert.equal(staleL4Repair.isError, true,
+    "an older project L3 cannot authorize the current account L4 evidence set");
+  assert.match(staleL4Repair.content[0].text, /not the current latest result/i);
 
   const l4NextV2 = parseTool(await client.callTool({
     name: "memhub_distill",

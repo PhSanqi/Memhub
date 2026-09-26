@@ -101,7 +101,10 @@ async function staleLockCanBeRemoved(lockPath: string): Promise<boolean> {
   try {
     await stat(lockPath);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return true;
+    // A vanished lock is NOT a stale lock to reclaim: another contender can
+    // acquire it immediately. Returning true here would let a reclaimer
+    // unlink the newly acquired live owner's lock (ABA race).
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false;
     throw error;
   }
 

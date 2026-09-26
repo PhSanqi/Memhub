@@ -14,7 +14,7 @@ Memhub gives ChatGPT, Codex, MCP clients, and other AI harnesses a durable memor
 
 It keeps original conversation evidence, builds a chronological project history, distills durable project knowledge, maintains a carefully scoped cross-project profile, and exposes reusable Skills, project Todos, retrieval, provenance, and a browser workspace from one self-hosted runtime.
 
-- **Current release:** v0.2.5
+- **Current release:** v0.2.6
 - **Canonical hosted deployment:** https://memory.example.com/
 - **Downloads:** https://github.com/PhSanqi/Memhub/releases
 
@@ -120,6 +120,11 @@ git clone https://github.com/PhSanqi/Memhub.git
 cd Memhub
 bash editions/local/linux/install.sh
 ```
+
+The Linux Local/Server edition installers are **fresh-install only**. They
+refuse an existing StateRoot or Memhub systemd unit before changing credentials,
+data, or services. Do not rerun them to upgrade an existing deployment; preserve
+the current state and use a separately reviewed migration procedure.
 
 See [Documentation](docs/README.md) for Server deployment, Windows, authentication, Cloudflare, migration, and architecture.
 

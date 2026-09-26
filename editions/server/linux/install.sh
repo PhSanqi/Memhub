@@ -8,12 +8,26 @@ SERVER_STATE="$STATE_ROOT/server"
 MEMORY_DIR="$STATE_ROOT/memory"
 CONFIG_PATH="$STATE_ROOT/memory-config.yaml"
 ENV_PATH="$STATE_ROOT/server.env"
+UNIT_DIR="$HOME/.config/systemd/user"
 BUNDLED_NODE="$REPO_ROOT/runtime/node"
 NODE="${NODE:-$([[ -x "$BUNDLED_NODE" ]] && printf '%s' "$BUNDLED_NODE" || command -v node || true)}"
 NPM="${NPM:-$(command -v npm || true)}"
 USERNAME="${MEMHUB_USERNAME:-owner}"
 EMAIL="${MEMHUB_EMAIL:-}"
 PUBLIC_HOST="${MEMHUB_PUBLIC_HOST:-}"
+
+# Fresh installs only: do not rotate an existing Core token or replace
+# configuration, data, credentials, or another edition's systemd units.
+if [[ -e "$STATE_ROOT" || -L "$STATE_ROOT" ]]; then
+  echo "[memhub] Existing state root; fresh installer refuses to overwrite it. Use a reviewed upgrade procedure." >&2
+  exit 2
+fi
+for unit in memhub-core.service memhub.service memhub-local.service memhub-server.service memhub-bridge.service memhub-stack.target memhub-local-stack.target memhub-server-stack.target; do
+  if [[ -e "$UNIT_DIR/$unit" || -L "$UNIT_DIR/$unit" ]]; then
+    echo "[memhub] Existing Memhub systemd unit ($unit); refusing fresh install." >&2
+    exit 2
+  fi
+done
 
 [[ -n "$NODE" ]] || { echo "Node.js 20+ is required" >&2; exit 2; }
 if [[ ! -d "$REPO_ROOT/node_modules" ]]; then
@@ -27,7 +41,9 @@ if [[ ! -f "$REPO_ROOT/vendor/memory-core/src/server/index.js" || ! -f "$REPO_RO
   (cd "$REPO_ROOT" && npm run build)
 fi
 
-mkdir -p "$STATE_ROOT" "$SERVER_STATE" "$MEMORY_DIR" "$HOME/.config/systemd/user"
+mkdir -p "$(dirname "$STATE_ROOT")"
+mkdir -m 700 "$STATE_ROOT"
+mkdir -p "$SERVER_STATE" "$MEMORY_DIR" "$UNIT_DIR"
 chmod 700 "$STATE_ROOT" "$SERVER_STATE" "$MEMORY_DIR"
 MEMORY_TOKEN="$("$NODE" -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
 "$NODE" - "$CONFIG_PATH" "$MEMORY_DIR/memory.sqlite" "$MEMORY_TOKEN" <<'NODE'

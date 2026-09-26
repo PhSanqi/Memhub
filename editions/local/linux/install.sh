@@ -8,9 +8,24 @@ SERVER_STATE="$STATE_ROOT/server"
 MEMORY_DIR="$STATE_ROOT/memory"
 CONFIG_PATH="$STATE_ROOT/memory-config.yaml"
 ENV_PATH="$STATE_ROOT/local.env"
+UNIT_DIR="$HOME/.config/systemd/user"
 BUNDLED_NODE="$REPO_ROOT/runtime/node"
 NODE="${NODE:-$([[ -x "$BUNDLED_NODE" ]] && printf '%s' "$BUNDLED_NODE" || command -v node || true)}"
 NPM="${NPM:-$(command -v npm || true)}"
+
+# Fresh installs only: a reinstall must never silently rotate the Core token,
+# replace a protected configuration or take over an existing systemd stack.
+# Check before dependency installation, account creation or any state writes.
+if [[ -e "$STATE_ROOT" || -L "$STATE_ROOT" ]]; then
+  echo "[memhub] Existing state root; fresh installer refuses to overwrite it. Use a reviewed upgrade procedure." >&2
+  exit 2
+fi
+for unit in memhub-core.service memhub.service memhub-local.service memhub-server.service memhub-bridge.service memhub-stack.target memhub-local-stack.target memhub-server-stack.target; do
+  if [[ -e "$UNIT_DIR/$unit" || -L "$UNIT_DIR/$unit" ]]; then
+    echo "[memhub] Existing Memhub systemd unit ($unit); refusing fresh install." >&2
+    exit 2
+  fi
+done
 
 [[ -n "$NODE" ]] || { echo "Node.js 20+ is required" >&2; exit 2; }
 ensure_build() {
@@ -27,7 +42,9 @@ ensure_build() {
 }
 
 ensure_build
-mkdir -p "$STATE_ROOT" "$SERVER_STATE" "$MEMORY_DIR" "$HOME/.config/systemd/user"
+mkdir -p "$(dirname "$STATE_ROOT")"
+mkdir -m 700 "$STATE_ROOT"
+mkdir -p "$SERVER_STATE" "$MEMORY_DIR" "$UNIT_DIR"
 chmod 700 "$STATE_ROOT" "$SERVER_STATE" "$MEMORY_DIR"
 
 MEMORY_TOKEN="$("$NODE" -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"

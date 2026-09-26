@@ -335,6 +335,8 @@ export class JsonProjectRegistry {
       const project = requireActive(file, account, projectId);
       const todo = (project.todos ?? []).find((item) => item.id === todoId);
       if (!todo) throw new Error(`project todo not found: ${todoId}`);
+      // Repeated complete/reopen is idempotent: do not manufacture a new change timestamp.
+      if (todo.status === status) return stripAccount(project);
       const now = new Date().toISOString();
       todo.status = status;
       todo.updatedAt = now;

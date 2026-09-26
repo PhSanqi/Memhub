@@ -25,6 +25,12 @@ if [[ ! -f "$HOME/.config/systemd/user/memhub-stack.target" ]]; then
   exit 2
 fi
 
+if [[ -e "$HOME/.config/systemd/user/memhub-bridge.service" ||
+      -L "$HOME/.config/systemd/user/memhub-bridge.service" ]]; then
+  echo "[memhub] Existing Bridge systemd unit; refusing to overwrite it. Use a reviewed upgrade procedure." >&2
+  exit 2
+fi
+
 mkdir -p "$HOME/.config/systemd/user" "$HOME/.memhub"
 chmod 700 "$HOME/.memhub"
 
