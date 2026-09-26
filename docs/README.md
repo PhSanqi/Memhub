@@ -31,6 +31,7 @@ Edition-specific packaging notes live under [../editions/](../editions/).
 - [Remote authentication](operations/remote-auth.md)
 - [Cloudflare Tunnel](operations/cloudflare-tunnel.md)
 - [Memory Core migration](operations/migration.md)
+- [2026-09-27 candidate acceptance and outstanding production gates](operations/release-acceptance-2026-09-27.md) — dated QA evidence, not a release approval.
 
 The canonical hosted project deployment is **https://memory.example.com/**. Self-hosted documentation uses `memory.example.com` as a placeholder.
 

@@ -60,7 +60,13 @@ for (const path of [
   "install-complete.ps1",
   "scripts/package-complete-release.mjs",
   "scripts/package-all-release.mjs",
-  "scripts/complete-runtime-smoke.cjs"
+  "scripts/complete-runtime-smoke.cjs",
+  "scripts/run-stack.mjs",
+  "scripts/windows-task-ownership.ps1",
+  "scripts/windows-stack-owner.ps1",
+  "scripts/windows-memory-credentials.ps1",
+  "scripts/windows-legacy-migration-audit.ps1",
+  "scripts/windows-legacy-migration-plan.ps1"
 ]) assertTracked(path);
 
 if (CHECK_ONLY) {

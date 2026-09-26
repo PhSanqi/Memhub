@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.2.6 — 2026-09-27
+
+This release consolidates the L1 Capture → Core ingestion → distillation queue
+recovery fixes, stricter Core/Gateway authentication and failure reporting,
+and fail-closed deployment and process ownership checks. The memory hierarchy
+and existing account/project identity boundaries remain unchanged.
+
+### Capture, distillation and safety
+
+- Preserve immutable Core ingest intent and idempotent request identity across
+  crashes, retries and concurrent recovery. Only durable Core-ingested evidence
+  can be reconciled into the L2 queue; ambiguous legacy records remain subject
+  to individual review instead of automatic bulk replay.
+- Add fault-injection and real-Core integration regressions for Core/marker/
+  enqueue crash windows, concurrent discovery and lease handling, L3/L4
+  continuation and recovery, plus HTTP/MCP error classification.
+- Keep the ExternalMemory active-writer guard fail-closed when the lock or owner
+  cannot be confidently reconciled. No release script clears a writer lock.
+
+### Install, recovery and cross-platform QA
+
+- Make Linux fresh-install entrypoints reject existing state or conflicting
+  user systemd units rather than rotate credentials or overwrite routes.
+  Provide a separate read-only generic Linux preflight covering credentials,
+  service dependencies, exact paths and protected state.
+- Exercise consistent Core and Capture-index SQLite WAL backups and rollback
+  with disposable data. A separate real-source v0.2.2 → v0.2.6 → restored
+  v0.2.2 Linux Core/Gateway rehearsal confirms device-authenticated Capture
+  and retained historical account, token and L1 state.
+- Move Windows Local/Server old-task ownership checks before StateRoot
+  creation, dependency preparation or credential writes; recheck the task set
+  before adoption. Actual PowerShell installer refusal is exercised on Windows
+  with a Task Scheduler shim. Real legacy task migration remains gated on
+  exact target identity, backup and independent cutover verification.
+- Document release versus deployment evidence in
+  `docs/operations/release-acceptance-2026-09-27.md`. A package or code
+  passing tests does not by itself certify a production cutover.
+
 ## v0.2.5 — 2026-09-25
 
 Memhub 0.2.5 is a release-hygiene pass over the current v0.2 runtime. It does not introduce a new memory hierarchy; it makes the repository, documentation, release packages, and hosted entrypoint match the production system that is already running. The v0.2.3/v0.2.4 source checkpoints were not published as releases after Windows Complete smoke exposed packaging and installer issues.

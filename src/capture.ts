@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import Database from "better-sqlite3";
@@ -186,12 +187,21 @@ export async function storeCaptureEvent(
       if (existing.account_id !== device.account_id) throw new Error("capture event account mismatch");
       if (existing.device_id !== device.device_id) throw new Error("capture event device mismatch");
       const merged = mergeCaptureEvent(existing, event);
+      const alreadyIngested = await isCaptureIngested(stateRoot, device.account_id, existing.event_id);
       if (!merged.updated) {
-        await upsertCaptureIndexUnlocked(stateRoot, existing, await isCaptureIngested(stateRoot, device.account_id, existing.event_id));
+        await assertCaptureIngestIntent(path, existing);
+        await upsertCaptureIndexUnlocked(stateRoot, existing, alreadyIngested);
         return { created: false, updated: false, event: existing };
+      }
+      // The Core request ID is tied to this event, so a changed payload after
+      // ingestion cannot be replayed safely. Reject late enrichment instead of
+      // letting the local capture diverge from durable Core evidence.
+      if (alreadyIngested) {
+        throw new Error("capture event already ingested; immutable event metadata cannot be changed");
       }
       const updated: StoredCaptureEvent = { ...existing, ...merged.event };
       assertCaptureCompleteness(updated);
+      await assertCaptureIngestIntent(path, updated);
       await markCaptureIndexDirty(stateRoot, device.account_id, event.event_id);
       await writeStoredCapture(path, updated);
       await upsertCaptureIndexUnlocked(stateRoot, updated);
@@ -207,6 +217,99 @@ export async function storeCaptureEvent(
     await clearCaptureIndexDirty(stateRoot, device.account_id, event.event_id);
     return { created: true, updated: false, event: stored };
   });
+}
+
+/**
+ * Serialize same-event Core attempts and freeze the complete payload before
+ * the first upstream write. Both the HTTP capture and explicit recovery
+ * paths must use this entry point; a crash leaves a durable intent to fence
+ * later enrichment against the original deterministic Core request ID.
+ */
+export async function withCaptureIngestAttempt<T extends { ingested: boolean }>(input: {
+  stateRoot: string;
+  accountId: string;
+  eventId: string;
+  expectedEvent: StoredCaptureEvent;
+  ingest: (event: StoredCaptureEvent) => Promise<T>;
+}): Promise<{ alreadyIngested: boolean; event: StoredCaptureEvent; result?: T }> {
+  const { stateRoot, accountId, eventId } = input;
+  const path = captureEventPath(stateRoot, accountId, eventId);
+  return withFileMutationLock(`${path}.ingest-attempt`, async () => {
+    const snapshot = await withCaptureIndexMutation(stateRoot, async () => {
+      await ensureCaptureIndexUnlocked(stateRoot, accountId);
+      const event = normalizeStoredCapture(JSON.parse(await readFile(path, "utf8")) as unknown);
+      if (event.account_id !== accountId || event.event_id !== eventId ||
+          capturePayloadHash(event) !== capturePayloadHash(input.expectedEvent)) {
+        throw new Error("capture changed before ingestion; retry with current durable event");
+      }
+      const alreadyIngested = await isCaptureIngested(stateRoot, accountId, eventId);
+      if (!alreadyIngested && event.capture_status === "complete") {
+        assertCaptureCompleteness(event);
+        const intent = `${path}.ingest-intent`;
+        const hash = capturePayloadHash(event);
+        try {
+          const existing = (await readFile(intent, "utf8")).trim();
+          if (existing !== hash) throw new Error("capture ingest intent/payload conflict; manual review required");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+          // Exclusive create, with the index mutation lock held. If a crash
+          // leaves a partial intent, later attempts fail closed.
+          await writeFile(intent, hash + "\n", { flag: "wx", mode: 0o600 });
+        }
+      }
+      return { event, alreadyIngested };
+    });
+    if (snapshot.alreadyIngested) return snapshot;
+    const result = await input.ingest(snapshot.event);
+    if (result.ingested) await markCaptureIngested(stateRoot, accountId, eventId);
+    return { ...snapshot, result };
+  });
+}
+
+async function assertCaptureIngestIntent(path: string, event: StoredCaptureEvent): Promise<void> {
+  try {
+    if ((await readFile(`${path}.ingest-intent`, "utf8")).trim() !== capturePayloadHash(event)) {
+      throw new Error("capture ingestion already attempted; immutable event metadata cannot be changed");
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+  }
+}
+
+/** Read-only classification of a pre-marker Core attempt; never creates or repairs an intent. */
+export async function readCaptureIngestIntentStatus(
+  stateRoot: string, accountId: string, eventId: string
+): Promise<"absent" | "matching" | "conflict"> {
+  const path = captureEventPath(stateRoot, accountId, eventId);
+  const event = normalizeStoredCapture(JSON.parse(await readFile(path, "utf8")) as unknown);
+  if (event.account_id !== accountId || event.event_id !== eventId || event.capture_status !== "complete") {
+    throw new Error("capture audit index/event mismatch; repair separately");
+  }
+  let intent: string;
+  try {
+    intent = (await readFile(`${path}.ingest-intent`, "utf8")).trim();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return "absent";
+    throw error;
+  }
+  if (!/^[0-9a-f]{64}$/.test(intent) || intent !== capturePayloadHash(event)) {
+    return "conflict";
+  }
+  return "matching";
+}
+
+function capturePayloadHash(event: StoredCaptureEvent): string {
+  // Deterministic across JSON key ordering and nested provenance objects.
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, item]) => [key, canonical(item)]));
+    }
+    return value;
+  };
+  const { ingested: _ingested, ...persistent } = event as StoredCaptureEvent & { ingested?: boolean };
+  return createHash("sha256").update(JSON.stringify(canonical(persistent)), "utf8").digest("hex");
 }
 
 function assertCaptureCompleteness(event: MemhubCaptureEvent): void {
@@ -240,7 +343,20 @@ export async function markCaptureIngested(stateRoot: string, accountId: string, 
     await ensureCaptureIndexUnlocked(stateRoot, accountId);
     await markCaptureIndexDirty(stateRoot, accountId, eventId);
     const path = `${captureEventPath(stateRoot, accountId, eventId)}.ingested`;
-    await writeFile(path, new Date().toISOString() + "\n", { mode: 0o600 });
+    // The marker is the durable ingestion cutover. Replays must not advance
+    // its timestamp and incorrectly turn pre-cutover evidence into new work.
+    try {
+      await readFile(path, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
+      try {
+        await writeFile(temporary, new Date().toISOString() + "\n", { mode: 0o600, flag: "wx" });
+        await rename(temporary, path);
+      } finally {
+        await rm(temporary, { force: true }).catch(() => undefined);
+      }
+    }
     await markCaptureIndexIngestedUnlocked(stateRoot, accountId, eventId);
     await clearCaptureIndexDirty(stateRoot, accountId, eventId);
   });
@@ -321,6 +437,7 @@ export async function listCaptureEvents(
   stateRoot: string,
   accountIdRaw?: string,
   options: {
+    eventId?: string;
     conversationId?: string;
     continuityId?: string;
     projectId?: string | null;
@@ -341,10 +458,104 @@ export async function listCaptureEvents(
   return results;
 }
 
+/**
+ * A diagnostic-only snapshot. Unlike listCaptureEvents/captureIndexStats,
+ * this never creates or rebuilds the index, acquires its mutation lock, or
+ * modifies the capture tree. A missing/dirty index is an explicit error:
+ * silently rebuilding during a "read-only" production audit is unsafe.
+ */
+export async function readCaptureAuditSnapshot(stateRoot: string, accountId: string): Promise<{
+  stats: CaptureIndexStats;
+  completeUningested: CaptureIndexEntry[];
+  ingestedComplete: Array<StoredCaptureEvent & { ingested: true }>;
+}> {
+  if (!existsSync(captureIndexPath(stateRoot))) {
+    const accountCaptureDir = dirname(captureEventPath(stateRoot, accountId, "probe"));
+    const files = await readdir(accountCaptureDir).catch((error) => {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [] as string[];
+      throw error;
+    });
+    if (files.some((file) => file.endsWith(".json"))) {
+      throw new Error("capture audit requires an existing clean index; repair separately before read-only audit");
+    }
+    return {
+      stats: { total: 0, complete: 0, incomplete: 0, ingested: 0, not_ingested: 0 },
+      completeUningested: [], ingestedComplete: []
+    };
+  }
+  let entries: CaptureIndexEntry[];
+  for (let attempt = 0; ; attempt += 1) {
+    const db = new Database(captureIndexPath(stateRoot), { readonly: true, fileMustExist: true });
+    try {
+      const known = db.prepare("SELECT 1 FROM capture_index_accounts WHERE account_id=?").get(accountId);
+      const dirty = db.prepare("SELECT 1 FROM capture_index_dirty WHERE account_id=? LIMIT 1").get(accountId);
+      if (!known) {
+        const accountCaptureDir = dirname(captureEventPath(stateRoot, accountId, "probe"));
+        const rawFiles = await readdir(accountCaptureDir).catch((error) => {
+          if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [] as string[];
+          throw error;
+        });
+        if (rawFiles.some((file) => file.endsWith(".json"))) {
+          throw new Error("capture audit requires an existing clean index; repair separately before read-only audit");
+        }
+        return {
+          stats: { total: 0, complete: 0, incomplete: 0, ingested: 0, not_ingested: 0 },
+          completeUningested: [], ingestedComplete: []
+        };
+      }
+      if (dirty) {
+        // A legitimate writer can expose the durable dirty sentinel for a
+        // very short window. Remain strictly read-only, but allow that writer
+        // to finish before declaring the index broken. A persistent dirty
+        // sentinel still fails closed.
+        if (attempt >= 9) {
+          throw new Error("capture audit requires an existing clean index; repair separately before read-only audit");
+        }
+      } else {
+        entries = (db.prepare(`SELECT account_id,event_id,conversation_id,continuity_id,timestamp,project_hint,capture_status,ingested
+          FROM capture_index WHERE account_id=? ORDER BY timestamp DESC`).all(accountId) as Array<Record<string, unknown>>)
+          .map(captureIndexEntryFromRow);
+        break;
+      }
+    } finally {
+      db.close();
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+  }
+  const stats: CaptureIndexStats = {
+    total: entries.length,
+    complete: entries.filter((entry) => entry.capture_status === "complete").length,
+    incomplete: entries.filter((entry) => entry.capture_status !== "complete").length,
+    ingested: entries.filter((entry) => entry.ingested).length,
+    not_ingested: entries.filter((entry) => !entry.ingested).length
+  };
+  const completeUningested = entries.filter((entry) => entry.capture_status === "complete" && !entry.ingested);
+  const ingestedComplete: Array<StoredCaptureEvent & { ingested: true }> = [];
+  for (const entry of entries) {
+    const markerExists = await isCaptureIngested(stateRoot, accountId, entry.event_id);
+    if (markerExists !== entry.ingested) {
+      throw new Error("capture audit index/marker mismatch; repair separately");
+    }
+    if (markerExists && !(await captureIngestedAt(stateRoot, accountId, entry.event_id))) {
+      throw new Error("capture audit ingestion marker has invalid timestamp; manual repair required");
+    }
+    if (!entry.ingested || entry.capture_status !== "complete") continue;
+    const event = normalizeStoredCapture(JSON.parse(await readFile(
+      captureEventPath(stateRoot, accountId, entry.event_id), "utf8"
+    )) as unknown);
+    if (event.account_id !== accountId || event.event_id !== entry.event_id || event.capture_status !== "complete") {
+      throw new Error("capture audit index/event mismatch; repair separately");
+    }
+    ingestedComplete.push({ ...event, ingested: true });
+  }
+  return { stats, completeUningested, ingestedComplete };
+}
+
 export async function listCaptureIndexEntries(
   stateRoot: string,
   accountIdRaw?: string,
   options: {
+    eventId?: string;
     conversationId?: string;
     continuityId?: string;
     projectId?: string | null;
@@ -362,6 +573,7 @@ export async function listCaptureIndexEntries(
       const where: string[] = [];
       const params: Array<string | number> = [];
       if (accountIdRaw?.trim()) { where.push("account_id=?"); params.push(accountIdRaw.trim()); }
+      if (options.eventId) { where.push("event_id=?"); params.push(options.eventId); }
       if (options.conversationId) { where.push("conversation_id=?"); params.push(options.conversationId); }
       if (options.continuityId) { where.push("continuity_id=?"); params.push(options.continuityId); }
       if (options.projectId !== undefined) {

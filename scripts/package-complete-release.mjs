@@ -49,6 +49,17 @@ const pluginJson = JSON.parse(sourceText("adapters/plugin/plugin.json"));
 if (pluginJson.version !== version) throw new Error(`version mismatch: package=${version}, plugin=${pluginJson.version}`);
 
 for (const path of [...commonPaths, "scripts/complete-runtime-smoke.cjs"]) assertSource(path);
+// These installer helpers are indirect PowerShell dot-sources; a missing
+// helper can pass a Node/native smoke test but make the shipped installer
+// fail only when an owner already exists.
+for (const path of [
+  "scripts/run-stack.mjs",
+  "scripts/windows-task-ownership.ps1",
+  "scripts/windows-stack-owner.ps1",
+  "scripts/windows-memory-credentials.ps1",
+  "scripts/windows-legacy-migration-audit.ps1",
+  "scripts/windows-legacy-migration-plan.ps1"
+]) assertSource(path);
 for (const target of targets) {
   for (const edition of ["local", "server"]) {
     assertSource(`editions/${edition}/README.md`);
@@ -204,6 +215,16 @@ async function installWindowsBetterSqlite(stage) {
 async function validateWindowsStage(stage) {
   const required = [
     "runtime/node/node.exe",
+    "scripts/run-stack.mjs",
+    "scripts/windows-task-ownership.ps1",
+    "scripts/windows-stack-owner.ps1",
+    "scripts/windows-memory-credentials.ps1",
+    "scripts/windows-legacy-migration-audit.ps1",
+    "scripts/windows-legacy-migration-plan.ps1",
+    "editions/local/windows/install.ps1",
+    "editions/server/windows/install.ps1",
+    "editions/local/windows/uninstall.ps1",
+    "editions/server/windows/uninstall.ps1",
     "dist/mcp.js",
     "dist/bridge.js",
     "node_modules/better-sqlite3/build/Release/better_sqlite3.node",

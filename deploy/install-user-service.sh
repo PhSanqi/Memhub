@@ -32,6 +32,17 @@ if [[ ! -f "$MEMHUB_DIR/vendor/memory-core/src/server/index.js" ]]; then
   exit 2
 fi
 
+# This script installs a fresh unit set, not an in-place upgrade. Refuse any
+# existing Memhub unit before writing state or replacing a service definition.
+# Even a dangling symlink is an occupied unit path.
+UNIT_DIR="$HOME/.config/systemd/user"
+for unit in memhub-core.service memhub.service memhub-bridge.service memhub-stack.target memhub-local.service memhub-server.service memhub-local-stack.target memhub-server-stack.target; do
+  if [[ -e "$UNIT_DIR/$unit" || -L "$UNIT_DIR/$unit" ]]; then
+    echo "[memhub] Existing Memhub systemd unit ($unit); refusing fresh install. Use a reviewed upgrade procedure." >&2
+    exit 2
+  fi
+done
+
 mkdir -p "$HOME/.config/systemd/user" "$HOME/.memmy/memhub"
 chmod 700 "$HOME/.memmy/memhub"
 

@@ -43,11 +43,13 @@ export interface DistillationJob {
   lease_token?: string;
   completed_at?: string;
   failure?: string;
+  failure_kind?: "core_error" | "ambiguous_core_commit";
   failed_at?: string;
   attempts?: number;
   result_kind?: DistillationTarget | "noop";
   result_id?: string;
   result_content?: string;
+  result_committed_at?: string;
   evidence_refs: string[];
   evidence_hash: string;
   evidence: DistillationEvidenceItem[];
@@ -89,6 +91,44 @@ export async function listDistillationJobs(stateRoot: string, accountId?: string
   return store.jobs
     .filter((job) => !accountId || job.account_id === accountId)
     .sort((a, b) => b.created_at.localeCompare(a.created_at));
+}
+
+/**
+ * The current L3 artifact for a project is the one whose durable Core write
+ * was completed last, not necessarily the job that was created last.
+ * Concurrent workers can finish older-created jobs after newer-created jobs.
+ */
+export function latestCompletedL3ByProject(jobs: DistillationJob[]): DistillationJob[] {
+  const latest = new Map<string, DistillationJob>();
+  for (const job of jobs) {
+    if (job.status !== "completed" ||
+        job.result_kind !== "l3" ||
+        !job.project_id ||
+        !job.result_id?.trim() ||
+        !job.result_content?.trim() ||
+        !job.completed_at ||
+        !Number.isFinite(Date.parse(job.completed_at))) continue;
+    const previous = latest.get(job.project_id);
+    if (!previous || compareCompletedRevision(job, previous) > 0) {
+      latest.set(job.project_id, job);
+    }
+  }
+  return [...latest.values()].sort((a, b) => a.project_id!.localeCompare(b.project_id!));
+}
+
+function compareCompletedRevision(a: DistillationJob, b: DistillationJob): number {
+  return distillationResultTimestamp(a)!.localeCompare(distillationResultTimestamp(b)!) ||
+    a.created_at.localeCompare(b.created_at) ||
+    a.job_id.localeCompare(b.job_id);
+}
+
+export function distillationResultTimestamp(job: DistillationJob): string | undefined {
+  if (job.result_committed_at && Number.isFinite(Date.parse(job.result_committed_at))) {
+    return job.result_committed_at;
+  }
+  return job.completed_at && Number.isFinite(Date.parse(job.completed_at))
+    ? job.completed_at
+    : undefined;
 }
 
 export async function enqueueDistillationJob(input: {
@@ -200,24 +240,19 @@ export async function leaseDistillationJob(
   return withMutation(stateRoot, async () => {
     const store = await loadStore(stateRoot);
     const now = Date.now();
-    for (const job of store.jobs) {
-      if (job.status === "leased" && job.leased_until && Date.parse(job.leased_until) <= now) {
-        job.status = "pending";
-        delete job.leased_until;
-        delete job.leased_by;
-        delete job.lease_token;
-      }
-    }
     const job = store.jobs.find((item) =>
       item.account_id === accountId &&
-      item.status === "pending" &&
+      (
+        item.status === "pending" ||
+        (item.status === "leased" && Boolean(item.leased_until) && Date.parse(item.leased_until!) <= now)
+      ) &&
       (input.projectId === undefined || item.project_id === input.projectId) &&
       (input.target === undefined || item.target === input.target)
     );
-    if (!job) {
-      await saveStore(stateRoot, store);
-      return null;
-    }
+    if (!job) return null;
+    // Reassign an expired generation only when this exact job is actually
+    // selected. Leasing unrelated work must not erase another in-flight
+    // worker's opaque token before its external Core request returns.
     const seconds = Math.max(30, Math.min(900, Math.trunc(input.leaseSeconds ?? 300)));
     job.status = "leased";
     job.attempts = (job.attempts ?? 0) + 1;
@@ -258,6 +293,95 @@ export async function completeDistillationJob(
   return completed;
 }
 
+/**
+ * Record a Memory Core result that has already committed. With an opaque
+ * lease token, expiry alone must not erase a successful write: the token
+ * proves this is still the same lease generation unless another worker has
+ * actually reassigned the job. Legacy owner-only leases retain the stricter
+ * active-time requirement because same-owner reassignment is not fenced.
+ */
+export async function completeDistillationJobAfterCoreCommit(
+  stateRoot: string,
+  accountId: string,
+  jobId: string,
+  result: { kind: DistillationTarget; resultId: string; content: string; committedAt: string },
+  leaseOwner: string,
+  leaseToken?: string
+): Promise<DistillationJob> {
+  let completed!: DistillationJob;
+  await mutateJob(stateRoot, accountId, jobId, (job) => {
+    assertPostCoreCommitLeaseGeneration(job, leaseOwner, leaseToken);
+    job.status = "completed";
+    job.completed_at = new Date().toISOString();
+    job.updated_at = job.completed_at;
+    job.result_kind = result.kind;
+    job.result_id = result.resultId;
+    job.result_content = result.content;
+    job.result_committed_at = result.committedAt;
+    delete job.leased_until;
+    delete job.leased_by;
+    delete job.lease_token;
+    delete job.failure;
+    delete job.failed_at;
+    completed = structuredClone(job);
+  });
+  return completed;
+}
+
+/**
+ * A successful Core HTTP response without a stable artifact ID is an
+ * ambiguous commit, not a retryable Core failure. Fence that lease
+ * generation into failed/manual-review state so expiry cannot requeue it.
+ */
+export async function quarantineDistillationJobAfterCoreCommit(
+  stateRoot: string,
+  accountId: string,
+  jobId: string,
+  message: string,
+  leaseOwner: string,
+  leaseToken?: string,
+  committedAt?: string
+): Promise<void> {
+  await failDistillationJobForLeaseGeneration(
+    stateRoot, accountId, jobId, message, leaseOwner, leaseToken, "ambiguous_core_commit"
+  );
+  if (committedAt) {
+    await mutateJob(stateRoot, accountId, jobId, (job) => {
+      if (job.status !== "failed" || job.failure_kind !== "ambiguous_core_commit") {
+        throw new Error("ambiguous Core commit quarantine changed before timestamp recording");
+      }
+      job.result_committed_at = committedAt;
+    });
+  }
+}
+
+/**
+ * Preserve the current failed-job semantics for an external Core attempt
+ * even if its token-fenced lease crossed the wall-clock deadline while the
+ * request was in flight. A reassigned generation is still untouchable.
+ */
+export async function failDistillationJobForLeaseGeneration(
+  stateRoot: string,
+  accountId: string,
+  jobId: string,
+  message: string,
+  leaseOwner: string,
+  leaseToken?: string,
+  failureKind: "core_error" | "ambiguous_core_commit" = "core_error"
+): Promise<void> {
+  await mutateJob(stateRoot, accountId, jobId, (job) => {
+    assertPostCoreCommitLeaseGeneration(job, leaseOwner, leaseToken);
+    job.status = "failed";
+    job.failure = message.slice(0, 2000);
+    job.failure_kind = failureKind;
+    job.failed_at = new Date().toISOString();
+    job.updated_at = job.failed_at;
+    delete job.leased_until;
+    delete job.leased_by;
+    delete job.lease_token;
+  });
+}
+
 export async function failDistillationJob(
   stateRoot: string,
   accountId: string,
@@ -270,6 +394,7 @@ export async function failDistillationJob(
     assertActiveDistillationLease(job, leaseOwner, leaseToken);
     job.status = "failed";
     job.failure = message.slice(0, 2000);
+    job.failure_kind = "core_error";
     job.failed_at = new Date().toISOString();
     job.updated_at = job.failed_at;
     delete job.leased_until;
@@ -288,6 +413,26 @@ export function assertActiveDistillationLease(job: DistillationJob, leaseOwner: 
   }
   if (job.lease_token && job.lease_token !== leaseToken) {
     throw new Error("distillation job lease token is missing or stale");
+  }
+}
+
+function assertPostCoreCommitLeaseGeneration(
+  job: DistillationJob,
+  leaseOwner: string,
+  leaseToken?: string
+): void {
+  if (job.status !== "leased") throw new Error(`distillation job is not leased: ${job.status}`);
+  if (job.leased_by !== leaseOwner) {
+    throw new Error(`distillation job is leased by another harness: ${job.leased_by ?? "unknown"}`);
+  }
+  if (job.lease_token) {
+    if (job.lease_token !== leaseToken) {
+      throw new Error("distillation job lease token is missing or stale");
+    }
+    return;
+  }
+  if (!job.leased_until || Date.parse(job.leased_until) <= Date.now()) {
+    throw new Error("legacy distillation lease expired after Core commit; manual reconciliation required");
   }
 }
 
@@ -311,13 +456,54 @@ export async function renewDistillationJobLease(
   return renewed;
 }
 
+/**
+ * Fence the external Memory Core request with enough lease budget to outlive
+ * the local Core client's bounded request timeout. Token-aware clients can
+ * safely extend the same generation. Legacy owner-only leases cannot prove
+ * same-owner generation after reassignment, so a near-expiry legacy submit
+ * must reacquire before it is allowed to write Core.
+ */
+export async function prepareDistillationLeaseForExternalWrite(
+  stateRoot: string,
+  accountId: string,
+  jobId: string,
+  leaseOwner: string,
+  leaseToken?: string,
+  minimumRemainingSeconds = 60
+): Promise<DistillationJob> {
+  let prepared!: DistillationJob;
+  await mutateJob(stateRoot, accountId, jobId, (job) => {
+    assertActiveDistillationLease(job, leaseOwner, leaseToken);
+    const now = Date.now();
+    const minimumMs = Math.max(30, Math.min(900, Math.trunc(minimumRemainingSeconds))) * 1000;
+    const remainingMs = Date.parse(job.leased_until!) - now;
+    if (!job.lease_token) {
+      if (remainingMs < minimumMs) {
+        throw new Error("legacy distillation lease is too close to expiry for an external Core write; reacquire the job first");
+      }
+      prepared = structuredClone(job);
+      return;
+    }
+    if (remainingMs < minimumMs) {
+      job.leased_until = new Date(now + minimumMs).toISOString();
+      job.updated_at = new Date(now).toISOString();
+    }
+    prepared = structuredClone(job);
+  });
+  return prepared;
+}
+
 export async function retryDistillationJob(stateRoot: string, accountId: string, jobId: string): Promise<DistillationJob> {
   let retried!: DistillationJob;
   await mutateJob(stateRoot, accountId, jobId, (job) => {
     if (job.status !== "failed") throw new Error("only failed distillation jobs can be retried");
+    if (job.failure_kind === "ambiguous_core_commit") {
+      throw new Error("ambiguous Core commit requires manual reconciliation; ordinary retry is disabled");
+    }
     job.status = "pending";
     job.updated_at = new Date().toISOString();
     delete job.failure;
+    delete job.failure_kind;
     delete job.failed_at;
     delete job.leased_until;
     delete job.leased_by;
@@ -349,6 +535,21 @@ async function enqueueJob(input: {
       job.evidence_hash === evidenceHash
     );
     if (existing) return { created: false, job: structuredClone(existing) };
+    // Discovery scans and threshold updates can race. An exact batch hash is
+    // insufficient: [A,B] and [B,C] have different hashes but must not create
+    // two L2 jobs containing the same durable turn. Check within the locked
+    // mutation; a later discovery pass can enqueue the remaining turn.
+    if (input.target === "l2") {
+      const refs = new Set(evidence.map((item) => item.ref));
+      const overlap = store.jobs.find((job) =>
+        job.account_id === input.accountId &&
+        job.target === "l2" &&
+        job.project_id === input.projectId &&
+        job.conversation_id === input.conversationId &&
+        job.evidence_refs.some((ref) => refs.has(ref))
+      );
+      if (overlap) return { created: false, job: structuredClone(overlap) };
+    }
     const now = new Date().toISOString();
     const job: DistillationJob = {
       job_id: randomUUID(),
@@ -467,10 +668,17 @@ function migrateV1Job(item: Record<string, unknown>): DistillationJob {
     ...(typeof item.lease_token === "string" ? { lease_token: item.lease_token } : {}),
     ...(typeof item.completed_at === "string" ? { completed_at: item.completed_at } : {}),
     ...(typeof item.failure === "string" ? { failure: item.failure } : {}),
+    ...(["core_error", "ambiguous_core_commit"].includes(String(item.failure_kind))
+      ? { failure_kind: item.failure_kind as DistillationJob["failure_kind"] }
+      : {}),
     ...(typeof item.failed_at === "string" ? { failed_at: item.failed_at } : {}),
     ...(typeof item.attempts === "number" ? { attempts: item.attempts } : {}),
     ...(legacyResult ? { result_kind: legacyResult === "skill" ? "skill" : legacyResult === "noop" ? "noop" : "l2" } : {}),
     ...(typeof item.result_id === "string" ? { result_id: item.result_id } : {}),
+    ...(typeof item.result_committed_at === "string" &&
+        Number.isFinite(Date.parse(item.result_committed_at))
+      ? { result_committed_at: item.result_committed_at }
+      : {}),
     evidence_refs: evidence.map((entry) => entry.ref),
     evidence_hash: String(item.evidence_hash ?? createHash("sha256").update(JSON.stringify(evidence)).digest("hex")),
     evidence

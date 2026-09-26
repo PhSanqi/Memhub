@@ -1,11 +1,14 @@
 #!/usr/bin/env node
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { createServer } from "node:net";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ManagedProcessStack } from "../dist/process-stack.js";
 
+const stackEntrypoint = resolve(fileURLToPath(import.meta.url));
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const value = (flag, fallback) => {
   const i = process.argv.indexOf(flag);
@@ -29,10 +32,30 @@ const action = value("--action", "serve");
 const lockPath = join(home, `.${mode}-stack.lock`);
 const stopRequestPath = `${lockPath}.stop`;
 
+if (action === "preflight") {
+  if (existsSync(lockPath)) throw new Error("Memhub stack lock remains; refusing to replace an unverified owner");
+  for (const [name, port] of [["core", corePort], ["gateway", gatewayPort], ["bridge", bridgePort]]) {
+    if (mode === "server" && name === "bridge") continue;
+    await new Promise((resolveProbe, rejectProbe) => {
+      const probe = createServer();
+      probe.once("error", (error) => {
+        rejectProbe(new Error(`Memhub ${name} port ${port} is occupied or unavailable; refusing to stop unrelated processes: ${error.message}`));
+      });
+      probe.listen({ host: "127.0.0.1", port, exclusive: true }, () => probe.close(resolveProbe));
+    });
+  }
+  console.log(JSON.stringify({ mode, ready_to_install: true }));
+  process.exit(0);
+}
+
 if (action === "status") {
   try {
     const lock = JSON.parse(await readFile(lockPath, "utf8"));
-    console.log(JSON.stringify({ mode, running: isAlive(lock.pid), pid: lock.pid, started_at: lock.started_at }, null, 2));
+    const verified = await verifyOwnerIdentity(lock);
+    console.log(JSON.stringify({
+      mode, running: verified, pid: lock.pid, started_at: lock.started_at,
+      owner_verified: verified
+    }, null, 2));
   } catch {
     console.log(JSON.stringify({ mode, running: false }, null, 2));
   }
@@ -46,7 +69,7 @@ if (action === "stop") {
     console.log(JSON.stringify({ mode, stopped: true, running: false }));
     process.exit(0);
   }
-  if (!Number.isSafeInteger(owner.pid) || !owner.token || !isAlive(owner.pid)) {
+  if (!(await verifyOwnerIdentity(owner))) {
     throw new Error("cannot gracefully stop a stack without a verified live owner");
   }
   await writeStopRequest(stopRequestPath, owner);
@@ -66,7 +89,7 @@ if (action === "stop") {
   console.log(JSON.stringify({ mode, stopped: true, running: false }));
   process.exit(0);
 }
-if (action !== "serve") throw new Error("--action must be serve, status or stop");
+if (action !== "serve") throw new Error("--action must be serve, status, stop or preflight");
 
 const envPath = join(home, mode === "local" ? "local.env" : "server.env");
 const configPath = join(home, "memory-config.yaml");
@@ -111,7 +134,15 @@ const services = [
 
 await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
 const token = randomUUID();
-await acquireLock(lockPath, { pid: process.pid, token, started_at: new Date().toISOString() });
+await acquireLock(lockPath, {
+  pid: process.pid,
+  token,
+  started_at: new Date().toISOString(),
+  entrypoint: stackEntrypoint,
+  exec_path: resolve(process.execPath),
+  home,
+  mode
+});
 let stack;
 let closing = false;
 let exitCode = 0;
@@ -193,25 +224,94 @@ function isAlive(pid) {
 }
 
 async function acquireLock(path, owner) {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const handle = await open(path, "wx", 0o600);
-      try { await handle.writeFile(JSON.stringify(owner) + "\n"); }
-      finally { await handle.close(); }
-      return;
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-      let existing;
-      try { existing = JSON.parse(await readFile(path, "utf8")); }
-      catch { throw new Error("Memhub stack lock is unreadable; refusing to remove an unverified owner"); }
-      if (isAlive(existing.pid)) throw new Error(`Memhub ${mode} stack already running (pid ${existing.pid})`);
-      if (!Number.isSafeInteger(existing.pid) || existing.pid <= 0 || !existing.token) {
-        throw new Error("Memhub stack lock has invalid owner; refusing automatic removal");
-      }
-      await unlink(path).catch((unlinkError) => { if (unlinkError?.code !== "ENOENT") throw unlinkError; });
-    }
+  try {
+    const handle = await open(path, "wx", 0o600);
+    try { await handle.writeFile(JSON.stringify(owner) + "\n"); }
+    finally { await handle.close(); }
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    // EEXIST is authoritative: no PID check can safely establish that a
+    // stale-looking lock is ours to unlink (PID reuse and concurrent owner
+    // replacement are both possible). Never auto-reclaim during serve.
+    throw new Error("Memhub stack lock exists; refusing automatic takeover or stale-lock deletion");
   }
-  throw new Error("Memhub stack lock could not be acquired");
+}
+
+async function verifyOwnerIdentity(owner) {
+  // During an in-place or side-by-side package upgrade, the new installer
+  // must be able to ask the *previous* verified run-stack process to stop.
+  // Never execute owner.entrypoint: verify the live process and send only the
+  // authenticated stop request. Legacy locks without identity remain unsafe.
+  const claimedEntrypoint = typeof owner?.entrypoint === "string"
+    ? resolve(owner.entrypoint)
+    : "";
+  const priorWindowsEntrypoint = process.platform === "win32" &&
+    basename(claimedEntrypoint).toLowerCase() === "run-stack.mjs" &&
+    basename(dirname(claimedEntrypoint)).toLowerCase() === "scripts";
+  if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 ||
+      typeof owner.token !== "string" || !owner.token ||
+      typeof owner.started_at !== "string" || !Number.isFinite(Date.parse(owner.started_at)) ||
+      !(claimedEntrypoint === stackEntrypoint || priorWindowsEntrypoint) ||
+      typeof owner.exec_path !== "string" ||
+      typeof owner.home !== "string" || resolve(owner.home) !== home ||
+      owner.mode !== mode || !isAlive(owner.pid)) {
+    return false;
+  }
+  if (process.platform !== "win32") return true;
+  const identity = inspectWindowsProcess(owner.pid);
+  if (!identity || !identity.ownerMatches) return false;
+  const normalize = (value) => String(value ?? "").replaceAll("\\", "/").toLowerCase();
+  if (normalize(resolve(identity.executablePath)) !== normalize(resolve(owner.exec_path)) ||
+      !exactWindowsStackInvocation(identity.commandLine, owner.exec_path, claimedEntrypoint, home, mode)) {
+    return false;
+  }
+  const processStarted = Date.parse(identity.startedAt);
+  const lockStarted = Date.parse(owner.started_at);
+  const lag = (lockStarted - processStarted) / 1000;
+  return Number.isFinite(lag) && lag >= -2 && lag <= 30;
+}
+
+function exactWindowsStackInvocation(commandLine, nodePath, scriptPath, stateHome, edition) {
+  // Require exact argv, including release entrypoint and state root, not
+  // arbitrary substrings in a different Node process's command line.
+  const normalize = (value) => String(value ?? "").replaceAll("\\", "/").toLowerCase();
+  const escape = (value) => value.replace(/[|\\{}()[\]^$+*?.]/g, "\\$&");
+  const command = normalize(commandLine);
+  const pattern = new RegExp(
+    '^\\s*"?' + escape(normalize(nodePath)) +
+    '"?\\s+"?' + escape(normalize(scriptPath)) +
+    '"?\\s+--mode\\s+' + edition +
+    '\\s+--home\\s+"?' + escape(normalize(stateHome)) +
+    '"?(?<extra>(?:\\s+--(?:core|gateway|bridge)-port\\s+[0-9]{1,5}){0,3})\\s*$'
+  );
+  const match = command.match(pattern);
+  if (!match) return false;
+  const ports = [...(match.groups?.extra ?? "").matchAll(/--(core|gateway|bridge)-port\s+(\d{1,5})/g)];
+  return new Set(ports.map((port) => port[1])).size === ports.length &&
+    ports.every((port) => Number(port[2]) >= 1 && Number(port[2]) <= 65535);
+}
+
+function inspectWindowsProcess(pid) {
+  const command = [
+    `$p=Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"`,
+    'if ($null -eq $p) { exit 3 }',
+    '$owner=Invoke-CimMethod -InputObject $p -MethodName GetOwnerSid -ErrorAction Stop',
+    'if ($owner.ReturnValue -ne 0) { exit 4 }',
+    '$record=[pscustomobject]@{ startedAt=$p.CreationDate.ToUniversalTime().ToString("o"); executablePath=[string]$p.ExecutablePath; commandLine=[string]$p.CommandLine; ownerMatches=($owner.Sid -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) }',
+    '[Console]::Out.Write(($record | ConvertTo-Json -Compress))'
+  ].join("; ");
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 5_000
+  });
+  if (result.status !== 0 || !result.stdout) return null;
+  try {
+    const record = JSON.parse(result.stdout.trim());
+    if (!record.startedAt || !record.executablePath || !record.commandLine ||
+        record.ownerMatches !== true) return null;
+    return record;
+  } catch { return null; }
 }
 
 async function releaseLock(path, expectedToken) {

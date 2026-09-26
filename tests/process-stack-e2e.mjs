@@ -35,13 +35,19 @@ async function freePort() {
   await new Promise((resolveClosed) => server.close(resolveClosed));
   return port;
 }
-async function until(predicate, timeoutMs = 6_000) {
+// Recovery stops three owned children serially (up to 3 s each), then starts
+// three services serially (up to 4 s each), in addition to restart backoff.
+// A six-second assertion deadline is shorter than that supervised bound.
+async function until(predicate, timeoutMs = 25_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
   }
-  throw new Error("timed out waiting for process-stack condition");
+  throw new Error(`timed out waiting for process-stack condition: ${JSON.stringify({
+    status: stack?.status,
+    recentEvents: events.slice(-12)
+  })}`);
 }
 const events = [];
 let stack;
