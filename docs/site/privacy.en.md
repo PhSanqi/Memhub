@@ -1,5 +1,7 @@
 # Privacy & data boundaries
 
+**Public presentation and private workspace are separate boundaries.** The product site and GitHub Pages contain only static documentation, product assets, and clearly labelled fictional examples—not real memories, account or device IDs, tokens, or production screenshots. Each self-hosted Local/Server installation stores its own users’ data. /user and /admin require authentication on that installation; GitHub Pages runs no Memory Core, MCP, or account API.
+
 Memhub stores sensitive material: raw turns, project chronology, durable project rules, cross-project profile, architecture, embeddings, and identifiers. Privacy must be understood as separate storage, network, model, identity, project, and device boundaries.
 
 ## Default: Memory Core is local-only

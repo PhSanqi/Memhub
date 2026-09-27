@@ -1,6 +1,9 @@
 {
   "name": "memhub",
   "version": "0.2.6",
+  "description": "Self-hosted, project-aware AI memory with provenance, temporal continuity and MCP integration.",
+  "homepage": "https://phsanqi.github.io/Memhub/",
+  "repository": { "type": "git", "url": "https://github.com/PhSanqi/Memhub.git" },
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -36,7 +39,9 @@
     "release:complete": "node scripts/package-complete-release.mjs --worktree",
     "release:all": "node scripts/package-all-release.mjs --worktree",
     "review:web": "node scripts/render-web-review.mjs",
-    "web:prod:check": "node scripts/web-production-check.mjs"
+    "web:prod:check": "node scripts/web-production-check.mjs",
+    "site:export": "npm run build && node scripts/export-public-site.mjs ./_public-site",
+    "site:check": "npm run build && node tests/public-site-e2e.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.0",

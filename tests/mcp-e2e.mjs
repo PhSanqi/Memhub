@@ -804,6 +804,13 @@ async function testLocalAdmin(memoryPort) {
     assert.match(landingHtml, /id="theme-toggle"/);
     assert.match(landingHtml, /class="hero-product-proof"/);
     assert.match(landingHtml, /class="memory-topology"/);
+    assert.match(landingHtml, /EXAMPLE PROJECT/);
+    assert.match(landingHtml, /Atlas Demo/);
+    assert.match(landingHtml, /虚构示例数据/);
+    assert.doesNotMatch(landingHtml, /href="\/memhub\/user"|打开我的记忆|Open my memory/,
+      "public Landing must lead to installation, never an operator's private workspace");
+    assert.match(landingHtml, /href="\/memhub\/docs\/install" data-zh="安装 Memhub"/);
+    assert.doesNotMatch(landingHtml, /updated 2m ago/, "public preview must identify its data as a fictional example rather than implying a live project snapshot");
     assert.match(landingHtml, /class="skill-plane"/);
     assert.match(landingHtml, /Skill 不是第五层/);
     assert.match(landingHtml, /\/assets\/logo-mark\.png/);
@@ -1193,7 +1200,8 @@ async function testRootBasePath(memoryPort) {
     const landing = await fetch(`http://127.0.0.1:${port}/`);
     assert.equal(landing.status, 200);
     const landingHtml = await landing.text();
-    assert.match(landingHtml, /href="\/user"/);
+    assert.match(landingHtml, /href="\/docs\/install"/);
+    assert.doesNotMatch(landingHtml, /href="\/user"/);
     assert.doesNotMatch(landingHtml, /\/memhub\//);
     const legacyLanding = await fetch(`http://127.0.0.1:${port}/memhub`);
     assert.equal(legacyLanding.status, 404);

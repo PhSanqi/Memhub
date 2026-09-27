@@ -1,5 +1,7 @@
 # Installation & deployment
 
+**New users should perform a fresh install.** Local serves one machine; Server serves your own account across devices. The public website and GitHub Pages are informational, not a hosted memory or sign-in service. Only existing early-version installations with preserved state need a migration path; never install an old version merely to simulate that scenario.
+
 This page covers Local / Server × Linux / Windows and treats installation as more than an installer exit code. A deployment is complete only when runtime processes, loopback boundaries, identity, public ingress, project scope, and recovery evidence have all been checked.
 
 ## Understand the boundaries first
@@ -29,6 +31,8 @@ Plugins use `http://127.0.0.1:17861/mcp`.
 
 ## Local Windows
 
+For a first Windows installation, use the fresh-install path directly. **Do not install an old release or create legacy Scheduled Tasks just to run a migration.** Migration from an actually installed early split-task release is a separate, audited scenario; disposable compatibility tests are not proof of a live migration.
+
 ```powershell
 git clone https://github.com/PhSanqi/Memhub.git
 cd Memhub
@@ -48,6 +52,8 @@ MEMHUB_PUBLIC_HOST=memory.example.com bash editions/server/linux/install.sh
 Verify `memhub-core.service` and `memhub-server.service`. The origin MCP is `http://127.0.0.1:3001/memhub/mcp`. Validate origin before adding Tunnel/Access.
 
 ## Server Windows
+
+Fresh installation and upgrading an existing installation are different procedures. Follow the fresh-install steps below only when there is no prior Memhub instance. If state or Memhub Scheduled Tasks already exist, establish their provenance, backup and ownership before changing anything.
 
 ```powershell
 git clone https://github.com/PhSanqi/Memhub.git

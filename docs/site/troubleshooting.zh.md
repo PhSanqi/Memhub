@@ -1,5 +1,7 @@
 # 排错与恢复
 
+先确认访问的是自己的 Local/Server 实例：公开 GitHub Pages/产品展示站不会提供 /user、/admin、MCP 或数据恢复接口。不要将真实 token、原始对话、账号导出或故障截图直接贴到公开 Issue；请先脱敏。
+
 排错的核心原则是先确定故障层，再修改最小范围。Memhub 有入口、身份、账号、项目路由、L1 capture、Processing job、Memory Core、Control Plane、反向代理等多个边界；“记忆没工作”只是现象，不是根因。不要一看到异常就清空状态目录、重装所有服务或删除项目。
 
 ## 诊断顺序

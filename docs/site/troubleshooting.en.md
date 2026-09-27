@@ -1,5 +1,7 @@
 # Troubleshooting & recovery
 
+First confirm that you are using your own Local/Server installation: the public GitHub Pages/product site does not provide /user, /admin, MCP, or recovery APIs. Redact tokens, raw conversations, account exports, and diagnostic screenshots before opening a public issue.
+
 Diagnose from the most deterministic layer outward: process/port → HTTP ingress → identity → account scope → project scope → L1 → Processing → L2/L3/L4 → UI. “Memory is broken” is a symptom, not a root cause.
 
 ## Service or port missing
