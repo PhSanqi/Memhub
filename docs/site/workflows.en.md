@@ -1,5 +1,7 @@
 # Everyday workflows
 
+The workflows below assume you have installed your own Memhub instance. Public examples are fictional; only your authenticated workspace or connector can access and continue your own projects.
+
 Memhub should reduce the amount of background you need to repeat. The normal flow is: confirm scope, see next work and recent continuity, continue the project, and trace deeper only when needed.
 
 ## Confirm scope before work

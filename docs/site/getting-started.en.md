@@ -1,5 +1,7 @@
 # From install to your first continuous memory
 
+**For first-time users:** choose Local or Server and install it on your own device or server before connecting an AI client. This public site and the GitHub Pages mirror explain the product; they do not provide a shared memory account. Your workspace lives only in your own authenticated installation. The homepage preview is fictional.
+
 This page takes the shortest path from a clean machine to one verified continuity loop. The goal is not to study every internal component first. Choose Local or Server Edition, start Memhub, connect an MCP/Bridge-capable harness, produce real project evidence, then open a new chat or device and confirm that project scope, follow-up, chronology, and evidence remain available.
 
 ## Choose Local or Server

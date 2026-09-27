@@ -6,4 +6,6 @@
 - [Cloudflare Tunnel](cloudflare-tunnel.md)
 - [Memory Core migration](migration.md)
 
-For this project's hosted deployment, the canonical public hostname is `memory.example.com`. Generic self-hosted examples use `memory.example.com`.
+Replace the illustrative `memory.example.com` with a hostname you control
+for your own authenticated Server Edition. The public product site is not
+a shared memory-hosting service.

@@ -15,8 +15,16 @@ Memhub gives ChatGPT, Codex, MCP clients, and other AI harnesses a durable memor
 It keeps original conversation evidence, builds a chronological project history, distills durable project knowledge, maintains a carefully scoped cross-project profile, and exposes reusable Skills, project Todos, retrieval, provenance, and a browser workspace from one self-hosted runtime.
 
 - **Current release:** v0.2.6
-- **Canonical hosted deployment:** https://memory.example.com/
+- **Product website and documentation:** https://memory.example.com/
+- **GitHub Pages (public, static mirror):** https://phsanqi.github.io/Memhub/
 - **Downloads:** https://github.com/PhSanqi/Memhub/releases
+
+**Start with [installation](docs/site/install.en.md), not someone else's
+workspace.** Memhub is self-hosted: each person or team runs their own Local
+or Server Edition and accesses their own authenticated workspace. The public
+website and GitHub Pages mirror are product documentation, not a shared
+memory-hosting service. All workspace previews on public pages are synthetic
+examples; no personal account or project data is published there.
 
 ---
 
@@ -169,7 +177,11 @@ The Web Workspace provides:
 - **Processing** — distillation and runtime state;
 - **Admin** — account/project governance and high-impact operations.
 
-The project deployment is available at https://memory.example.com/.
+The [public product website](https://memory.example.com/) and
+[GitHub Pages mirror](https://phsanqi.github.io/Memhub/) document the
+product; neither provides a public login to another person's memory.
+Access the workspace of **your own installation** after configuring its
+authentication boundary.
 
 ## Security and privacy
 

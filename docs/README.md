@@ -31,14 +31,15 @@ Edition-specific packaging notes live under [../editions/](../editions/).
 - [Remote authentication](operations/remote-auth.md)
 - [Cloudflare Tunnel](operations/cloudflare-tunnel.md)
 - [Memory Core migration](operations/migration.md)
-- [2026-09-27 candidate acceptance and outstanding production gates](operations/release-acceptance-2026-09-27.md) — dated QA evidence, not a release approval.
 
-The canonical hosted project deployment is **https://memory.example.com/**. Self-hosted documentation uses `memory.example.com` as a placeholder.
+The [public product website](https://memory.example.com/) contains
+documentation and fictional examples, not a shared memory workspace.
+For your own Server Edition, replace `memory.example.com` with a domain
+you control and configure its authentication boundary.
 
 ## Maintain the project
 
 - [Upstream attribution](maintainers/upstream.md)
 - [Long-term content audit Skill](skills/memhub-long-term-content-audit-v2.md)
-- [Internal UI/review contracts](internal/)
 
 Current Truth belongs in the Project Registry, current architecture, and the active documents linked above. Historical implementation records belong to Git history rather than the active documentation navigation.

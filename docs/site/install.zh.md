@@ -1,5 +1,7 @@
 # 安装与部署
 
+**第一次使用请选全新安装。** Local 适合单机，Server 适合多设备共享你自己的账号。官网/GitHub Pages 是静态介绍，不提供登录或托管记忆服务；请勿用别人的站点工作区作为安装入口。只有确实运行过早期版本并保留旧状态的用户才需要迁移流程，不需要为了验证迁移主动安装旧版本。
+
 本页覆盖 Memhub 的 Local / Server × Linux / Windows 四种组合，并把“安装成功”的定义从“脚本退出码为 0”提升到“服务、入口、身份、项目和恢复路径都经过验证”。如果你只是第一次试用，优先 Local；如果明确需要多设备、长期在线或远程 MCP，再选择 Server。
 
 ## 安装前先理解三个边界
@@ -39,6 +41,8 @@ http://127.0.0.1:17861/mcp
 
 ## Local Edition：Windows
 
+首次在 Windows 安装 Memhub，直接执行新装流程即可；**不需要先安装旧版、制造旧定时任务或执行历史迁移**。仅当这台机器原本确实运行过早期 split-task 版本时，旧实例升级才是需要单独审计的场景；不能把隔离测试当作实际旧实例迁移证明。
+
 PowerShell：
 
 ```powershell
@@ -77,6 +81,8 @@ http://127.0.0.1:3001/memhub/capture
 `MEMHUB_PUBLIC_HOST` 用于 Gateway 的 public host 约束，不意味着 Gateway 应直接监听公网地址。公网 DNS 指向 Tunnel 或认证反向代理，而不是把 Node 进程暴露在 Internet。
 
 ## Server Edition：Windows
+
+首次部署 Server 与旧实例迁移是两条不同的流程。新装按以下步骤进行；如果机器上已有 Memhub 状态或定时任务，应先核对来源、备份和所有权，不要用新装命令直接覆盖已有实例。
 
 PowerShell：
 
