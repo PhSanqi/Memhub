@@ -18,15 +18,22 @@ const pages = [
 ];
 
 for (const [route, source] of pages) {
+  // The self-hosted Landing has one desktop-only entry to that instance's
+  // authenticated console. GitHub Pages is documentation-only, so remove it
+  // instead of publishing a dead/private workspace link.
+  const publicSource = source.replace(/<a class="console-entry"[^>]*>.*?<\/a>/g, "");
   // Rewrite only *navigation/asset attributes*, never code examples such as
   // http://127.0.0.1:3001/memhub/mcp inside the documentation.
-  const html = source.replace(/((?:href|src)=["'])\/memhub(?=\/|["'])/g, "$1/Memhub");
+  const html = publicSource.replace(/((?:href|src)=["'])\/memhub(?=\/|["'])/g, "$1/Memhub");
   const privateLink = /(?:href|src)=["'][^"']*\/(?:user|admin)(?:\/|["'?#])/i;
   if (privateLink.test(html) || /(?:href|src)=["']\/Memhub\/(?:user|admin)/i.test(html)) {
     throw new Error(`Private workspace link found in public route: ${route || "/"}`);
   }
   if (/打开我的记忆|Open my memory|EXAMPLE PROJECT<\/span><b>Memhub<\/b>/.test(html)) {
     throw new Error(`Personalized landing content found in public route: ${route || "/"}`);
+  }
+  if (/class="console-entry"|>进入管理台<|>Open console</.test(html)) {
+    throw new Error(`Self-hosted console entry leaked into static public route: ${route || "/"}`);
   }
   const file = join(output, route, "index.html");
   await mkdir(dirname(file), { recursive: true });

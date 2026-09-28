@@ -807,8 +807,14 @@ async function testLocalAdmin(memoryPort) {
     assert.match(landingHtml, /EXAMPLE PROJECT/);
     assert.match(landingHtml, /Atlas Demo/);
     assert.match(landingHtml, /虚构示例数据/);
-    assert.doesNotMatch(landingHtml, /href="\/memhub\/user"|打开我的记忆|Open my memory/,
-      "public Landing must lead to installation, never an operator's private workspace");
+    assert.doesNotMatch(landingHtml, /打开我的记忆|Open my memory/,
+      "public Landing must not use the old personal-memory CTA");
+    assert.match(landingHtml, /class="console-entry" href="\/memhub\/user" data-zh="进入管理台" data-en="Open console"/);
+    assert.equal((landingHtml.match(/href="\/memhub\/user"/g) ?? []).length, 1,
+      "Landing may expose exactly one self-hosted console entry");
+    const mobileLandingMenu = landingHtml.match(/<div id="mobile-menu"[\s\S]*?<\/div>/)?.[0] ?? "";
+    assert.doesNotMatch(mobileLandingMenu, /\/memhub\/user|进入管理台|Open console/,
+      "mobile Landing navigation must not expose the console entry");
     assert.match(landingHtml, /href="\/memhub\/docs\/install" data-zh="安装 Memhub"/);
     assert.doesNotMatch(landingHtml, /updated 2m ago/, "public preview must identify its data as a fictional example rather than implying a live project snapshot");
     assert.match(landingHtml, /class="skill-plane"/);
@@ -1201,7 +1207,8 @@ async function testRootBasePath(memoryPort) {
     assert.equal(landing.status, 200);
     const landingHtml = await landing.text();
     assert.match(landingHtml, /href="\/docs\/install"/);
-    assert.doesNotMatch(landingHtml, /href="\/user"/);
+    assert.match(landingHtml, /class="console-entry" href="\/user"/);
+    assert.equal((landingHtml.match(/href="\/user"/g) ?? []).length, 1);
     assert.doesNotMatch(landingHtml, /\/memhub\//);
     const legacyLanding = await fetch(`http://127.0.0.1:${port}/memhub`);
     assert.equal(legacyLanding.status, 404);
