@@ -18,6 +18,8 @@ try {
       `public page ${page} links to a private workspace`);
     assert.doesNotMatch(html, /打开我的记忆|Open my memory|updated 2m ago/,
       `public page ${page} contains personal/demo-ambiguous copy`);
+    assert.doesNotMatch(html, /class="console-entry"|>进入管理台<|>Open console</,
+      `public page ${page} must not expose a self-hosted console entry`);
     assert.doesNotMatch(html, /[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|\/home\/USER\/|C:\\Users\\USER\\/i,
       `public page ${page} contains an email or operator home path`);
     for (const match of html.matchAll(/(?:href|src)="(\/Memhub(?:\/[^"#?]*)?)/g)) {
