@@ -95,7 +95,7 @@ import {
 const VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 const projectMutationAuthorizations = new Map<string, {
   accountId: string;
-  operation: "create" | "update" | "delete" | "merge";
+  operation: "create" | "update" | "archive" | "unarchive" | "delete" | "merge";
   payload: Record<string, unknown>;
   expiresAt: number;
 }>();
@@ -827,12 +827,13 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   });
 
   server.registerTool("memmy_project_list", {
-    description: "只读列出当前账号的项目注册表。返回 canonical project slug、显示名、description、aliases 和状态；query 可按相似名称检索候选。模型在准备创建项目、绑定一个不确定项目、或发现大小写/近似名称时，应先调用本工具，用名称相似度 + description 判断是否已有同一项目，禁止盲目新建。",
+    description: "只读列出当前账号的项目注册表。默认仅返回 active 项目；include_archived 可显式查看 archived 项目，include_inactive 可查看 merged/deleted/archived 历史状态。返回 canonical project slug、显示名、description、aliases 和状态；query 可按相似名称检索候选。模型在准备创建项目、绑定一个不确定项目、或发现大小写/近似名称时，应先调用本工具，用名称相似度 + description 判断是否已有同一项目，禁止盲目新建。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
         query: { type: "string", description: "可选的项目名称/slug/关键词，用于查找相似项目候选" },
-        include_inactive: { type: "boolean", description: "是否包含 merged/deleted 历史项目；默认 false" },
+        include_archived: { type: "boolean", description: "是否显式包含 archived 项目；默认 false。归档项目保留全部 Memory，但不会出现在普通列表中。" },
+        include_inactive: { type: "boolean", description: "是否包含 archived/merged/deleted 历史项目；默认 false" },
         limit: { type: "integer", minimum: 1, maximum: 20, description: "相似候选最大数量；默认 8" }
       },
       additionalProperties: false
@@ -840,10 +841,13 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   }, async (args) => {
     await knownProjectRecords(runtime);
     const includeInactive = optionalBoolean(args.include_inactive) ?? false;
-    const projects = await runtime.projects.list(runtime.accountId, { includeInactive });
+    const includeArchived = optionalBoolean(args.include_archived) ?? false;
+    const projects = await runtime.projects.list(runtime.accountId, { includeInactive, includeArchived });
     const query = optionalString(args.query);
     const matches = query
-      ? await runtime.projects.suggest(runtime.accountId, query, optionalInteger(args.limit) ?? 8)
+      ? await runtime.projects.suggest(runtime.accountId, query, optionalInteger(args.limit) ?? 8, {
+          includeArchived: includeInactive || includeArchived
+        })
       : [];
     return jsonResult({
       projects: projects.map(projectForModel),
@@ -954,12 +958,12 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   });
 
   server.registerTool("memmy_project_manage", {
-    description: "受控项目管理工具。支持 create/update/delete/merge，但所有修改都必须先 action=plan；plan 只返回一次性 authorization_id 和影响说明，不修改数据。模型必须把计划展示给用户，并在收到针对该计划的明确授权后才能 action=execute。禁止把 plan 本身、历史授权或模型推断当成授权。delete 是逻辑删除，不物理清空 Memory；merge 将 source 变成 target 的历史 alias，未来写入统一到 target，旧 alias 下的历史记忆仍参与召回。",
+    description: "受控项目管理工具。支持 create/update/archive/unarchive/delete/merge，但所有修改都必须先 action=plan；plan 只返回一次性 authorization_id 和影响说明，不修改数据。模型必须把计划展示给用户，并在收到针对该计划的明确授权后才能 action=execute。禁止把 plan 本身、历史授权或模型推断当成授权。archive 是可恢复的非破坏性归档：保留全部 Memory/别名/待办，默认项目列表、路由和管理界面隐藏；unarchive 恢复为 active。delete 是逻辑删除，不物理清空 Memory；merge 将 source 变成 target 的历史 alias，未来写入统一到 target，旧 alias 下的历史记忆仍参与召回。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
         action: { type: "string", enum: ["plan", "execute"] },
-        operation: { type: "string", enum: ["create", "update", "delete", "merge"] },
+        operation: { type: "string", enum: ["create", "update", "archive", "unarchive", "delete", "merge"] },
         project: { type: "string", description: "create 时为新 canonical slug；其它操作为 source/current project ref" },
         target: { type: "string", description: "merge 的目标 canonical project ref" },
         name: { type: "string", description: "create/update 的显示名；不改变稳定 canonical slug" },
@@ -975,7 +979,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     if (action === "plan") {
       await knownProjectRecords(runtime);
       const operation = requiredString(args.operation, "operation");
-      if (!["create", "update", "delete", "merge"].includes(operation)) throw new TypeError("unsupported project management operation");
+      if (!["create", "update", "archive", "unarchive", "delete", "merge"].includes(operation)) throw new TypeError("unsupported project management operation");
       const project = requiredString(args.project, "project");
       const payload: Record<string, unknown> = { project };
       let impact: Record<string, unknown>;
@@ -994,7 +998,9 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
           requiresDescription: true
         };
       } else {
-        const canonical = await runtime.projects.resolve(runtime.accountId, project);
+        const canonical = operation === "unarchive"
+          ? await runtime.projects.resolve(runtime.accountId, project, { includeArchived: true })
+          : await runtime.projects.resolve(runtime.accountId, project);
         if (!canonical) throw new Error(`unknown or inactive project: ${project}`);
         payload.project = canonical;
         if (operation === "update") {
@@ -1022,6 +1028,40 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
             project: canonical,
             stableCanonicalSlug: canonical,
             changesMetadataOnly: true
+          };
+        } else if (operation === "archive") {
+          const blockers = (await unfinishedDistillationJobsForProject(stateRoot, runtime, canonical))
+            .filter((job) => job.status === "pending" || job.status === "leased");
+          const historicalFailed = (await unfinishedDistillationJobsForProject(stateRoot, runtime, canonical))
+            .filter((job) => job.status === "failed");
+          impact = {
+            project: canonical,
+            logicalArchive: true,
+            memoryPurged: false,
+            hiddenByDefault: true,
+            restorable: true,
+            blockedByDistillationJobs: blockers.map((job) => ({
+              job_id: job.job_id,
+              status: job.status,
+              target: job.target
+            })),
+            preservedFailedDistillationJobs: historicalFailed.map((job) => ({
+              job_id: job.job_id,
+              status: job.status,
+              target: job.target
+            })),
+            note: "All durable evidence, aliases and Todos remain stored. The project is removed from normal routing/list/UI until unarchived."
+          };
+        } else if (operation === "unarchive") {
+          const current = (await runtime.projects.list(runtime.accountId, { includeInactive: true }))
+            .find((item) => item.projectId === canonical);
+          if (!current || current.state !== "archived") throw new Error(`project is not archived: ${project}`);
+          impact = {
+            project: canonical,
+            restoresActiveRouting: true,
+            memoryPreserved: true,
+            aliasesPreserved: true,
+            todosPreserved: true
           };
         } else if (operation === "delete") {
           const blockers = await unfinishedDistillationJobsForProject(stateRoot, runtime, canonical);
@@ -1057,7 +1097,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       const expiresAt = Date.now() + 10 * 60_000;
       projectMutationAuthorizations.set(authorizationId, {
         accountId: runtime.accountId,
-        operation: operation as "create" | "update" | "delete" | "merge",
+        operation: operation as "create" | "update" | "archive" | "unarchive" | "delete" | "merge",
         payload,
         expiresAt
       });
@@ -1092,6 +1132,15 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         ...(typeof authorization.payload.description === "string" ? { description: authorization.payload.description } : {}),
         ...(Array.isArray(authorization.payload.aliases) ? { aliases: stringArray(authorization.payload.aliases) ?? [] } : {})
       });
+    } else if (authorization.operation === "archive") {
+      const blockers = (await unfinishedDistillationJobsForProject(stateRoot, runtime, project))
+        .filter((job) => job.status === "pending" || job.status === "leased");
+      if (blockers.length > 0) {
+        throw new Error(`project has ${blockers.length} active distillation job(s); complete or resolve them before archive`);
+      }
+      result = await runtime.projects.archive(runtime.accountId, project);
+    } else if (authorization.operation === "unarchive") {
+      result = await runtime.projects.unarchive(runtime.accountId, project);
     } else if (authorization.operation === "delete") {
       const blockers = await unfinishedDistillationJobsForProject(stateRoot, runtime, project);
       if (blockers.length > 0) {

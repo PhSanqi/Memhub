@@ -32,7 +32,7 @@ Edition-specific packaging notes live under [../editions/](../editions/).
 - [Cloudflare Tunnel](operations/cloudflare-tunnel.md)
 - [Memory Core migration](operations/migration.md)
 
-The [public product website](https://memory.example.com/) contains
+The [public product website](https://phsanqi.github.io/Memhub/) contains
 documentation and fictional examples, not a shared memory workspace.
 For your own Server Edition, replace `memory.example.com` with a domain
 you control and configure its authentication boundary.

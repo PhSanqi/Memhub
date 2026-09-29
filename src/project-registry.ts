@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { withFileMutationLock } from "./file-mutation-lock.js";
 
-export type ProjectState = "active" | "merged" | "deleted";
+export type ProjectState = "active" | "archived" | "merged" | "deleted";
 export type ProjectTodoStatus = "pending" | "done";
 
 export interface ProjectTodo {
@@ -108,25 +108,30 @@ export class JsonProjectRegistry {
     return this.list(account);
   }
 
-  async list(accountId: string, options: { includeInactive?: boolean } = {}): Promise<ProjectDescriptor[]> {
+  async list(accountId: string, options: { includeInactive?: boolean; includeArchived?: boolean } = {}): Promise<ProjectDescriptor[]> {
     const account = requireNonEmpty(accountId, "accountId");
     const file = await this.read();
     return file.projects
       .filter((project) => project.accountId === account)
-      .filter((project) => options.includeInactive || project.state === "active")
+      .filter((project) =>
+        options.includeInactive ||
+        project.state === "active" ||
+        (options.includeArchived && project.state === "archived")
+      )
       .sort((left, right) => left.projectId.localeCompare(right.projectId))
       .map(stripAccount);
   }
 
-  async resolve(accountId: string, reference: string): Promise<string | null> {
+  async resolve(accountId: string, reference: string, options: { includeArchived?: boolean } = {}): Promise<string | null> {
     const account = requireNonEmpty(accountId, "accountId");
     const ref = requireNonEmpty(reference, "project");
     const file = await this.read();
     const projects = file.projects.filter((project) => project.accountId === account);
-    const exact = projects.find((project) => project.state === "active" &&
+    const routableStates = options.includeArchived ? new Set<ProjectState>(["active", "archived"]) : new Set<ProjectState>(["active"]);
+    const exact = projects.find((project) => routableStates.has(project.state) &&
       (project.projectId === ref || project.name === ref || project.aliases.includes(ref))
     );
-    const normalizedActive = projects.find((project) => project.state === "active" &&
+    const normalizedActive = projects.find((project) => routableStates.has(project.state) &&
       [project.projectId, project.name, ...project.aliases].some((value) => normalizeProjectKey(value) === normalizeProjectKey(ref))
     );
     const historical = projects.find((project) => project.state === "merged" &&
@@ -135,9 +140,12 @@ export class JsonProjectRegistry {
     );
     const candidate = exact ?? normalizedActive ?? historical;
     if (!candidate || candidate.state === "deleted") return null;
-    if (candidate.state === "active") return candidate.projectId;
+    if (candidate.state === "active" || (options.includeArchived && candidate.state === "archived")) return candidate.projectId;
     if (!candidate.mergedInto) return null;
-    const target = projects.find((project) => project.projectId === candidate.mergedInto && project.state === "active");
+    const target = projects.find((project) =>
+      project.projectId === candidate.mergedInto &&
+      (project.state === "active" || (options.includeArchived && project.state === "archived"))
+    );
     return target?.projectId ?? null;
   }
 
@@ -146,7 +154,9 @@ export class JsonProjectRegistry {
     const canonical = requireNonEmpty(canonicalProjectId, "projectId");
     const file = await this.read();
     const projects = file.projects.filter((project) => project.accountId === account);
-    const target = projects.find((project) => project.projectId === canonical && project.state === "active");
+    const target = projects.find((project) =>
+      project.projectId === canonical && (project.state === "active" || project.state === "archived")
+    );
     if (!target) return [canonical];
     const merged = projects.filter((project) => project.state === "merged" && project.mergedInto === canonical);
     return unique([
@@ -156,9 +166,14 @@ export class JsonProjectRegistry {
     ]);
   }
 
-  async suggest(accountId: string, query: string, limit = 8): Promise<ProjectSuggestion[]> {
+  async suggest(
+    accountId: string,
+    query: string,
+    limit = 8,
+    options: { includeArchived?: boolean } = {}
+  ): Promise<ProjectSuggestion[]> {
     const normalizedQuery = requireNonEmpty(query, "query");
-    const projects = await this.list(accountId);
+    const projects = await this.list(accountId, { includeArchived: options.includeArchived });
     return projects
       .map((project) => {
         const candidates = [project.projectId, project.name, ...project.aliases];
@@ -406,6 +421,34 @@ export class JsonProjectRegistry {
     });
   }
 
+  async archive(accountId: string, projectRef: string): Promise<ProjectDescriptor> {
+    const account = requireNonEmpty(accountId, "accountId");
+    const projectId = await this.resolve(account, projectRef);
+    if (!projectId) throw new Error(`unknown or inactive project: ${projectRef}`);
+    return this.serialize(async () => {
+      const file = await this.read();
+      const project = requireActive(file, account, projectId);
+      project.state = "archived";
+      project.updatedAt = new Date().toISOString();
+      await this.write(file);
+      return stripAccount(project);
+    });
+  }
+
+  async unarchive(accountId: string, projectRef: string): Promise<ProjectDescriptor> {
+    const account = requireNonEmpty(accountId, "accountId");
+    const projectId = await this.resolve(account, projectRef, { includeArchived: true });
+    if (!projectId) throw new Error(`unknown project: ${projectRef}`);
+    return this.serialize(async () => {
+      const file = await this.read();
+      const project = requireArchived(file, account, projectId);
+      project.state = "active";
+      project.updatedAt = new Date().toISOString();
+      await this.write(file);
+      return stripAccount(project);
+    });
+  }
+
   private async serialize<T>(operation: () => Promise<T>): Promise<T> {
     return withFileMutationLock(this.path, operation);
   }
@@ -474,6 +517,14 @@ function requireActive(file: ProjectRegistryFile, accountId: string, projectId: 
   return project;
 }
 
+function requireArchived(file: ProjectRegistryFile, accountId: string, projectId: string): StoredProject {
+  const project = file.projects.find((item) =>
+    item.accountId === accountId && item.projectId === projectId && item.state === "archived"
+  );
+  if (!project) throw new Error(`archived project not found: ${projectId}`);
+  return project;
+}
+
 function ensureAliasesAvailable(file: ProjectRegistryFile, accountId: string, projectId: string, aliases: string[]): void {
   const keys = new Set(aliases.map(normalizeProjectKey));
   for (const project of file.projects) {
@@ -537,7 +588,7 @@ function isProjectRegistryFile(value: unknown): value is ProjectRegistryFile {
       typeof project.description === "string" &&
       Array.isArray(project.aliases) &&
       project.aliases.every((alias) => typeof alias === "string") &&
-      (project.state === "active" || project.state === "merged" || project.state === "deleted") &&
+      (project.state === "active" || project.state === "archived" || project.state === "merged" || project.state === "deleted") &&
       typeof project.createdAt === "string" &&
       typeof project.updatedAt === "string" &&
       (project.mergedInto === undefined || typeof project.mergedInto === "string") &&

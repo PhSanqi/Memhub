@@ -77,12 +77,12 @@ assert.match(deployBridgeUnit, /WantedBy=memhub-stack\.target/, "enabled Bridge 
 assert.match(deployBridgeInstaller, /@HEALTH_PATH@/, "Bridge installer must render the configured Gateway health path");
 assert.match(deployBridgeInstaller, /memhub-stack\.target is missing/, "Bridge installer must require the base Memhub stack first");
 assert.match(deployTarget, /Requires=memhub-core\.service memhub\.service/);
+assert.match(readme, /https:\/\/phsanqi\.github\.io\/Memhub\//, "main README must point to the public GitHub Pages site");
+assert.match(readmeZh, /https:\/\/phsanqi\.github\.io\/Memhub\//, "Chinese README must point to the public GitHub Pages site");
+assert.match(cloudflareGuide, /https:\/\/memory\.example\.com\//, "operations guide must use a generic self-hosted example");
 for (const [name, source] of [["README.md", readme], ["README.zh-CN.md", readmeZh], ["docs/operations/cloudflare-tunnel.md", cloudflareGuide]]) {
-  assert.match(source, /https:\/\/memhub\.sanqi\.org\//, name + ": canonical production route must be explicit");
+  assert.doesNotMatch(source, /(?:plugin|memhub|letter)\.sanqi\.org/, name + ": public docs must not expose operator-specific hostnames");
 }
-assert.doesNotMatch(cloudflareGuide, /plugin\.sanqi\.org\/memhub/, "operations guide must not retain the retired production route");
-assert.doesNotMatch(readme, /plugin\.sanqi\.org\/memhub/, "main README must not advertise the retired route");
-assert.doesNotMatch(readmeZh, /plugin\.sanqi\.org\/memhub/, "Chinese README must not advertise the retired route");
 const completePackager = await readFile(new URL("../scripts/package-complete-release.mjs", import.meta.url), "utf8");
 const completeSmoke = await readFile(new URL("../scripts/complete-runtime-smoke.cjs", import.meta.url), "utf8");
 const windowsTaskOwnership = await readFile(new URL("../scripts/windows-task-ownership.ps1", import.meta.url), "utf8");

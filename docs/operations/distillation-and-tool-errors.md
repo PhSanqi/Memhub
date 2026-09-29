@@ -12,7 +12,7 @@ For tool usage, read the connected MCP server's live `tools/list` inputSchema. I
    A Core HTTP 409 during capture is returned to the device as `409 capture_ingest_conflict` (and leaves the durable capture un-ingested), not disguised as a retryable 503. Genuine transient Core failures remain `503 capture_ingest_failed`. Resolve the request-body conflict before replaying the same event; changing its idempotency key to bypass the conflict is unsafe.
    Device-side capture authentication remains distinct: missing device token is 401, invalid/revoked device token is 403, Core idempotency conflict is 409, and transient Core failure is surfaced as 503. Error responses carry `x-memhub-request-id`; neither Gateway error logs nor LocalMemoryRestClient error strings may echo bearer credentials.
 4. **Normal idle:** `No pending distillation job` means no job can be leased now. It says nothing about uncaptured conversations, complete-but-uningested evidence, or work waiting for the idle threshold.
-5. **Lock contention:** check the actual owner and live process before intervention. Memhub's file lock automatically recovers only a verifiably dead local owner; foreign-host or malformed owner records fail closed rather than being reclaimed by age. ExternalMemory's canonical writer lock is a separate mechanism and must not be touched by Memhub maintenance.
+5. **Lock contention:** check the actual owner and live process before intervention. Memhub's file lock automatically recovers only a verifiably dead local owner; foreign-host or malformed owner records fail closed rather than being reclaimed by age. Any external application's canonical writer lock is a separate mechanism and must not be touched by Memhub maintenance.
 
 ## Safe daily run
 

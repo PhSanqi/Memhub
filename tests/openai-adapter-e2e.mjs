@@ -16,14 +16,14 @@ const env = {
   MEMHUB_BRIDGE_CAPTURE_URL: `http://127.0.0.1:${port}/capture`,
   MEMHUB_BRIDGE_CONTEXT_URL: `http://127.0.0.1:${port}/context`,
   MEMHUB_BRIDGE_LIFECYCLE_URL: `http://127.0.0.1:${port}/lifecycle`,
-  MEMHUB_PROJECT_ID: "ExampleProject"
+  MEMHUB_PROJECT_ID: "atlas"
 };
 
 try {
   const userResult = await runHook({
     session_id: "codex-session-1",
     turn_id: "codex-turn-1",
-    cwd: "/workspace/ExampleProject",
+    cwd: "/workspace/atlas",
     hook_event_name: "UserPromptSubmit",
     model: "gpt-test",
     prompt: "continue the implementation"
@@ -39,10 +39,10 @@ try {
     if (request.url === "/context") {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({
-        resolvedProjectId: "ExampleProject",
+        resolvedProjectId: "atlas",
         recallScope: "global_and_project",
         globalMemory: [{ id: "g1", content: "durable global preference" }],
-        projectMemory: [{ id: "p1", content: "current ExampleProject project decision" }],
+        projectMemory: [{ id: "p1", content: "current atlas project decision" }],
         projectArchitecture: []
       }));
       return;
@@ -53,7 +53,7 @@ try {
         ok: true,
         event: received.at(-1).body.event,
         context: received.at(-1).body.event === "SessionEnd" ? undefined : {
-          resolvedProjectId: "ExampleProject",
+          resolvedProjectId: "atlas",
           recallScope: "global_and_project",
           globalMemory: [{ id: "g2", content: "session durable context" }],
           projectMemory: [],
@@ -73,7 +73,7 @@ try {
     const contextResult = await runHook({
       session_id: "codex-session-context",
       turn_id: "codex-turn-context",
-      cwd: "/workspace/ExampleProject",
+      cwd: "/workspace/atlas",
       hook_event_name: "UserPromptSubmit",
       model: "gpt-test",
       prompt: "continue with prior decisions"
@@ -82,11 +82,11 @@ try {
     assert.equal(contextOutput.continue, true);
     assert.equal(contextOutput.hookSpecificOutput.hookEventName, "UserPromptSubmit");
     assert.match(contextOutput.hookSpecificOutput.additionalContext, /durable global preference/);
-    assert.match(contextOutput.hookSpecificOutput.additionalContext, /current ExampleProject project decision/);
+    assert.match(contextOutput.hookSpecificOutput.additionalContext, /current atlas project decision/);
 
     const sessionStart = JSON.parse((await runHook({
       session_id: "codex-session-lifecycle",
-      cwd: "/workspace/ExampleProject",
+      cwd: "/workspace/atlas",
       hook_event_name: "SessionStart"
     }, env)).stdout);
     assert.equal(sessionStart.hookSpecificOutput.hookEventName, "SessionStart");
@@ -94,7 +94,7 @@ try {
 
     const postCompact = JSON.parse((await runHook({
       session_id: "codex-session-lifecycle",
-      cwd: "/workspace/ExampleProject",
+      cwd: "/workspace/atlas",
       hook_event_name: "PostCompact"
     }, env)).stdout);
     assert.equal(postCompact.hookSpecificOutput.hookEventName, "PostCompact");
@@ -102,14 +102,14 @@ try {
 
     assert.deepEqual(JSON.parse((await runHook({
       session_id: "codex-session-lifecycle",
-      cwd: "/workspace/ExampleProject",
+      cwd: "/workspace/atlas",
       hook_event_name: "SessionEnd"
     }, env)).stdout), { continue: true });
 
     const stopResult = await runHook({
       session_id: "codex-session-1",
       turn_id: "codex-turn-1",
-      cwd: "/workspace/ExampleProject",
+      cwd: "/workspace/atlas",
       hook_event_name: "Stop",
       model: "gpt-test",
       stop_hook_active: false,
@@ -127,8 +127,8 @@ try {
   assert.equal(captureRequests[0].body.turn_id, "codex-turn-1");
   assert.equal(captureRequests[0].body.user_text, "continue the implementation");
   assert.equal(captureRequests[0].body.assistant_text, "implementation complete");
-  assert.equal(captureRequests[0].body.workspace_path, "/workspace/ExampleProject");
-  assert.equal(captureRequests[0].body.project_hint, "ExampleProject");
+  assert.equal(captureRequests[0].body.workspace_path, "/workspace/atlas");
+  assert.equal(captureRequests[0].body.project_hint, "atlas");
   const lifecycleRequests = received.filter((item) => item.url === "/lifecycle");
   assert.deepEqual(lifecycleRequests.map((item) => item.body.event), ["SessionStart", "PostCompact", "SessionEnd"]);
   assert.equal((await readdir(join(dataRoot, "outbox"))).filter((name) => name.endsWith(".json")).length, 0);
