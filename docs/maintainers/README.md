@@ -1,5 +1,7 @@
 # Maintainer documents
 
 - [Upstream attribution](upstream.md)
+- [Web design contract](web-design-contract.md)
+- [Web redesign brief](web-redesign-brief.md)
 
-UI review contracts used by repository tooling are under [../internal/](../internal/). Superseded migration/repair plans are retained in Git history rather than the active documentation tree.
+Superseded migration/repair plans are retained in Git history rather than the active documentation tree.

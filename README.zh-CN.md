@@ -15,14 +15,13 @@ Memhub 为 ChatGPT、Codex、MCP 客户端和其他 AI Harness 提供跨对话�
 它从原始对话证据出发，构建项目时间线、长期项目知识和跨项目稳定画像，并把 Skill、Todo、检索、来源追踪与浏览器工作区统一到一个可自托管运行时中。
 
 - **当前版本：** v0.2.6
-- **产品官网与文档：** https://memory.example.com/
-- **GitHub Pages 静态展示镜像：** https://phsanqi.github.io/Memhub/
+- **产品官网与文档：** https://phsanqi.github.io/Memhub/
 - **下载：** https://github.com/PhSanqi/Memhub/releases
 
 **首次使用请从[安装指南](docs/site/install.zh.md)进入，而不是打开别人的工作区。**
 Memhub 是自托管产品：每位用户或团队部署自己的 Local / Server
-Edition，然后访问受认证保护的个人工作区。公开官网和 GitHub Pages
-仅展示产品与文档，不是共享记忆托管服务。公开页面的工作区预览使用虚构示例，
+Edition，然后访问受认证保护的个人工作区。公开网站仅展示产品与文档，
+不是共享记忆托管服务。公开页面的工作区预览使用虚构示例，
 不发布真实账号和项目内容。
 
 ---
@@ -175,7 +174,7 @@ Server Edition 使用部署时配置的认证 MCP 地址。仓库内置的 [Agen
 - **Processing**：蒸馏与运行状态；
 - **Admin**：账号/项目治理与高影响操作。
 
-[公开产品官网](https://memory.example.com/)与
+[公开产品官网](https://phsanqi.github.io/Memhub/)与
 [GitHub Pages 静态镜像](https://phsanqi.github.io/Memhub/)提供产品介绍和文档，
 不提供其他用户的记忆登录入口。请在完成自己的实例部署与身份认证后，
 访问该实例的工作区。

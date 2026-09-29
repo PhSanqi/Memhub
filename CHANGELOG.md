@@ -16,7 +16,7 @@ and existing account/project identity boundaries remain unchanged.
 - Add fault-injection and real-Core integration regressions for Core/marker/
   enqueue crash windows, concurrent discovery and lease handling, L3/L4
   continuation and recovery, plus HTTP/MCP error classification.
-- Keep the ExternalMemory active-writer guard fail-closed when the lock or owner
+- Keep external active-writer guards fail-closed when the lock or owner
   cannot be confidently reconciled. No release script clears a writer lock.
 
 ### Install, recovery and cross-platform QA
@@ -34,8 +34,7 @@ and existing account/project identity boundaries remain unchanged.
   before adoption. Actual PowerShell installer refusal is exercised on Windows
   with a Task Scheduler shim. Real legacy task migration remains gated on
   exact target identity, backup and independent cutover verification.
-- Document release versus deployment evidence in
-  `docs/operations/release-acceptance-2026-09-27.md`. A package or code
+- Keep release evidence separate from deployment evidence. A package or code
   passing tests does not by itself certify a production cutover.
 
 ## v0.2.5 — 2026-09-25
@@ -51,7 +50,7 @@ Memhub 0.2.5 is a release-hygiene pass over the current v0.2 runtime. It does no
 
 ### Production and release alignment
 
-- The canonical hosted entrypoint is `https://memory.example.com/`.
+- The public documentation site is published through the repository's GitHub Pages deployment.
 - Linux systemd deployments use `memhub-stack.target` to own the Core → Gateway → optional Bridge lifecycle.
 - Release metadata and package manifests are regenerated from the clean public release tree.
 - GitHub repository metadata, documentation navigation, release notes, and downloadable artifacts are aligned to the same release.
@@ -107,9 +106,9 @@ Memhub 0.2.2 is the first release where the L1–L4 memory model, project routin
 ### Documentation and public project surface
 
 - GitHub README has been rewritten around the current product: project-aware memory, L1–L4, Project Registry/Todos, Branch, Retrieval, Skill and the Local/Server deployment choice.
-- Public documentation is now grouped under `docs/architecture/`, `docs/operations/`, `docs/maintainers/`, `docs/internal/` and `docs/archive/`, with `docs/README.md` as the navigation source of truth.
-- Superseded repair/simplification documents are retained only under `docs/archive/` so historical implementation notes are not confused with current architecture.
-- The canonical hosted deployment is `https://memory.example.com/`; the previous `memory.example.com/memhub` route is retired.
+- Public documentation is now grouped under `docs/architecture/`, `docs/operations/`, `docs/maintainers/`, `docs/site/` and `docs/skills/`, with `docs/README.md` as the navigation source of truth.
+- Superseded repair/simplification documents are retained in Git history instead of the active documentation tree so historical implementation notes are not confused with Current Truth.
+- Public product documentation is mirrored through GitHub Pages; self-hosted instances use their own operator-chosen hostname.
 
 ## v0.2.0 — 2026-09-20
 

@@ -74,8 +74,8 @@ try {
     !error.message.includes(coreToken));
   assert.equal(observedCoreAuthorization, `Bearer ${coreToken}`);
   assert.equal(resolveProjectScope({}).recallScope, "global_only");
-  assert.equal(resolveProjectScope({ conversationProjectId: "ExampleProject" }).projectId, "ExampleProject");
-  const conflict = resolveProjectScope({ conversationProjectId: "ExampleProject", workspaceProjectId: "memmy" });
+  assert.equal(resolveProjectScope({ conversationProjectId: "atlas" }).projectId, "atlas");
+  const conflict = resolveProjectScope({ conversationProjectId: "atlas", workspaceProjectId: "memmy" });
   assert.equal(conflict.projectId, null);
   assert.equal(conflict.recallScope, "global_only");
 
@@ -83,7 +83,7 @@ try {
     accountId: "acct",
     resolution: conflict,
     globalMemory: [{ id: "g", content: "global", authority: "remembered", scope: "global", source: "test" }],
-    projectMemory: [{ id: "a", content: "ExampleProject", authority: "remembered", scope: "project", source: "test", projectId: "ExampleProject" }],
+    projectMemory: [{ id: "a", content: "atlas", authority: "remembered", scope: "project", source: "test", projectId: "atlas" }],
     reusableSkills: [{ id: "s", content: "reusable", authority: "remembered", scope: "capability", source: "test", projectId: "memmy" }]
   });
   assert.equal(capsule.globalMemory.length, 1);
@@ -127,13 +127,13 @@ try {
 
   const largeCapsule = buildContextCapsule({
     accountId: "acct",
-    resolution: resolveProjectScope({ workspaceProjectId: "ExampleProject" }),
+    resolution: resolveProjectScope({ workspaceProjectId: "atlas" }),
     maxContentBytes: 24_000,
     maxItemContentBytes: 8_000,
     globalMemory: [{ id: "large-global", content: "全".repeat(20_000), authority: "remembered", scope: "global", source: "test" }],
-    projectMemory: [{ id: "large-project", content: "项".repeat(20_000), authority: "remembered", scope: "project", source: "test", projectId: "ExampleProject" }],
-    reusableSkills: [{ id: "large-skill", content: "技".repeat(20_000), authority: "remembered", scope: "capability", source: "test", projectId: "ExampleProject" }],
-    projectArchitecture: [{ id: "large-arch", content: "架".repeat(20_000), authority: "authoritative", scope: "project", source: "test", projectId: "ExampleProject" }]
+    projectMemory: [{ id: "large-project", content: "项".repeat(20_000), authority: "remembered", scope: "project", source: "test", projectId: "atlas" }],
+    reusableSkills: [{ id: "large-skill", content: "技".repeat(20_000), authority: "remembered", scope: "capability", source: "test", projectId: "atlas" }],
+    projectArchitecture: [{ id: "large-arch", content: "架".repeat(20_000), authority: "authoritative", scope: "project", source: "test", projectId: "atlas" }]
   });
   assert.ok(largeCapsule.globalMemory.length >= 1);
   assert.ok(largeCapsule.projectMemory.length >= 1);
@@ -165,7 +165,7 @@ try {
               title: "Bootstrap current truth",
               snippet: "Project history remains available before the first L2 artifact exists.",
               score: 0.9,
-              tags: ["project:ExampleProject"],
+              tags: ["project:atlas"],
               source: "search"
             }]
           }
@@ -178,8 +178,8 @@ try {
     accountId: "acct",
     userId: "user",
     query: "current truth",
-    projectId: "ExampleProject",
-    projectStorageIds: ["ExampleProject"],
+    projectId: "atlas",
+    projectStorageIds: ["atlas"],
     limit: 8,
     reusableSkillProjectIds: []
   });
@@ -201,7 +201,7 @@ try {
               status: "activated",
               snippet: "Canonical project timeline.",
               score: 0.95,
-              tags: ["project:ExampleProject"],
+              tags: ["project:atlas"],
               source: "search"
             }]
           }
@@ -215,8 +215,8 @@ try {
     accountId: "acct",
     userId: "user",
     query: "current truth",
-    projectId: "ExampleProject",
-    projectStorageIds: ["ExampleProject"],
+    projectId: "atlas",
+    projectStorageIds: ["atlas"],
     limit: 8,
     reusableSkillProjectIds: []
   });
@@ -234,17 +234,17 @@ try {
     accountId: "acct",
     userId: "user",
     kind: "l2",
-    projectId: "ExampleProject",
-    title: "Project Timeline · ExampleProject",
+    projectId: "atlas",
+    title: "Project Timeline · atlas",
     sourceHarness: "test",
-    artifactId: "project-timeline:ExampleProject",
+    artifactId: "project-timeline:atlas",
     evidenceRefs: ["l1:turn-1"],
     contractVersion: "memhub-distill-v2"
   };
   await distillSource.distill({ ...distillBase, content: "timeline v1" });
   await distillSource.distill({ ...distillBase, content: "timeline v2" });
   await distillSource.distill({ ...distillBase, content: "timeline v2" });
-  assert.equal(distillWrites[0].sourceArtifactId, "project-timeline:ExampleProject");
+  assert.equal(distillWrites[0].sourceArtifactId, "project-timeline:atlas");
   assert.notEqual(distillWrites[0].requestId, distillWrites[1].requestId);
   assert.equal(distillWrites[1].requestId, distillWrites[2].requestId);
 
@@ -268,28 +268,28 @@ try {
     async remember() { return { ok: true }; }
   };
   const router = new ContextRouter(memory, new JsonConversationProjectBindingStore(join(root, "bindings.json")));
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续 ExampleProject", conversationId: "chat", knownProjectIds: ["ExampleProject", "memmy"] })).resolvedProjectId, "ExampleProject");
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续", conversationId: "chat", knownProjectIds: ["ExampleProject", "memmy"] })).resolvedProjectId, "ExampleProject");
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "转到 memmy", conversationId: "chat", knownProjectIds: ["ExampleProject", "memmy"] })).resolvedProjectId, "memmy");
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续", conversationId: "chat", knownProjectIds: ["ExampleProject", "memmy"] })).resolvedProjectId, "memmy");
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "回 ExampleProject", conversationId: "chat", semanticProjectIds: ["ExampleProject"], knownProjectIds: ["ExampleProject", "memmy"] })).resolvedProjectId, "ExampleProject");
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "转到 memmy", conversationId: "chat", projectId: "memmy", knownProjectIds: ["ExampleProject", "memmy"] })).resolvedProjectId, "memmy");
-  assert.deepEqual(calls, ["ExampleProject", "ExampleProject", "memmy", "memmy", "ExampleProject", "memmy"]);
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续 atlas", conversationId: "chat", knownProjectIds: ["atlas", "memmy"] })).resolvedProjectId, "atlas");
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续", conversationId: "chat", knownProjectIds: ["atlas", "memmy"] })).resolvedProjectId, "atlas");
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "转到 memmy", conversationId: "chat", knownProjectIds: ["atlas", "memmy"] })).resolvedProjectId, "memmy");
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续", conversationId: "chat", knownProjectIds: ["atlas", "memmy"] })).resolvedProjectId, "memmy");
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "回 atlas", conversationId: "chat", semanticProjectIds: ["atlas"], knownProjectIds: ["atlas", "memmy"] })).resolvedProjectId, "atlas");
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "转到 memmy", conversationId: "chat", projectId: "memmy", knownProjectIds: ["atlas", "memmy"] })).resolvedProjectId, "memmy");
+  assert.deepEqual(calls, ["atlas", "atlas", "memmy", "memmy", "atlas", "memmy"]);
 
   const branchStore = new JsonProjectBranchStore(join(root, "project-branches.json"));
-  const retrievalBranch = await branchStore.create("acct", "ExampleProject", {
+  const retrievalBranch = await branchStore.create("acct", "atlas", {
     name: "Retrieval",
     goal: "Improve semantic BM25 retrieval and relevant-memory precision."
   });
-  const webBranch = await branchStore.create("acct", "ExampleProject", {
+  const webBranch = await branchStore.create("acct", "atlas", {
     name: "Web",
     goal: "Finish the Control Plane web interface."
   });
-  await branchStore.create("acct", "ExampleProject", {
+  await branchStore.create("acct", "atlas", {
     name: "Network",
     goal: "Diagnose Cloudflare transport stability."
   });
-  assert.equal((await branchStore.list("acct", "ExampleProject")).length, 3);
+  assert.equal((await branchStore.list("acct", "atlas")).length, 3);
   const branchQueries = [];
   const branchMemory = {
     async recall(input) {
@@ -304,14 +304,14 @@ try {
     undefined,
     branchStore
   );
-  await branchStore.bind("acct", "branch-chat", "ExampleProject", retrievalBranch.branchId);
+  await branchStore.bind("acct", "branch-chat", "atlas", retrievalBranch.branchId);
   let branchCapsule = await branchRouter.context({
     accountId: "acct",
     userId: "user",
     query: "继续",
     conversationId: "branch-chat",
-    projectId: "ExampleProject",
-    knownProjectIds: ["ExampleProject"]
+    projectId: "atlas",
+    knownProjectIds: ["atlas"]
   });
   assert.equal(branchCapsule.branchContext?.branchId, retrievalBranch.branchId);
   assert.equal(branchCapsule.branchContext?.source, "conversation_binding");
@@ -321,25 +321,25 @@ try {
     userId: "user",
     query: "继续",
     conversationId: "branch-chat",
-    projectId: "ExampleProject",
+    projectId: "atlas",
     branchId: webBranch.branchId,
-    knownProjectIds: ["ExampleProject"]
+    knownProjectIds: ["atlas"]
   });
   assert.equal(branchCapsule.branchContext?.branchId, webBranch.branchId);
   assert.equal(branchCapsule.branchContext?.source, "explicit");
   assert.match(branchQueries.at(-1), /Control Plane web interface/);
-  assert.equal((await branchStore.current("acct", "branch-chat", "ExampleProject"))?.branchId, webBranch.branchId);
-  await branchStore.close("acct", "ExampleProject", webBranch.branchId);
-  assert.equal(await branchStore.current("acct", "branch-chat", "ExampleProject"), null);
-  assert.equal((await branchStore.list("acct", "ExampleProject")).length, 2);
-  assert.equal((await branchStore.list("acct", "ExampleProject", { includeClosed: true })).length, 3);
+  assert.equal((await branchStore.current("acct", "branch-chat", "atlas"))?.branchId, webBranch.branchId);
+  await branchStore.close("acct", "atlas", webBranch.branchId);
+  assert.equal(await branchStore.current("acct", "branch-chat", "atlas"), null);
+  assert.equal((await branchStore.list("acct", "atlas")).length, 2);
+  assert.equal((await branchStore.list("acct", "atlas", { includeClosed: true })).length, 3);
   const crossProjectBranchCapsule = await branchRouter.context({
     accountId: "acct",
     userId: "user",
     query: "继续",
     conversationId: "branch-chat",
     projectId: "memmy",
-    knownProjectIds: ["ExampleProject", "memmy"]
+    knownProjectIds: ["atlas", "memmy"]
   });
   assert.equal(crossProjectBranchCapsule.branchContext, null);
   await assert.rejects(() => branchRouter.context({
@@ -348,15 +348,15 @@ try {
     query: "继续",
     projectId: "memmy",
     branchId: retrievalBranch.branchId,
-    knownProjectIds: ["ExampleProject", "memmy"]
+    knownProjectIds: ["atlas", "memmy"]
   }), /unknown active branch for project memmy/);
 
   const concurrentBranchPath = join(root, "concurrent-branches.json");
   const concurrentBranchStores = Array.from({ length: 16 }, () => new JsonProjectBranchStore(concurrentBranchPath));
   await Promise.all(concurrentBranchStores.map((store, index) =>
-    store.create("acct", "ExampleProject", { name: `branch-${index}`, goal: `parallel workstream ${index}` })
+    store.create("acct", "atlas", { name: `branch-${index}`, goal: `parallel workstream ${index}` })
   ));
-  assert.equal((await concurrentBranchStores[0].list("acct", "ExampleProject")).length, 16);
+  assert.equal((await concurrentBranchStores[0].list("acct", "atlas")).length, 16);
 
   const resultTransport = new JsonResultTransport(join(root, "result-state"), "acct", 100);
   const largeValue = { payload: "界".repeat(130_000), marker: "generic-result-transport" };
@@ -525,25 +525,36 @@ try {
 
   const projectRegistry = new JsonProjectRegistry(join(state, "project-registry.json"));
   const reconciled = await projectRegistry.reconcile("acct", [
-    "externalmemory", "ExternalMemory", "Memhub", "memhub", "public-fixture"
+    "atlas", "Atlas", "Memhub", "memhub", "delta"
   ]);
-  assert.deepEqual(reconciled.map((item) => item.projectId), ["public-fixture", "memhub", "externalmemory"]);
-  assert.equal(await projectRegistry.resolve("acct", "ExternalMemory"), "externalmemory");
+  assert.deepEqual(reconciled.map((item) => item.projectId), ["atlas", "delta", "memhub"]);
+  assert.equal(await projectRegistry.resolve("acct", "ATLAS"), "atlas");
   assert.equal(await projectRegistry.resolve("acct", "MEMHUB"), "memhub");
-  assert.equal(projectSimilarity("ExternalMemory", "externalmemory"), 1);
-  const ours = await projectRegistry.update("acct", "externalmemory", {
+  assert.equal(projectSimilarity("Atlas", "atlas"), 1);
+  const atlas = await projectRegistry.update("acct", "atlas", {
     description: "Long-term memory research and implementation project."
   });
-  assert.match(ours.description, /Long-term memory/);
-  const suggestion = await projectRegistry.suggest("acct", "OursMemori", 3);
-  assert.equal(suggestion[0]?.projectId, "externalmemory");
+  assert.match(atlas.description, /Long-term memory/);
+  const suggestion = await projectRegistry.suggest("acct", "Atla", 3);
+  assert.equal(suggestion[0]?.projectId, "atlas");
   await projectRegistry.create("acct", {
-    projectId: "ours-memory-next",
+    projectId: "atlas-next",
     description: "Temporary successor project used to verify logical merge."
   });
-  await projectRegistry.merge("acct", "ours-memory-next", "externalmemory");
-  assert.equal(await projectRegistry.resolve("acct", "ours-memory-next"), "externalmemory");
-  assert.ok((await projectRegistry.storageIds("acct", "externalmemory")).includes("ours-memory-next"));
+  await projectRegistry.merge("acct", "atlas-next", "atlas");
+  assert.equal(await projectRegistry.resolve("acct", "atlas-next"), "atlas");
+  assert.ok((await projectRegistry.storageIds("acct", "atlas")).includes("atlas-next"));
+  await projectRegistry.create("acct", { projectId: "archive-me", description: "Archive lifecycle fixture." });
+  await projectRegistry.archive("acct", "archive-me");
+  assert.equal(await projectRegistry.resolve("acct", "archive-me"), null);
+  assert.equal(await projectRegistry.resolve("acct", "archive-me", { includeArchived: true }), "archive-me");
+  assert.equal((await projectRegistry.list("acct")).some((item) => item.projectId === "archive-me"), false);
+  assert.equal((await projectRegistry.list("acct", { includeArchived: true }))
+    .find((item) => item.projectId === "archive-me")?.state, "archived");
+  assert.deepEqual(await projectRegistry.storageIds("acct", "archive-me"), ["archive-me"]);
+  await projectRegistry.unarchive("acct", "archive-me");
+  assert.equal(await projectRegistry.resolve("acct", "archive-me"), "archive-me");
+  assert.equal((await projectRegistry.list("acct")).find((item) => item.projectId === "archive-me")?.state, "active");
   await projectRegistry.create("acct", { projectId: "throwaway", description: "Disposable test project." });
   await projectRegistry.delete("acct", "throwaway");
   assert.equal(await projectRegistry.resolve("acct", "throwaway"), null);
@@ -580,12 +591,12 @@ try {
   const aliasCapsule = await aliasRouter.context({
     accountId: "acct",
     userId: "user",
-    query: "继续 ExternalMemory",
+    query: "continue Atlas",
     conversationId: "alias-chat",
-    knownProjectIds: ["externalmemory", "ExternalMemory"]
+    knownProjectIds: ["atlas", "Atlas"]
   });
-  assert.equal(aliasCapsule.resolvedProjectId, "externalmemory");
-  assert.ok(aliasCalls[0].projectStorageIds.includes("ExternalMemory"));
+  assert.equal(aliasCapsule.resolvedProjectId, "atlas");
+  assert.ok(aliasCalls[0].projectStorageIds.includes("Atlas"));
 
   const owner = await addAccount(state, "owner", "owner@example.com");
   await assert.rejects(() => resolveCloudflareAccount(state, { sub: "unknown", email: "unknown@example.com" }), /允许列表/);

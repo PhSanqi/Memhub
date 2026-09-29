@@ -45,7 +45,7 @@ function testRawTurnProjectFilter() {
     migrate(db);
     const runtime = new RuntimeRepository(db);
     const at = "2026-09-20T00:00:00.000Z";
-    for (const projectId of ["ExampleProject", "memhub"]) {
+    for (const projectId of ["atlas", "memhub"]) {
       const sessionId = `session-${projectId}`;
       const episodeId = `episode-${projectId}`;
       runtime.createSession({
@@ -100,7 +100,7 @@ function testRawTurnProjectFilter() {
       });
     }
     assert.equal(runtime.countRawTurns({ userId: "user-a" }), 2);
-    assert.equal(runtime.countRawTurns({ userId: "user-a", projectIds: ["ExampleProject"] }), 1);
+    assert.equal(runtime.countRawTurns({ userId: "user-a", projectIds: ["atlas"] }), 1);
     assert.deepEqual(runtime.rawTurnStats({ userId: "user-a" }), {
       total: 2,
       succeeded: 2,
@@ -108,11 +108,11 @@ function testRawTurnProjectFilter() {
       captureManagedSucceeded: 0
     });
     assert.equal(runtime.countRawTurns({ userId: "user-a", sessionSource: "test" }), 2);
-    const exampleTurns = runtime.listRawTurns({ userId: "user-a", projectIds: ["ExampleProject"] }, 10, 0);
-    assert.equal(exampleTurns.length, 1);
-    assert.equal(exampleTurns[0].projectId, "ExampleProject");
-    assert.equal(exampleTurns[0].sessionSource, "test");
-    assert.equal(exampleTurns[0].userText, "user ExampleProject");
+    const atlasTurns = runtime.listRawTurns({ userId: "user-a", projectIds: ["atlas"] }, 10, 0);
+    assert.equal(atlasTurns.length, 1);
+    assert.equal(atlasTurns[0].projectId, "atlas");
+    assert.equal(atlasTurns[0].sessionSource, "test");
+    assert.equal(atlasTurns[0].userText, "user atlas");
   } finally {
     db.close();
   }
