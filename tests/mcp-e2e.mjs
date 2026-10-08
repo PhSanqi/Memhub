@@ -24,6 +24,7 @@ import {
   leaseDistillationJob,
   listDistillationJobs,
   quarantineDistillationJobAfterCoreCommit,
+  recordCompletedDistillationRevision,
   retryDistillationJob,
   setDistillationConfig
 } from "../dist/distillation-jobs.js";
@@ -196,13 +197,19 @@ function consoleHtmlWithBrowserMocks(html) {
     l2:{total:1,items:[{id:"l2-browser-1",project_id:"alpha",title:"Alpha timeline",summary:"Current project chronology",body:"# Alpha timeline\\n\\n## 2026-09-20 Initial decision\\nThe first durable decision was recorded.\\n\\n## 2026-09-21 Responsive review\\nThe mobile review identified navigation discoverability work.",updatedAt:"2026-09-21T08:20:00.000Z"}]},
     l3:{total:1,items:[{id:"l3-browser-1",project_id:"alpha",title:"Alpha durable rules",summary:"Durable project rules",body:"- Preserve root overflow at zero.\\n- Keep mobile navigation discoverable.\\n- Verify browser evidence before acceptance.",updatedAt:"2026-09-21T08:25:00.000Z"}]},
     l4:{total:1,items:[{id:"l4-browser-1",title:"Cross-project profile",summary:"Stable cross-project working profile",body:"- Prefers evidence-backed verification.\\n- Prefers minimal sufficient architecture.",updatedAt:"2026-09-21T08:30:00.000Z"}]},
-    skills:{total:1,items:[{id:"skill-browser-1",title:"Responsive review",summary:"Reusable frontend review procedure",status:"active"}]},
+    skills:{total:2,items:[
+      {id:"skill-browser-1",title:"Responsive review",summary:"Reusable frontend review procedure",status:"activated",tags:["distilled","artifact:skill","project:alpha"]},
+      {id:"skill-browser-external",title:"Review agent",summary:"Installed external review workflow",status:"activated",tags:["legacy-import","agent-source","cross-agent-skill"]}
+    ]},
     processing:{config:{auto_enabled:true,turn_threshold:8,idle_minutes:30},items:[
       {job_id:"job-browser-1",target:"l2",project_id:"alpha",reason:"threshold",evidence_refs:["l1:browser"],status:"failed",failure:"Simulated L2 evidence mismatch",failure_kind:"core_error",failed_at:"2026-09-21T08:35:00.000Z",attempts:2,updated_at:"2026-09-21T08:35:00.000Z"},
       {job_id:"job-browser-ambiguous",target:"l2",project_id:"beta",reason:"threshold",evidence_refs:["l1:ambiguous"],status:"failed",failure:"Ambiguous Core commit requires manual reconciliation",failure_kind:"ambiguous_core_commit",failed_at:"2026-09-21T08:34:00.000Z",attempts:1,updated_at:"2026-09-21T08:34:00.000Z"}
     ]},
     accounts:{total:1,items:[{account_id:"acct-browser",username:"browser-admin",cloudflare_email:"operator.long.identity@example.org",role:"admin",status:"active"}]}
   };
+  payloads.overview.projects = payloads.projects.items;
+  payloads.overview.layers = { l2: payloads.l2.items, l3: payloads.l3.items };
+  payloads.overview.processing = { ...payloads.overview.processing, items: payloads.processing.items };
   const serialized=JSON.stringify(payloads).replaceAll("<","\\u003c");
   const mockScript=[
     "<script>",
@@ -235,8 +242,8 @@ async function runConsoleBrowserScenario({chromium,html,page,width,full}) {
     "const sidebar=d.querySelector(\'.console-sidebar\'),flow=d.querySelector(\'.memory-flow\');check(\'lifecycle-four-layers\',flow?.querySelectorAll(\'[data-view-target]\').length===4);if("+width+"===390)check(\'lifecycle-complete-mobile\',flow.scrollWidth<=flow.clientWidth+1);",
     "if("+JSON.stringify(page)+"==='workspace'){const ps=d.getElementById('project-select');ps.value='';ps.dispatchEvent(new Event('change',{bubbles:true}));await settle();await clickView('overview');check('all-projects-portfolio',d.querySelectorAll('.portfolio-record').length>=2,String(d.querySelectorAll('.portfolio-record').length));check('overview-title-continue',/Continue working|继续工作/.test(d.getElementById('workspace-title')?.textContent||''));await clickView('l2');check('subview-title-specific',!/Continue working|继续工作/.test(d.getElementById('workspace-title')?.textContent||'')&&/Project chronology|项目时间线/.test(d.getElementById('workspace-title')?.textContent||''))}",
     "if(!"+fullFlag+"){await clickView(\'processing\');await settle(260);check(\'mobile-view-processing\',d.getElementById(\'mobile-view-select\')?.value===\'processing\');check(\'root-overflow-after-nav\',d.documentElement.scrollWidth===d.documentElement.clientWidth);out.textContent=JSON.stringify({checks});return}",
-    "for(const v of ['overview','projects','l1','l2','l3','l4','processing']){await clickView(v);check('rendered-'+v,!!d.getElementById('items')?.textContent.trim())}",
-    "if("+JSON.stringify(page)+"==='admin'){await clickView('overview');check('overview-single-heading',d.getElementById('view-title').getClientRects().length===0);check('overview-followup-wide',d.querySelector('.overview-todos')?.getBoundingClientRect().width>=d.querySelector('.admin-health-card')?.getBoundingClientRect().width-1);await clickView('processing');const toggle=d.getElementById('cfg-auto');check('policy-switch-semantic',toggle?.getAttribute('role')==='switch'&&toggle?.closest('label')?.textContent.includes('Automatic'));check('processing-failure-summary',d.querySelector('.job-error')?.textContent.includes('evidence mismatch'));check('processing-retry-action',d.querySelectorAll('.job-quick-retry').length===1);check('processing-ambiguous-no-quick-retry',d.querySelectorAll('.job-entry').length===2&&d.querySelectorAll('.job-entry')[1]?.querySelector('.job-quick-retry')===null);d.querySelector('.job-row')?.click();await settle(40);check('processing-detail-failure',d.querySelector('.job-failure-detail')?.textContent.includes('evidence mismatch'));w.closeDrawer();await settle(30);d.querySelectorAll('.job-row')[1]?.click();await settle(40);check('processing-ambiguous-drawer-no-retry',!d.querySelector('#drawer-body [data-retry-index]'));w.closeDrawer();await settle(30);await clickView('accounts');check('account-email-primary',d.querySelector('.account-identity')?.textContent==='operator.long.identity@example.org');check('account-uuid-secondary',d.querySelector('.account-record-meta code')?.textContent==='acct-browser');check('account-no-default-json',!d.querySelector('.account-record pre'));d.querySelector('.account-record-main')?.click();await settle(40);check('account-structured-detail',!!d.querySelector('.account-detail')&&d.getElementById('drawer-title')?.textContent.includes('operator.long.identity@example.org'));w.closeDrawer()}",
+    "for(const v of ['overview','projects','l1','l2','l3','l4','skills','processing']){await clickView(v);check('rendered-'+v,!!d.getElementById('items')?.textContent.trim())}",
+    "if("+JSON.stringify(page)+"==='admin'){await clickView('skills');check('skill-governed-group',d.querySelectorAll('.skill-group.governed .memory-row').length===1);check('skill-external-group',d.querySelectorAll('.skill-group.external .memory-row').length===1);check('skill-external-collapsed',!d.querySelector('.skill-group.external')?.open);await clickView('overview');check('overview-single-heading',d.getElementById('view-title').getClientRects().length===0);check('overview-followup-wide',d.querySelector('.overview-todos')?.getBoundingClientRect().width>=d.querySelector('.admin-health-card')?.getBoundingClientRect().width-1);await clickView('processing');const toggle=d.getElementById('cfg-auto');check('policy-switch-semantic',toggle?.getAttribute('role')==='switch'&&toggle?.closest('label')?.textContent.includes('Automatic'));check('processing-failure-summary',d.querySelector('.job-error')?.textContent.includes('evidence mismatch'));check('processing-retry-action',d.querySelectorAll('.job-quick-retry').length===1);check('processing-ambiguous-no-quick-retry',d.querySelectorAll('.job-entry').length===2&&d.querySelectorAll('.job-entry')[1]?.querySelector('.job-quick-retry')===null);d.querySelector('.job-row')?.click();await settle(40);check('processing-detail-failure',d.querySelector('.job-failure-detail')?.textContent.includes('evidence mismatch'));w.closeDrawer();await settle(30);d.querySelectorAll('.job-row')[1]?.click();await settle(40);check('processing-ambiguous-drawer-no-retry',!d.querySelector('#drawer-body [data-retry-index]'));w.closeDrawer();await settle(30);await clickView('accounts');check('account-email-primary',d.querySelector('.account-identity')?.textContent==='operator.long.identity@example.org');check('account-uuid-secondary',d.querySelector('.account-record-meta code')?.textContent==='acct-browser');check('account-no-default-json',!d.querySelector('.account-record pre'));d.querySelector('.account-record-main')?.click();await settle(40);check('account-structured-detail',!!d.querySelector('.account-detail')&&d.getElementById('drawer-title')?.textContent.includes('operator.long.identity@example.org'));w.closeDrawer()}",
     "await clickView('projects');check('long-project-content',d.querySelector('.project-ledger-record p')?.textContent.length>80);w.__browserMock.delayNextGet=true;d.querySelector('aside button[data-view=\\\"l1\\\"]')?.click();check('loading-state-visible',!!d.querySelector('.loading-state'));await settle(230);check('loading-state-clears',!d.querySelector('.loading-state'));",
     "w.__browserMock.failNext=true;d.getElementById('refresh').click();await settle(110);check('load-error-visible',!!d.querySelector('.load-error'));check('load-error-retry',!!d.querySelector('.load-error button'));check('load-error-details',!!d.querySelector('.load-error details'));d.querySelector('.load-error button').click();await settle();check('load-error-recovers',!d.querySelector('.load-error'));",
     "await clickView('projects');const card=d.querySelector('.project-ledger-record');card.focus();card.click();await settle(40);const drawer=d.getElementById('drawer');check('drawer-open',!drawer.classList.contains('hidden'));const labelled=drawer.getAttribute('aria-labelledby');check('drawer-accessible-name',!!(labelled&&d.getElementById(labelled)?.textContent.trim()));check('drawer-focus-enters',drawer.contains(d.activeElement));check('background-inert',d.getElementById('main-content').hasAttribute('inert'));let fs=[...drawer.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),summary,[tabindex]:not([tabindex=\\\"-1\\\"])')].filter(e=>e.getClientRects().length);fs.at(-1).focus();d.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}));check('drawer-tab-trap',d.activeElement===fs[0]);",
@@ -335,6 +342,24 @@ const memory = createServer(async (request, response) => {
       return;
     }
     const project = body.namespace?.projectId;
+    if (body.query === "__exact_evidence_ref_probe__" && project) {
+      const record = [...memoryById.values()].find((item) =>
+        item.memoryLayer === "L2" && item.namespace?.projectId === project
+      );
+      response.end(JSON.stringify({ hits: record ? [{
+        id: record.id,
+        kind: "timeline",
+        memoryLayer: record.memoryLayer,
+        status: record.status,
+        snippet: record.body,
+        score: 0.99,
+        tags: record.tags,
+        source: "search",
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt
+      }] : [] }));
+      return;
+    }
     response.end(JSON.stringify({ hits: project
       ? [hit("global", "global", ["global"]), hit("project", `project ${project}`, [`project:${project}`])]
       : [hit("global", "global", ["global"])] }));
@@ -364,10 +389,13 @@ const memory = createServer(async (request, response) => {
     ].join("\0");
     const prior = memoryRecords.get(memoryKey);
     const id = prior?.id ?? `memory-${++memorySequence}`;
+    const writtenAt = new Date().toISOString();
     const record = {
       id,
       memoryLayer: body.layer ?? "L1",
       status: "activated",
+      createdAt: prior?.createdAt ?? writtenAt,
+      updatedAt: writtenAt,
       title: body.title,
       summary: String(body.content ?? "").split(/\r?\n/, 1)[0],
       body: body.content,
@@ -456,7 +484,9 @@ const memory = createServer(async (request, response) => {
       .filter((item) => item.memoryLayer === layer)
       .filter((item) => !userId || item.namespace?.userId === userId)
       .filter((item) => !projectId || item.namespace?.projectId === projectId);
-    response.end(JSON.stringify({ items, total: items.length }));
+    const includeBody = ["1", "true"].includes((viewerUrl.searchParams.get("includeBody") ?? "").toLowerCase());
+    const renderedItems = includeBody ? items : items.map(({ body: _body, ...item }) => item);
+    response.end(JSON.stringify({ items: renderedItems, total: items.length }));
     return;
   }
   if (request.url === "/api/v1/sessions/open") {
@@ -1152,6 +1182,39 @@ async function testLocalAdmin(memoryPort) {
     assert.equal(userOverviewPayload.todos.total, 1);
     assert.equal(userOverviewPayload.todos.projects, 1);
     assert.deepEqual(userOverviewPayload.todos.pending.map((todo) => todo.text), ["Finish the pending Alpha task."]);
+    assert.ok(Array.isArray(userOverviewPayload.projects));
+    assert.ok(userOverviewPayload.projects.every((project) => !Object.hasOwn(project, "todos")));
+    assert.ok(Array.isArray(userOverviewPayload.layers?.l2));
+    assert.ok(Array.isArray(userOverviewPayload.layers?.l3));
+    assert.ok([...userOverviewPayload.layers.l2, ...userOverviewPayload.layers.l3].every((item) =>
+      !Object.hasOwn(item, "tags") && !Object.hasOwn(item, "body")
+    ));
+    assert.ok(Array.isArray(userOverviewPayload.processing?.items));
+    assert.ok(userOverviewPayload.processing.items.every((item) =>
+      Object.keys(item).every((key) => key === "project_id" || key === "status") &&
+      ["failed", "pending", "leased"].includes(item.status)
+    ));
+
+    const detailReadsBefore = requests.filter((entry) => /^\/api\/v1\/memory\/[^/?]+$/.test(entry.url ?? "")).length;
+    const layerRequestOffset = requests.length;
+    const l2View = await fetch(`http://127.0.0.1:${port}/memhub/user/api?kind=l2`, { headers: { authorization } });
+    assert.equal(l2View.status, 200);
+    const l2ViewPayload = await l2View.json();
+    const layerRequests = requests.slice(layerRequestOffset).map((entry) => entry.url ?? "");
+    assert.ok(layerRequests.some((value) => {
+      const parsed = new URL(value, "http://127.0.0.1");
+      return parsed.pathname === "/api/v1/l2" && parsed.searchParams.get("includeBody") === "1";
+    }));
+    assert.equal(
+      requests.filter((entry) => /^\/api\/v1\/memory\/[^/?]+$/.test(entry.url ?? "")).length,
+      detailReadsBefore,
+      "hydrated memory layers must not perform per-record detail reads"
+    );
+    if (l2ViewPayload.items.length > 0) assert.equal(typeof l2ViewPayload.items[0].body, "string");
+
+    const adminOverview = await fetch(`http://127.0.0.1:${port}/memhub/admin/api?kind=overview`, { headers: { authorization } });
+    assert.equal(adminOverview.status, 200);
+    assert.equal((await adminOverview.json()).account_count, 1);
     const hiddenLegacyView = await fetch(`http://127.0.0.1:${port}/memhub/admin/api?kind=captures`, { headers: { authorization } });
     assert.equal(hiddenLegacyView.status, 400);
     const accountsView = await fetch(`http://127.0.0.1:${port}/memhub/admin/api?kind=accounts`, { headers: { authorization } });
@@ -1255,7 +1318,7 @@ async function testStdio(memoryPort) {
   await writeFile(join(root, "Memhub", "package.json"), JSON.stringify({ name: "memhub-test-project" }) + "\n");
   await writeFile(
     join(architectureDir, "core.md"),
-    "# Atlas Core Architecture\n\nBroker routes work to the harness router. Current constraint: preserve explicit workspace ownership.\n"
+    "# atlas Core Architecture\n\nBroker routes work to the harness router. Current constraint: preserve explicit workspace ownership.\n"
   );
   await writeFile(
     join(currentArchitectureDir, "ARCHITECTURE.md"),
@@ -2253,17 +2316,12 @@ async function exerciseClient(client, conversationId, stateRoot) {
     assert.deepEqual(schema.required ?? [], required);
     assert.equal(schema.additionalProperties, false);
   }
-  const projectManageHelp = listed.tools.find((tool) => tool.name === "memmy_project_manage").inputSchema;
-  assert.ok(projectManageHelp.properties.operation.enum.includes("archive"));
-  assert.ok(projectManageHelp.properties.operation.enum.includes("unarchive"));
-  const projectListHelp = listed.tools.find((tool) => tool.name === "memmy_project_list").inputSchema;
-  assert.equal(projectListHelp.properties.include_archived.type, "boolean");
   const distillHelp = listed.tools.find((tool) => tool.name === "memhub_distill").inputSchema;
   assert.equal(distillHelp.properties.event_id.type, "string");
   assert.equal(distillHelp.properties.lease_token.type, "string");
   assert.equal(distillHelp.properties.lease_token_supported.type, "boolean");
   assert.equal(distillHelp.properties.lease_seconds.minimum, 30);
-  let projectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "Atlas" } })).content[0].text);
+  let projectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "atlas" } })).content[0].text);
   if (!projectList.projects.some((project) => project.project === "atlas")) {
     const createPlan = JSON.parse((await client.callTool({
       name: "memmy_project_manage",
@@ -2271,7 +2329,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
         action: "plan",
         operation: "create",
         project: "atlas",
-        description: "Atlas project used by MCP integration tests."
+        description: "atlas project used by MCP integration tests."
       }
     })).content[0].text);
     assert.equal(createPlan.status, "awaiting_user_authorization");
@@ -2280,7 +2338,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
       arguments: { action: "execute", authorization_id: createPlan.authorization_id }
     })).content[0].text);
     assert.equal(createResult.ok, true);
-    projectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "Atlas" } })).content[0].text);
+    projectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "atlas" } })).content[0].text);
   }
   assert.ok(projectList.projects.some((project) => project.project === "atlas"));
   const distillationAudit = JSON.parse((await client.callTool({
@@ -2431,7 +2489,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
   const baselineTotalCount = baselineTodos.total;
   const addedTodo = JSON.parse((await client.callTool({
     name: "memhub_todo",
-    arguments: { action: "add", project: "Atlas", text: "Verify the dedicated MCP todo lifecycle." }
+    arguments: { action: "add", project: "atlas", text: "Verify the dedicated MCP todo lifecycle." }
   })).content[0].text);
   assert.equal(addedTodo.ok, true);
   assert.equal(addedTodo.project, "atlas");
@@ -2439,7 +2497,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(addedTodo.pending_count, baselinePendingCount + 1);
   const contextWithRelevantTodo = JSON.parse((await client.callTool({
     name: "memmy_context",
-    arguments: { query: "dedicated MCP todo lifecycle", project: "Atlas" }
+    arguments: { query: "dedicated MCP todo lifecycle", project: "atlas" }
   })).content[0].text);
   const atlasCandidateWithTodo = contextWithRelevantTodo.projectCandidates.find((project) => project.project === "atlas");
   assert.ok(atlasCandidateWithTodo);
@@ -2484,7 +2542,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
   })).content[0].text);
   assert.equal(accountTodos.scope, "account");
   assert.ok(accountTodos.projects.some((project) => project.project === "atlas" && project.todos.some((todo) => todo.id === addedTodo.todo.id)));
-  const projectListWithTodo = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "Atlas" } })).content[0].text);
+  const projectListWithTodo = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "atlas" } })).content[0].text);
   assert.equal(projectListWithTodo.projects.find((project) => project.project === "atlas")?.pendingTodoCount, baselinePendingCount + 1);
   const currentWithoutConversation = JSON.parse((await client.callTool({
     name: "memmy_project",
@@ -2495,7 +2553,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(currentWithoutConversation.resolution_source, "conversation_id_unavailable");
   const currentExplicitWithoutConversation = JSON.parse((await client.callTool({
     name: "memmy_project",
-    arguments: { action: "current", project: "Atlas" }
+    arguments: { action: "current", project: "atlas" }
   })).content[0].text);
   assert.equal(currentExplicitWithoutConversation.project, "atlas");
   assert.equal(currentExplicitWithoutConversation.binding_available, false);
@@ -2503,7 +2561,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(currentExplicitWithoutConversation.persisted, false);
   const currentWorkspaceWithoutConversation = JSON.parse((await client.callTool({
     name: "memmy_project",
-    arguments: { action: "current", workspace_project: "Atlas" }
+    arguments: { action: "current", workspace_project: "atlas" }
   })).content[0].text);
   assert.equal(currentWorkspaceWithoutConversation.project, "atlas");
   assert.equal(currentWorkspaceWithoutConversation.resolution_source, "workspace_project");
@@ -2532,7 +2590,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.match(conflictingTodoScope.content[0].text, /project\/workspace conflict/);
   const unresolved = JSON.parse((await client.callTool({
     name: "memmy_context",
-    arguments: { query: "continue the AtlasE work", project: "atlase", conversation_id: conversationId + "-unknown" }
+    arguments: { query: "continue the ATLASE work", project: "atlase", conversation_id: conversationId + "-unknown" }
   })).content[0].text);
   assert.equal(unresolved.resolvedProjectId, null);
   assert.equal(unresolved.recallScope, "global_only");
@@ -2556,9 +2614,9 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(blankAlias.isError, true);
   assert.match(blankAlias.content[0].text, /aliases must contain only non-empty strings/);
   const updatedDescription = projectList.projects.find((item) => item.project === "atlas").description ===
-    "Atlas project used by MCP integration tests (verified)."
-    ? "Atlas project used by MCP integration tests (reverified)."
-    : "Atlas project used by MCP integration tests (verified).";
+    "atlas project used by MCP integration tests (verified)."
+    ? "atlas project used by MCP integration tests (reverified)."
+    : "atlas project used by MCP integration tests (verified).";
   const updatePlanResult = await client.callTool({
     name: "memmy_project_manage",
     arguments: {
@@ -2584,9 +2642,8 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.match(updatedList.projects.find((project) => project.project === "atlas")?.description ?? "", /integration tests/);
   const mergeTarget = `merge-target-${conversationId}`;
   const mergeSource = `merge-source-${conversationId}`;
-  const archiveProject = `archive-${conversationId}`;
   const deleteProject = `delete-${conversationId}`;
-  for (const project of [mergeTarget, mergeSource, archiveProject, deleteProject]) {
+  for (const project of [mergeTarget, mergeSource, deleteProject]) {
     const plan = JSON.parse((await client.callTool({
       name: "memmy_project_manage",
       arguments: {
@@ -2647,80 +2704,6 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: { action: "skip", job_id: mergeJob.job.job_id, source_harness: mergeHarness }
   })).content[0].text).ok, true);
 
-  const archiveHistoricalJob = await enqueueDerivedDistillationJob({
-    stateRoot,
-    accountId: "acct-test",
-    target: "l3",
-    projectId: archiveProject,
-    evidence: [{
-      ref: `artifact:archive-historical-${conversationId}`,
-      kind: "artifact",
-      timestamp: "2026-09-22T00:00:00.000Z",
-      project_id: archiveProject,
-      layer: "L2",
-      content: "Historical failed evidence remains audit history and must not be deleted by archive."
-    }]
-  });
-  const archiveHistoricalHarness = `archive-failed-${conversationId}`;
-  const archiveHistoricalLease = await leaseDistillationJob(stateRoot, "acct-test", {
-    projectId: archiveProject,
-    target: "l3",
-    harness: archiveHistoricalHarness
-  });
-  assert.equal(archiveHistoricalLease?.job_id, archiveHistoricalJob.job.job_id);
-  await failDistillationJob(
-    stateRoot,
-    "acct-test",
-    archiveHistoricalJob.job.job_id,
-    "historical failure preserved for archive regression",
-    archiveHistoricalHarness
-  );
-  const archivePlan = JSON.parse((await client.callTool({
-    name: "memmy_project_manage",
-    arguments: { action: "plan", operation: "archive", project: archiveProject }
-  })).content[0].text);
-  assert.equal(archivePlan.impact.logicalArchive, true);
-  assert.equal(archivePlan.impact.memoryPurged, false);
-  assert.equal(archivePlan.impact.hiddenByDefault, true);
-  assert.equal(archivePlan.impact.restorable, true);
-  assert.equal(archivePlan.impact.blockedByDistillationJobs.length, 0);
-  assert.deepEqual(
-    archivePlan.impact.preservedFailedDistillationJobs.map((job) => job.job_id),
-    [archiveHistoricalJob.job.job_id]
-  );
-  assert.equal(JSON.parse((await client.callTool({
-    name: "memmy_project_manage",
-    arguments: { action: "execute", authorization_id: archivePlan.authorization_id }
-  })).content[0].text).result.state, "archived");
-  const defaultAfterArchive = JSON.parse((await client.callTool({
-    name: "memmy_project_list", arguments: { query: archiveProject }
-  })).content[0].text);
-  assert.equal(defaultAfterArchive.projects.some((project) => project.project === archiveProject), false);
-  assert.equal(defaultAfterArchive.matches.some((project) => project.project === archiveProject), false);
-  const explicitArchivedList = JSON.parse((await client.callTool({
-    name: "memmy_project_list", arguments: { query: archiveProject, include_archived: true }
-  })).content[0].text);
-  assert.equal(explicitArchivedList.projects.find((project) => project.project === archiveProject)?.state, "archived");
-  assert.equal(explicitArchivedList.matches[0]?.project, archiveProject);
-  const unarchivePlan = JSON.parse((await client.callTool({
-    name: "memmy_project_manage",
-    arguments: { action: "plan", operation: "unarchive", project: archiveProject }
-  })).content[0].text);
-  assert.equal(unarchivePlan.impact.restoresActiveRouting, true);
-  assert.equal(unarchivePlan.impact.memoryPreserved, true);
-  assert.equal(JSON.parse((await client.callTool({
-    name: "memmy_project_manage",
-    arguments: { action: "execute", authorization_id: unarchivePlan.authorization_id }
-  })).content[0].text).result.state, "active");
-  const finalArchivePlan = JSON.parse((await client.callTool({
-    name: "memmy_project_manage",
-    arguments: { action: "plan", operation: "archive", project: archiveProject }
-  })).content[0].text);
-  assert.equal(JSON.parse((await client.callTool({
-    name: "memmy_project_manage",
-    arguments: { action: "execute", authorization_id: finalArchivePlan.authorization_id }
-  })).content[0].text).result.state, "archived");
-
   const deleteJob = await enqueueDerivedDistillationJob({
     stateRoot,
     accountId: "acct-test",
@@ -2777,7 +2760,6 @@ async function exerciseClient(client, conversationId, stateRoot) {
   })).content[0].text).projects;
   assert.equal(historicalProjects.find((project) => project.project === mergeSource)?.state, "merged");
   assert.equal(historicalProjects.find((project) => project.project === mergeSource)?.mergedInto, mergeTarget);
-  assert.equal(historicalProjects.find((project) => project.project === archiveProject)?.state, "archived");
   assert.equal(historicalProjects.find((project) => project.project === deleteProject)?.state, "deleted");
   await client.callTool({ name: "memmy_project", arguments: { action: "bind", conversation_id: conversationId, project: "atlas" } });
   const context = await client.callTool({ name: "memmy_context", arguments: { query: "continue", conversation_id: conversationId } });
@@ -2786,7 +2768,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(capsule.globalMemory.length, 1);
   assert.equal(capsule.projectMemory.length, 1);
   if (conversationId === "stdio-chat") {
-    assert.ok(capsule.projectArchitecture.some((item) => /Atlas Core Architecture/.test(item.content)));
+    assert.ok(capsule.projectArchitecture.some((item) => /atlas Core Architecture/.test(item.content)));
     const architecture = JSON.parse((await client.callTool({
       name: "memmy_project",
       arguments: { action: "architecture", project: "atlas", query: "broker workspace ownership" }
@@ -2970,7 +2952,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: { inspect_contract: true }
   });
   const contractPayload = JSON.parse(contractResult.content[0].text);
-  assert.equal(contractPayload.contract.version, "memhub-distill-v2");
+  assert.equal(contractPayload.contract.version, "memhub-distill-v3");
   assert.equal(contractPayload.contract.executor, "connected_mcp_or_harness_model");
 
   const golden = await exerciseGoldenDistillationChain(client, stateRoot, conversationId, l1EventId);
@@ -2981,12 +2963,60 @@ async function exerciseClient(client, conversationId, stateRoot) {
       kind: "l4",
       scope: "account",
       content: "Durable cross-project evidence-backed user profile candidate.",
-      evidence_refs: [`l3:${golden.atlasL3Id}`, `l3:${golden.betaL3Id}`],
+      evidence_refs: [golden.atlasL3Ref, golden.betaL3Ref],
       dry_run: true
     }
   });
   assert.equal(JSON.parse(dryRun.content[0].text).dryRun, true);
   assert.equal(requests.filter((entry) => entry.url === "/api/v1/memory/add").length, writesBeforeDryRun);
+
+  const exactContext = JSON.parse((await client.callTool({
+    name: "memmy_context",
+    arguments: { query: "__exact_evidence_ref_probe__", project: "atlas" }
+  })).content[0].text);
+  const exactL2 = exactContext.projectMemory.find((item) => item.id === golden.atlasL2Id);
+  assert.ok(exactL2);
+  assert.equal(exactL2.evidenceRef, golden.atlasL2Ref);
+
+  const stableRefRejected = await client.callTool({
+    name: "memhub_distill",
+    arguments: {
+      kind: "l3",
+      scope: "project",
+      project: "atlas",
+      content: "A mutable stable Memory id must not be accepted as exact L2 evidence.",
+      evidence_refs: [`l2:${golden.atlasL2Id}`],
+      dry_run: true
+    }
+  });
+  assert.equal(stableRefRejected.isError, true);
+  assert.match(stableRefRejected.content[0].text, /MEMHUB_EVIDENCE_REF_INVALID/);
+  assert.match(stableRefRejected.content[0].text, /memmy_context/);
+
+  const directL3 = JSON.parse((await client.callTool({
+    name: "memhub_distill",
+    arguments: {
+      kind: "l3",
+      scope: "project",
+      project: "atlas",
+      artifact_id: `direct-ledger-${conversationId}`,
+      content: "Direct manual L3 writes also leave an immutable completed revision ledger.",
+      evidence_refs: [golden.atlasL2Ref],
+      source_harness: "direct-ledger-test"
+    }
+  })).content[0].text);
+  assert.match(directL3.result_evidence_ref, new RegExp(`^l3:${directL3.memory.id}:[^:]+$`));
+  const directL4DryRun = JSON.parse((await client.callTool({
+    name: "memhub_distill",
+    arguments: {
+      kind: "l4",
+      scope: "account",
+      content: "Direct revision refs remain valid immutable evidence for downstream synthesis.",
+      evidence_refs: [directL3.result_evidence_ref, golden.betaL3Ref],
+      dry_run: true
+    }
+  })).content[0].text);
+  assert.equal(directL4DryRun.dryRun, true);
 
   const invalidDryRun = await client.callTool({
     name: "memhub_distill",
@@ -3000,7 +3030,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     }
   });
   assert.equal(invalidDryRun.isError, true);
-  assert.match(invalidDryRun.content[0].text, /404|not_found|evidence/i);
+  assert.match(invalidDryRun.content[0].text, /MEMHUB_EVIDENCE_REF_INVALID/);
 
   const otherAccountEvidenceId = `other-account-l2-${conversationId}`;
   memoryById.set(otherAccountEvidenceId, {
@@ -3014,6 +3044,26 @@ async function exerciseClient(client, conversationId, stateRoot) {
     namespace: { tenantId: "acct-other", userId: "acct_other_user", projectId: "atlas" },
     version: 1
   });
+  const otherAccountRevision = await recordCompletedDistillationRevision({
+    stateRoot,
+    accountId: "acct-other",
+    target: "l2",
+    projectId: "atlas",
+    conversationId: "other-account-conversation",
+    evidence: [{
+      ref: "l1:other-account-turn",
+      kind: "turn",
+      layer: "L1",
+      timestamp: new Date().toISOString(),
+      project_id: "atlas",
+      conversation_id: "other-account-conversation",
+      user_text: "other account user",
+      assistant_text: "other account assistant"
+    }],
+    resultId: otherAccountEvidenceId,
+    content: "Must never be accepted as current-account evidence.",
+    committedAt: new Date().toISOString()
+  });
   const crossAccountEvidence = await client.callTool({
     name: "memhub_distill",
     arguments: {
@@ -3021,12 +3071,32 @@ async function exerciseClient(client, conversationId, stateRoot) {
       scope: "project",
       project: "atlas",
       content: "This must not validate against another account's L2.",
-      evidence_refs: [`l2:${otherAccountEvidenceId}`],
+      evidence_refs: [`l2:${otherAccountEvidenceId}:${otherAccountRevision.job_id}`],
       dry_run: true
     }
   });
   assert.equal(crossAccountEvidence.isError, true);
-  assert.match(crossAccountEvidence.content[0].text, /current account scope/i);
+  assert.match(crossAccountEvidence.content[0].text, /MEMHUB_EVIDENCE_REF_INVALID/);
+
+  const missingSkillIdentity = await client.callTool({
+    name: "memhub_distill",
+    arguments: {
+      kind: "skill", scope: "project", conversation_id: conversationId,
+      title: "atlas unstable skill", content: "Reusable procedure", version: "1.0.0", dry_run: true
+    }
+  });
+  assert.equal(missingSkillIdentity.isError, true);
+  assert.match(missingSkillIdentity.content[0].text, /artifact_id is required for Skill distillation/);
+  const invalidSkillVersion = await client.callTool({
+    name: "memhub_distill",
+    arguments: {
+      kind: "skill", scope: "project", conversation_id: conversationId,
+      title: "atlas unstable skill", content: "Reusable procedure", artifact_id: "atlas-unstable",
+      version: "1.0-retracted", dry_run: true
+    }
+  });
+  assert.equal(invalidSkillVersion.isError, true);
+  assert.match(invalidSkillVersion.content[0].text, /numeric dotted/);
 
   const reconnectArtifactId = `atlas-reconnect-${conversationId}`;
   await client.callTool({
@@ -3035,11 +3105,11 @@ async function exerciseClient(client, conversationId, stateRoot) {
       kind: "skill",
       scope: "project",
       conversation_id: conversationId,
-      title: "Atlas reconnect workflow",
-      content: "Use this when Atlas reconnect fails. Inspect state, repair the bridge, then verify reconnection.",
+      title: "atlas reconnect workflow",
+      content: "Use this when atlas reconnect fails. Inspect state, repair the bridge, then verify reconnection.",
       source_harness: "codex",
       artifact_id: reconnectArtifactId,
-      version: "1",
+      version: "1.0.0",
       evidence_refs: ["l1:test-turn"],
       source_conversations: [conversationId],
       confidence: 0.9
@@ -3051,16 +3121,16 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(skillWrite.body.namespace.tenantId, "acct-test");
   assert.equal(skillWrite.body.sourceAgentId, "codex");
   assert.equal(skillWrite.body.sourceSkillId, reconnectArtifactId);
-  assert.equal(skillWrite.body.sourceSkillVersion, "1");
+  assert.equal(skillWrite.body.sourceSkillVersion, "1.0.0");
   assert.ok(skillWrite.body.tags.includes("artifact:skill"));
   assert.ok(skillWrite.body.tags.includes("project:atlas"));
-  assert.ok(skillWrite.body.tags.includes("distill-contract:memhub-distill-v2"));
+  assert.ok(skillWrite.body.tags.includes("distill-contract:memhub-distill-v3"));
   assert.ok(skillWrite.body.tags.includes("evidence:l1:test-turn"));
   assert.ok(skillWrite.body.tags.includes(`source-conversation:${conversationId}`));
   assert.equal(typeof skillWrite.body.requestId, "string");
 
   const skillRecord = [...memoryById.values()].find((item) => item.memoryLayer === "Skill" &&
-    item.title === "Atlas reconnect workflow" &&
+    item.title === "atlas reconnect workflow" &&
     item.metadata?.properties?.internal_info?.source_skill_id === reconnectArtifactId);
   assert.ok(skillRecord);
   const loadedSkill = JSON.parse((await client.callTool({
@@ -3126,16 +3196,17 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(foreignLoad.isError, true, "cross-account Skill must not be loaded");
   memoryById.delete(foreignSkillId);
 
-  const revisionContent = `# Atlas reconnect workflow\n\n## When to use\nWhen Atlas reconnect fails.\n\n## Procedure\nRead the current project state, repair the bridge, and verify reconnection with a real MCP round trip. Never infer success from a local build alone.`;
+  const revisionContent = `# atlas reconnect workflow\n\n## When to use\nWhen atlas reconnect fails.\n\n## Procedure\nRead the current project state, repair the bridge, and verify reconnection with a real MCP round trip. Never infer success from a local build alone.`;
   const plan = JSON.parse((await client.callTool({
     name: "memhub_skill",
     arguments: {
       action: "plan", operation: "revise", skill_id: skillRecord.id,
-      version: "2.0.0", content: revisionContent, title: "Atlas reconnect workflow",
+      version: "2.0.0", content: revisionContent, title: "atlas reconnect workflow",
       tags: ["reconnect", "reusable"], note: "replace stale reconnect checks"
     }
   })).content[0].text);
   assert.equal(plan.status, "awaiting_user_authorization");
+  assert.ok(Date.parse(plan.expires_at) - Date.now() > 23 * 60 * 60_000);
   assert.equal(plan.source_skill_id, reconnectArtifactId);
   assert.equal(plan.next_version, "2.0.0");
   assert.equal(skillRecord.status, "activated", "planning must not mutate existing Skill");
@@ -3256,8 +3327,8 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
     arguments: {
       action: "submit",
       job_id: atlasNext.job.job_id,
-      content: "Atlas timeline v1: the project binding was validated before memory changes.",
-      project_description: "Atlas is an AI development environment focused on project-scoped orchestration and safe routing of work between harnesses.",
+      content: "atlas timeline v1: the project binding was validated before memory changes.",
+      project_description: "atlas is an AI development environment focused on project-scoped orchestration and safe routing of work between harnesses.",
       source_harness: harnessA,
       lease_token: atlasNext.job.lease_token
     }
@@ -3299,7 +3370,7 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
     arguments: { query: "atlas" }
   })).projects.find((project) => project.project === "atlas");
   assert.ok(atlasAfterDistilledDescription);
-  assert.match(atlasAfterDistilledDescription.description, /^Atlas project used by MCP integration tests \((?:re)?verified\)\.$/);
+  assert.match(atlasAfterDistilledDescription.description, /^atlas project used by MCP integration tests \((?:re)?verified\)\.$/);
   assert.equal(atlasAfterDistilledDescription.descriptionSource, "manual");
   assert.match(atlasAfterDistilledDescription.distilledDescription, /AI development environment focused on project-scoped orchestration/);
   const atlasL2Id = atlasL2V1.memory.id;
@@ -3317,7 +3388,7 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
     arguments: {
       action: "submit",
       job_id: atlasL3Next.job.job_id,
-      content: "Within Atlas, validate current state before changing deployment or routing configuration.",
+      content: "Within atlas, validate current state before changing deployment or routing configuration.",
       source_harness: harnessA
     }
   }));
@@ -3336,6 +3407,7 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
     }
   }));
   assert.equal(createBetaPlan.status, "awaiting_user_authorization");
+  assert.ok(Date.parse(createBetaPlan.expires_at) - Date.now() > 23 * 60 * 60_000);
   assert.equal(parseTool(await client.callTool({
     name: "memmy_project_manage",
     arguments: { action: "execute", authorization_id: createBetaPlan.authorization_id }
@@ -3350,7 +3422,7 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
       conversation_id: betaConversation,
       continuity_id: betaConversation,
       turn_id: `source-${betaConversation}`,
-      user_text: "Keep the second project evidence isolated from Atlas."
+      user_text: "Keep the second project evidence isolated from ATLAS."
     }
   }));
   const betaCommit = parseTool(await client.callTool({
@@ -3448,7 +3520,7 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
       conversation_id: conversationId,
       continuity_id: conversationId,
       turn_id: `source-${conversationId}-v2`,
-      user_text: "Update Atlas with a second durable decision."
+      user_text: "Update atlas with a second durable decision."
     }
   }));
   await client.callTool({
@@ -3459,7 +3531,7 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
       conversation_id: conversationId,
       continuity_id: conversationId,
       turn_id: `source-${conversationId}-v2`,
-      assistant_text: "The second decision is now part of Atlas current truth."
+      assistant_text: "The second decision is now part of atlas current truth."
     }
   });
   const atlasCaptureV2 = (await listCaptureEvents(stateRoot, "acct-test")).find((item) => item.event_id === atlasOpenV2.turn.event_id);
@@ -3482,8 +3554,8 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
     arguments: {
       action: "submit",
       job_id: atlasL2NextV2.job.job_id,
-      content: "Atlas timeline v2: preserve the original validation decision and append the second durable decision as current truth.",
-      project_description: "Atlas coordinates project-aware AI development work while preserving explicit workspace ownership, routing boundaries, and durable current state.",
+      content: "atlas timeline v2: preserve the original validation decision and append the second durable decision as current truth.",
+      project_description: "atlas coordinates project-aware AI development work while preserving explicit workspace ownership, routing boundaries, and durable current state.",
       source_harness: harnessA
     }
   }));
@@ -3503,7 +3575,7 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
     arguments: {
       action: "submit",
       job_id: atlasL3NextV2.job.job_id,
-      content: "Within Atlas, validate current state first and preserve durable decisions as the project evolves.",
+      content: "Within atlas, validate current state first and preserve durable decisions as the project evolves.",
       source_harness: harnessA
     }
   }));
@@ -3540,7 +3612,14 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
   assert.notEqual(l4WriteV1.body.requestId, l4WriteV2.body.requestId);
   assert.equal(memoryById.get(l4IdV1).version >= 2, true);
 
-  return { atlasL3Id, betaL3Id };
+  return {
+    atlasL2Id,
+    atlasL2Ref: atlasL2V2.result_evidence_ref,
+    atlasL3Id,
+    atlasL3Ref: atlasL3V2.result_evidence_ref,
+    betaL3Id,
+    betaL3Ref: betaL3.result_evidence_ref
+  };
 }
 
 async function testProjectDescriptionPrecedence() {

@@ -52,7 +52,8 @@ const violations = [];
 const digest = (value) => createHash("sha256").update(value.toLocaleLowerCase()).digest("hex");
 const sensitiveToken = (value) => {
   for (const match of value.matchAll(/[\p{L}\p{N}_][\p{L}\p{N}_.-]{1,63}/gu)) {
-    if (sensitiveTokenHashes.has(digest(match[0]))) return match[0];
+    const candidates = [match[0], ...match[0].split(/[._-]+/).filter(Boolean)];
+    if (candidates.some((candidate) => sensitiveTokenHashes.has(digest(candidate)))) return match[0];
   }
   return null;
 };

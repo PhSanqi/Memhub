@@ -4,7 +4,7 @@ import { getDistillationConfig, listDistillationJobs, type DistillationJob } fro
 import { captureIndexStats } from "./capture.js";
 import { listL1Turns } from "./turn-log.js";
 import type { MemhubRuntime } from "./runtime.js";
-import type { ProjectDescriptor } from "./project-registry.js";
+import { normalizeProjectKey, type ProjectDescriptor } from "./project-registry.js";
 
 export type MemoryControlKind =
   | "overview"
@@ -22,6 +22,7 @@ export interface MemoryControlRequest {
   kind: MemoryControlKind;
   projects: ProjectDescriptor[];
   projectId?: string;
+  includeOverviewItems?: boolean;
 }
 
 type ControlPlaneJob = Omit<DistillationJob, "evidence" | "result_content"> & {
@@ -69,7 +70,7 @@ async function overviewPayload(input: MemoryControlRequest): Promise<unknown> {
   const scopedProjects = input.projectId
     ? input.projects.filter((project) => project.projectId === input.projectId)
     : input.projects;
-  const relevantJobs = jobs.filter((job) => !input.projectId || job.project_id === input.projectId);
+  const relevantJobs = await visibleControlPlaneJobs(input, jobs);
   const pendingTodos = scopedProjects.flatMap((project) => (project.todos ?? [])
     .filter((todo) => todo.status === "pending")
     .map((todo) => ({
@@ -77,6 +78,11 @@ async function overviewPayload(input: MemoryControlRequest): Promise<unknown> {
       project_id: project.projectId,
       project_name: project.name || project.projectId
     })));
+  const processing = {
+    pending: relevantJobs.filter((job) => job.status === "pending").length,
+    leased: relevantJobs.filter((job) => job.status === "leased").length,
+    failed: relevantJobs.filter((job) => job.status === "failed").length
+  };
   return {
     counts: {
       projects: scopedProjects.length,
@@ -96,11 +102,19 @@ async function overviewPayload(input: MemoryControlRequest): Promise<unknown> {
       complete: l1.counts.complete,
       incomplete: l1.counts.incomplete
     },
-    processing: {
-      pending: relevantJobs.filter((job) => job.status === "pending").length,
-      leased: relevantJobs.filter((job) => job.status === "leased").length,
-      failed: relevantJobs.filter((job) => job.status === "failed").length
-    },
+    processing: input.includeOverviewItems ? {
+      ...processing,
+      items: relevantJobs
+        .filter((job) => job.status === "failed" || job.status === "pending" || job.status === "leased")
+        .map((job) => ({ project_id: job.project_id, status: job.status }))
+    } : processing,
+    ...(input.includeOverviewItems ? {
+      projects: overviewProjectItems(scopedProjects),
+      layers: {
+        l2: overviewLayerItems(itemsValue(l2)),
+        l3: overviewLayerItems(itemsValue(l3))
+      }
+    } : {}),
     account_id: input.runtime.accountId,
     project_id: input.projectId ?? null
   };
@@ -113,6 +127,7 @@ async function l1OverviewStats(input: MemoryControlRequest): Promise<{
   const storageIds = input.projectId
     ? await input.runtime.projects.storageIds(input.runtime.accountId, input.projectId)
     : [];
+  const archivedStorageIds = input.projectId ? [] : await archivedProjectStorageIds(input);
   const captureStats = input.projectId
     ? await Promise.all(storageIds.map((projectId) => captureIndexStats(input.stateRoot, input.runtime.accountId, projectId)))
     : [await captureIndexStats(input.stateRoot, input.runtime.accountId)];
@@ -124,17 +139,41 @@ async function l1OverviewStats(input: MemoryControlRequest): Promise<{
       ? Promise.all(storageIds.map((projectId) => coreRawTurnStats(input, projectId)))
       : Promise.all([coreRawTurnStats(input, undefined)])
   ]);
-  const memoryRecords = coreStats.reduce((sum, count) => sum + count, 0);
+  const [archivedCaptureStats, archivedCoreStats, archivedRawStats] = archivedStorageIds.length > 0
+    ? await Promise.all([
+        Promise.all(archivedStorageIds.map((projectId) => captureIndexStats(input.stateRoot, input.runtime.accountId, projectId))),
+        Promise.all(archivedStorageIds.map((projectId) => coreL1Count(input, projectId))),
+        Promise.all(archivedStorageIds.map((projectId) => coreRawTurnStats(input, projectId)))
+      ])
+    : [[], [], []] as const;
+  const archivedMemoryRecords = archivedCoreStats.reduce((sum, count) => sum + count, 0);
+  const memoryRecords = Math.max(0, coreStats.reduce((sum, count) => sum + count, 0) - archivedMemoryRecords);
   const raw = rawStats.reduce((total, stats) => ({
     total: total.total + stats.total,
     succeeded: total.succeeded + stats.succeeded,
     captureManaged: total.captureManaged + stats.captureManaged,
     captureManagedSucceeded: total.captureManagedSucceeded + stats.captureManagedSucceeded
   }), { total: 0, succeeded: 0, captureManaged: 0, captureManagedSucceeded: 0 });
+  const archivedRaw = archivedRawStats.reduce((total, stats) => ({
+    total: total.total + stats.total,
+    succeeded: total.succeeded + stats.succeeded,
+    captureManaged: total.captureManaged + stats.captureManaged,
+    captureManagedSucceeded: total.captureManagedSucceeded + stats.captureManagedSucceeded
+  }), { total: 0, succeeded: 0, captureManaged: 0, captureManagedSucceeded: 0 });
+  raw.total = Math.max(0, raw.total - archivedRaw.total);
+  raw.succeeded = Math.max(0, raw.succeeded - archivedRaw.succeeded);
+  raw.captureManaged = Math.max(0, raw.captureManaged - archivedRaw.captureManaged);
+  raw.captureManagedSucceeded = Math.max(0, raw.captureManagedSucceeded - archivedRaw.captureManagedSucceeded);
   const capture = captureStats.reduce((total, stats) => ({
     total: total.total + stats.total,
     not_ingested: total.not_ingested + stats.not_ingested
   }), { total: 0, not_ingested: 0 });
+  const archivedCapture = archivedCaptureStats.reduce((total, stats) => ({
+    total: total.total + stats.total,
+    not_ingested: total.not_ingested + stats.not_ingested
+  }), { total: 0, not_ingested: 0 });
+  capture.total = Math.max(0, capture.total - archivedCapture.total);
+  capture.not_ingested = Math.max(0, capture.not_ingested - archivedCapture.not_ingested);
   const legacyRaw = Math.max(0, raw.total - raw.captureManaged);
   const legacyRawSucceeded = Math.max(0, raw.succeeded - raw.captureManagedSucceeded);
   const legacyRawIncomplete = Math.max(0, legacyRaw - legacyRawSucceeded);
@@ -185,11 +224,13 @@ async function unifiedL1Payload(input: MemoryControlRequest, limit: number): Pro
       : Promise.all([coreRawTurnPayload(input, undefined, Math.max(limit, 200))])
   ]);
 
-  const captureItems = dedupeCaptureTurns(captureGroups.flat());
-  const coreItems = dedupeRecords(corePayloads.flatMap((payload) => payload.items));
-  const coreTotal = corePayloads.reduce((sum, payload) => sum + payload.total, 0);
-  const rawTurnItems = dedupeRawTurns(rawTurnPayloads.flatMap((payload) => payload.items));
-  const rawTurnTotal = rawTurnPayloads.reduce((sum, payload) => sum + payload.total, 0);
+  const archivedProjectKeys = input.projectId ? new Set<string>() : await archivedProjectKeySet(input);
+  const captureItems = dedupeCaptureTurns(captureGroups.flat())
+    .filter((item) => !isArchivedProjectRef(item.project_hint, archivedProjectKeys));
+  const coreItems = dedupeRecords(corePayloads.flatMap((payload) => payload.items))
+    .filter((item) => !isArchivedProjectRef(projectFromCoreItem(item), archivedProjectKeys));
+  const rawTurnItems = dedupeRawTurns(rawTurnPayloads.flatMap((payload) => payload.items))
+    .filter((item) => !isArchivedProjectRef(stringValue(item.projectId), archivedProjectKeys));
   const captureProjectRefs = [...new Set(captureItems
     .map((item) => item.project_hint)
     .filter((value): value is string => Boolean(value)))];
@@ -319,15 +360,16 @@ async function unifiedL1Payload(input: MemoryControlRequest, limit: number): Pro
   const items = [...captures, ...visibleRawTurns, ...legacyCoreItems]
     .sort((left, right) => timestampOf(right).localeCompare(timestampOf(left)))
     .slice(0, limit);
+  const visibleStats = input.projectId ? null : await l1OverviewStats(input);
   return {
     items,
-    total: coreTotal + rawTurnTotal + incompleteCaptures - consumedRawTurnIds.size,
+    total: visibleStats?.total ?? (corePayloads.reduce((sum, payload) => sum + payload.total, 0) + rawTurnPayloads.reduce((sum, payload) => sum + payload.total, 0) + incompleteCaptures - consumedRawTurnIds.size),
     page_limit: limit,
-    counts: {
-      complete: coreTotal + completeRawTurns,
+    counts: visibleStats?.counts ?? {
+      complete: corePayloads.reduce((sum, payload) => sum + payload.total, 0) + completeRawTurns,
       incomplete: incompleteCaptures + incompleteRawTurns,
-      memory_records: coreTotal,
-      raw_turns: rawTurnTotal,
+      memory_records: corePayloads.reduce((sum, payload) => sum + payload.total, 0),
+      raw_turns: rawTurnPayloads.reduce((sum, payload) => sum + payload.total, 0),
       captures: captureItems.length
     }
   };
@@ -438,31 +480,36 @@ async function coreLayerPayload(
   kind: "l2" | "l3" | "l4" | "skills",
   hydrateBody = true
 ): Promise<unknown> {
-  const params = new URLSearchParams({
-    limit: "100",
-    userId: input.runtime.userId
-  });
-  if (input.projectId && kind !== "l4") params.set("projectId", input.projectId);
-  const payload = objectRecord(await input.runtime.memoryClient.viewerGet(`/api/v1/${kind}?${params.toString()}`));
-  if (kind === "skills" || !hydrateBody) return payload;
-
-  const items = Array.isArray(payload.items) ? payload.items.map(objectRecord) : [];
-  const hydrated = await Promise.all(items.map(async (item) => {
-    const id = stringValue(item.id);
-    if (!id) return item;
-    try {
-      const detail = objectRecord(await input.runtime.memoryClient.viewerGet(`/api/v1/memory/${encodeURIComponent(id)}`));
-      const body = stringValue(detail.body);
-      return {
-        ...item,
-        ...(body ? { body } : {})
-      };
-    } catch {
-      // List metadata is still useful if a single detail read is temporarily unavailable.
-      return item;
-    }
-  }));
-  return { ...payload, items: hydrated };
+  const archivedProjectKeys = !input.projectId && kind !== "l4" ? await archivedProjectKeySet(input) : new Set<string>();
+  const archivedStorageIds = !input.projectId && kind !== "l4" ? await archivedProjectStorageIds(input) : [];
+  let payload: Record<string, unknown> = {};
+  let items: Record<string, unknown>[] = [];
+  for (let page = 1; page <= 100 && items.length < 100; page += 1) {
+    const params = new URLSearchParams({
+      limit: "100",
+      page: String(page),
+      userId: input.runtime.userId
+    });
+    if (input.projectId && kind !== "l4") params.set("projectId", input.projectId);
+    if (kind === "skills") params.set("status", "activated");
+    if (hydrateBody && kind !== "skills") params.set("includeBody", "1");
+    const pagePayload = objectRecord(await input.runtime.memoryClient.viewerGet(`/api/v1/${kind}?${params.toString()}`));
+    if (page === 1) payload = pagePayload;
+    const pageItems = Array.isArray(pagePayload.items) ? pagePayload.items.map(objectRecord) : [];
+    items.push(...pageItems.filter((item) => !isArchivedProjectRef(projectFromCoreItem(item), archivedProjectKeys)));
+    if (pagePayload.hasNext !== true || pageItems.length === 0 || !hydrateBody) break;
+  }
+  items = items.slice(0, 100);
+  let visibleTotal = totalValue(payload);
+  if (archivedStorageIds.length > 0) {
+    const archivedTotals = await Promise.all(archivedStorageIds.map(async (projectId) => {
+      const params = new URLSearchParams({ limit: "1", page: "1", userId: input.runtime.userId, projectId });
+      if (kind === "skills") params.set("status", "activated");
+      return totalValue(await input.runtime.memoryClient.viewerGet(`/api/v1/${kind}?${params.toString()}`));
+    }));
+    visibleTotal = Math.max(0, visibleTotal - archivedTotals.reduce((sum, total) => sum + total, 0));
+  }
+  return { ...payload, items, total: visibleTotal };
 }
 
 async function processingPayload(input: MemoryControlRequest): Promise<unknown> {
@@ -470,8 +517,7 @@ async function processingPayload(input: MemoryControlRequest): Promise<unknown> 
     listControlPlaneJobs(input.stateRoot, input.runtime.accountId),
     getDistillationConfig(input.stateRoot)
   ]);
-  const items = allJobs
-    .filter((job) => !input.projectId || job.project_id === input.projectId);
+  const items = await visibleControlPlaneJobs(input, allJobs);
   return {
     items,
     total: items.length,
@@ -513,7 +559,38 @@ async function listControlPlaneJobs(stateRoot: string, accountId: string): Promi
   return items;
 }
 
-function projectPayload(projects: ProjectDescriptor[]): unknown {
+function overviewProjectItems(projects: ProjectDescriptor[]): Record<string, unknown>[] {
+  return projects.map((project) => {
+    const pendingTodos = (project.todos ?? []).filter((todo) => todo.status === "pending");
+    return {
+      id: project.projectId,
+      project_id: project.projectId,
+      title: project.name || project.projectId,
+      description: project.description,
+      status: project.state,
+      updated_at: project.updatedAt,
+      pending_todos: pendingTodos,
+      pending_todo_count: pendingTodos.length
+    };
+  });
+}
+
+function overviewLayerItems(items: Record<string, unknown>[]): Record<string, unknown>[] {
+  return items.map((item) => {
+    const projectId = projectFromCoreItem(item);
+    return {
+      id: item.id,
+      ...(projectId ? { project_id: projectId } : {}),
+      ...(typeof item.title === "string" ? { title: item.title } : {}),
+      ...(typeof item.summary === "string" ? { summary: item.summary } : {}),
+      ...(typeof item.updatedAt === "string" ? { updatedAt: item.updatedAt } : {}),
+      ...(typeof item.updated_at === "string" ? { updated_at: item.updated_at } : {}),
+      ...(typeof item.createdAt === "string" ? { createdAt: item.createdAt } : {})
+    };
+  });
+}
+
+function projectPayload(projects: ProjectDescriptor[]): { items: Record<string, unknown>[]; total: number } {
   const items = projects.map((project) => ({
     id: project.projectId,
     title: project.name || project.projectId,
@@ -531,6 +608,37 @@ function projectPayload(projects: ProjectDescriptor[]): unknown {
     updated_at: project.updatedAt
   }));
   return { items, total: items.length };
+}
+
+async function archivedProjectStorageIds(input: MemoryControlRequest): Promise<string[]> {
+  const archived = (await input.runtime.projects.list(input.runtime.accountId, { includeInactive: true }))
+    .filter((project) => project.state === "archived");
+  const storageIds = await Promise.all(archived.map((project) =>
+    input.runtime.projects.storageIds(input.runtime.accountId, project.projectId)
+  ));
+  return [...new Set(storageIds.flat())];
+}
+
+async function archivedProjectKeySet(input: MemoryControlRequest): Promise<Set<string>> {
+  const archived = (await input.runtime.projects.list(input.runtime.accountId, { includeInactive: true }))
+    .filter((project) => project.state === "archived");
+  const storageIds = await Promise.all(archived.map((project) =>
+    input.runtime.projects.storageIds(input.runtime.accountId, project.projectId)
+  ));
+  return new Set([
+    ...archived.flatMap((project) => [project.projectId, project.name, ...project.aliases]),
+    ...storageIds.flat()
+  ].map(normalizeProjectKey));
+}
+
+function isArchivedProjectRef(projectRef: string | null | undefined, archivedProjectKeys: Set<string>): boolean {
+  return Boolean(projectRef && archivedProjectKeys.has(normalizeProjectKey(projectRef)));
+}
+
+async function visibleControlPlaneJobs(input: MemoryControlRequest, jobs: ControlPlaneJob[]): Promise<ControlPlaneJob[]> {
+  if (input.projectId) return jobs.filter((job) => job.project_id === input.projectId);
+  const archivedProjectKeys = await archivedProjectKeySet(input);
+  return jobs.filter((job) => !isArchivedProjectRef(job.project_id, archivedProjectKeys));
 }
 
 function objectRecord(value: unknown): Record<string, unknown> {
@@ -568,6 +676,11 @@ function timestampOf(item: Record<string, unknown>): string {
     if (typeof value === "string" && value.trim()) return value.trim();
   }
   return "";
+}
+
+function itemsValue(value: unknown): Record<string, unknown>[] {
+  const record = objectRecord(value);
+  return Array.isArray(record.items) ? record.items.map(objectRecord) : [];
 }
 
 function totalValue(value: unknown): number {

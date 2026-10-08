@@ -16,9 +16,65 @@ try {
   testV7ToV8Migration();
   testRawTurnProjectFilter();
   testPanelItemsProjectFilterPropagation();
+  testPanelItemsIncludeBody();
+  testConfigStatusRedactsSecrets();
   console.log("memhub-vendor-regressions: ok");
 } finally {
   await rm(root, { recursive: true, force: true });
+}
+
+function testConfigStatusRedactsSecrets() {
+  const model = new PanelReadModel({
+    config() {
+      return {
+        version: 2,
+        userId: "user-a",
+        storage: { token: "storage-secret", endpoint: "http://127.0.0.1:18960" },
+        nested: [{ apiKey: "nested-secret", enabled: true }]
+      };
+    },
+    now: () => "2026-09-20T00:00:00.000Z"
+  });
+  const result = model.configStatus();
+  assert.equal(result.config.storage.token, "********");
+  assert.equal(result.config.storage.endpoint, "http://127.0.0.1:18960");
+  assert.equal(result.config.nested[0].apiKey, "********");
+  assert.equal(result.config.nested[0].enabled, true);
+}
+
+function testPanelItemsIncludeBody() {
+  const memory = {
+    id: "skill-1",
+    memoryLayer: "Skill",
+    status: "activated",
+    memoryValue: "# Useful Skill\nProcedure",
+    tags: [],
+    properties: { internal_info: {} },
+    info: { title: "Useful Skill" },
+    createdAt: "2026-09-20T00:00:00.000Z",
+    updatedAt: "2026-09-20T00:00:00.000Z",
+    version: 1
+  };
+  const model = new PanelReadModel({
+    repos: {
+      memories: {
+        count() { return 1; },
+        list() { return [memory]; },
+        toListItem(item) {
+          return {
+            id: item.id, kind: "skill", memoryLayer: item.memoryLayer, status: item.status,
+            title: item.info.title, summary: "summary", tags: item.tags, createdAt: item.createdAt,
+            updatedAt: item.updatedAt, version: item.version
+          };
+        }
+      },
+      processing: { get() { return undefined; } },
+      runtime: { latestChangeSeq() { return 0; } }
+    },
+    now: () => "2026-09-20T00:00:00.000Z"
+  });
+  assert.equal(model.panelItems({ userId: "user-a", layer: "Skill" }).items[0].body, undefined);
+  assert.equal(model.panelItems({ userId: "user-a", layer: "Skill", includeBody: true }).items[0].body, memory.memoryValue);
 }
 
 function testPanelItemsProjectFilterPropagation() {

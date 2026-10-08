@@ -4,6 +4,7 @@ import { mutateMemoryConfig } from "../config/writer.js";
 import { syncMemoryModelCatalog } from "../config/model-catalog.js";
 import { MemoryService } from "../service/memory-service.js";
 import { MemoryServiceError } from "../utils/error.js";
+import { redactSecretFields } from "../utils/json.js";
 import { resolveTimeZone } from "../utils/time.js";
 import { installViewerCli, viewerCliStatus, } from "./viewer-cli.js";
 export const VIEWER_API_ROUTES = [
@@ -144,7 +145,8 @@ export async function routeViewerRequest(context, method, url, body) {
                 status: statusQuery(url),
                 sourceAgent: query(url, "sourceAgent"),
                 page: numberQuery(url, "page"),
-                limit: numberQuery(url, "limit")
+                limit: numberQuery(url, "limit"),
+                includeBody: booleanQuery(url, "includeBody")
             })
         };
     }
@@ -333,8 +335,8 @@ async function viewerConfig(context) {
         ...status,
         config: {
             ...status.config,
-            ...(raw.hub ? { hub: redactSecrets(raw.hub) } : {}),
-            ...(raw.telemetry ? { telemetry: redactSecrets(raw.telemetry) } : {})
+            ...(raw.hub ? { hub: redactSecretFields(raw.hub) } : {}),
+            ...(raw.telemetry ? { telemetry: redactSecretFields(raw.telemetry) } : {})
         },
         readOnly: ["storage.endpoint", "storage.sqlitePath", "storage.backend", "storage.mode"]
     };
@@ -424,6 +426,10 @@ function numberQuery(url, key) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : undefined;
 }
+function booleanQuery(url, key) {
+    const value = query(url, key)?.toLowerCase();
+    return value === "1" || value === "true";
+}
 function apiLogToolsQuery(url) {
     const value = query(url, "tools");
     if (!value)
@@ -481,16 +487,6 @@ function stripMaskedSecrets(value) {
         result[key] = isPlainRecord(item) ? stripMaskedSecrets(item) : item;
     }
     return result;
-}
-function redactSecrets(value) {
-    if (Array.isArray(value))
-        return value.map(redactSecrets);
-    if (!isPlainRecord(value))
-        return value;
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
-        key,
-        /token|apiKey|secret|password/i.test(key) && item ? "********" : redactSecrets(item)
-    ]));
 }
 function isPlainRecord(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);

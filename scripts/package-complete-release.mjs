@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { runAssetHygiene } from "./asset-hygiene.mjs";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const CHECK_ONLY = process.argv.includes("--check");
@@ -106,7 +107,6 @@ try {
     if (target.os === "linux") {
       await cp(buildStage, stage, { recursive: true });
       await installNodeRuntime(target, stage, tempRoot);
-      await pruneOnnxRuntimeNativePlatforms(target, stage);
       run(join(stage, "runtime", "node", "bin", "node"), ["scripts/complete-runtime-smoke.cjs"], {
         cwd: stage,
         env: { ...process.env, PATH: "/usr/bin:/bin" }
@@ -121,13 +121,11 @@ try {
       await installWindowsBetterSqlite(stage);
       await rm(join(stage, "node_modules", ".bin"), { recursive: true, force: true });
       await installNodeRuntime(target, stage, tempRoot);
-      await pruneOnnxRuntimeNativePlatforms(target, stage);
       await validateWindowsStage(stage);
     }
 
     const filename = `${rootName}.${target.format}`;
     const output = resolve(outputRoot, filename);
-    await rm(output, { force: true });
     if (target.os === "linux") {
       run("tar", ["-czf", output, "-C", tempRoot, rootName]);
     } else if (process.platform === "win32") {
@@ -147,6 +145,14 @@ try {
   const result = { ok: true, version, commit, ref: WORKTREE ? "WORKTREE" : REF, nodeVersion: NODE_VERSION, completeAssets };
   await writeFile(resolve(outputRoot, "complete-assets.json"), JSON.stringify(result, null, 2) + "\n", "utf8");
   await mergeReleaseMetadata(outputRoot, result);
+  if (!OUTPUT_ROOT_ARG && (WORKTREE || REF === "HEAD")) {
+    await runAssetHygiene({
+      root: ROOT,
+      apply: true,
+      releaseOnly: true,
+      currentReleaseOverride: `v${version}`
+    });
+  }
   console.log(JSON.stringify(result, null, 2));
 } finally {
   await rm(tempRoot, { recursive: true, force: true });
@@ -207,20 +213,6 @@ async function installNodeRuntime(target, stage, temp) {
   const runtimeRoot = join(stage, "runtime", "node");
   await mkdir(dirname(runtimeRoot), { recursive: true });
   await rename(join(extractRoot, folder), runtimeRoot);
-}
-
-async function pruneOnnxRuntimeNativePlatforms(target, stage) {
-  const nativeRoot = join(stage, "node_modules", "onnxruntime-node", "bin", "napi-v6");
-  const removals = target.os === "linux"
-    ? ["darwin", "win32", join("linux", "arm64")]
-    : ["darwin", "linux", join("win32", "arm64")];
-  for (const relative of removals) {
-    await rm(join(nativeRoot, relative), { recursive: true, force: true });
-  }
-  const required = target.os === "linux"
-    ? join(nativeRoot, "linux", "x64", "onnxruntime_binding.node")
-    : join(nativeRoot, "win32", "x64", "onnxruntime_binding.node");
-  await access(required);
 }
 
 async function installWindowsBetterSqlite(stage) {

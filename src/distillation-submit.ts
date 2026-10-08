@@ -8,9 +8,12 @@ import {
   listDistillationJobs,
   prepareDistillationLeaseForExternalWrite,
   quarantineDistillationJobAfterCoreCommit,
+  recordCompletedDistillationRevision,
+  type DistillationEvidenceItem,
   type DistillationJob
 } from "./distillation-jobs.js";
 import type { MemhubRuntime } from "./runtime.js";
+import { assertSkillVersion } from "./skill-version.js";
 
 export async function submitDistillationControl(input: {
   args: Record<string, unknown>;
@@ -20,7 +23,7 @@ export async function submitDistillationControl(input: {
   leaseToken?: string;
   enqueueDerived?: typeof enqueueDerivedDistillationJob;
   resolveToolScope: (runtime: MemhubRuntime, input: { scope: string; project?: string; workspaceProject?: string; conversationId?: string }) => Promise<{ projectId: string | null; conversationId?: string; resolutionSource: string }>;
-  validateDistillationEvidenceChain: (input: { stateRoot: string; runtime: MemhubRuntime; kind: "l2" | "l3" | "l4" | "skill"; projectId: string | null; evidenceRefs: string[]; job?: DistillationJob }) => Promise<void>;
+  validateDistillationEvidenceChain: (input: { stateRoot: string; runtime: MemhubRuntime; kind: "l2" | "l3" | "l4" | "skill"; projectId: string | null; evidenceRefs: string[]; job?: DistillationJob }) => Promise<DistillationEvidenceItem[]>;
 }): Promise<Record<string, unknown>> {
   const { args, stateRoot, runtime, sourceHarness, leaseToken, resolveToolScope, validateDistillationEvidenceChain } = input;
     const jobId = optionalString(args.job_id);
@@ -42,7 +45,14 @@ export async function submitDistillationControl(input: {
     }
     if (kind === "l4" && scope !== "account") throw new TypeError("L4 requires account scope");
     const title = optionalString(args.title);
-    if (kind === "skill" && !title) throw new TypeError("title is required for skill distillation");
+    const artifactId = optionalString(args.artifact_id);
+    const version = optionalString(args.version);
+    if (kind === "skill") {
+      if (!title) throw new TypeError("title is required for skill distillation");
+      if (!artifactId) throw new TypeError("artifact_id is required for Skill distillation and must remain stable across revisions");
+      if (!version) throw new TypeError("version is required for Skill distillation");
+      assertSkillVersion(version);
+    }
     const { projectId, conversationId } = await resolveToolScope(runtime, {
       scope: scope === "account" ? "global" : "project",
       project: optionalString(args.project) ?? job?.project_id ?? undefined,
@@ -75,7 +85,7 @@ export async function submitDistillationControl(input: {
       content,
       evidence: { evidenceRefs, sourceConversations, confidence }
     });
-    await validateDistillationEvidenceChain({
+    const resolvedEvidence = await validateDistillationEvidenceChain({
       stateRoot,
       runtime,
       kind,
@@ -109,7 +119,7 @@ export async function submitDistillationControl(input: {
         leaseToken
       );
     }
-    const canonicalArtifactId = optionalString(args.artifact_id) ??
+    const canonicalArtifactId = artifactId ??
       (kind === "l2"
         ? `project-timeline:${projectId}`
         : kind === "l3"
@@ -139,7 +149,7 @@ export async function submitDistillationControl(input: {
         tags: uniqueStrings(["memory-v2", `layer:${kind}`, ...(stringArray(args.tags) ?? [])]),
         sourceHarness,
         artifactId: canonicalArtifactId,
-        version: optionalString(args.version),
+        version,
         evidenceRefs,
         sourceConversations,
         confidence,
@@ -191,8 +201,9 @@ export async function submitDistillationControl(input: {
     let projectDescriptionError: string | undefined;
     let queuedNext: unknown;
     let nextLayerEnqueueError: string | undefined;
+    let completedRevision: DistillationJob | undefined;
     if (jobId) {
-      const completed = await completeDistillationJobAfterCoreCommit(stateRoot, runtime.accountId, jobId, {
+      completedRevision = await completeDistillationJobAfterCoreCommit(stateRoot, runtime.accountId, jobId, {
         kind,
         resultId,
         content,
@@ -206,10 +217,10 @@ export async function submitDistillationControl(input: {
           target: "l3",
           projectId,
           evidence: [{
-            ref: `l2:${resultId}:${completed.job_id}`,
+            ref: `l2:${resultId}:${completedRevision.job_id}`,
             kind: "artifact",
             layer: "L2",
-            timestamp: completed.result_committed_at ?? completed.completed_at ?? new Date().toISOString(),
+            timestamp: completedRevision.result_committed_at ?? completedRevision.completed_at ?? new Date().toISOString(),
             project_id: projectId,
             title: canonicalLayerTitle("l2", projectId),
             content
@@ -243,7 +254,28 @@ export async function submitDistillationControl(input: {
         nextLayerEnqueueError = error instanceof Error ? error.message : String(error);
         console.error("[memhub] next-layer distillation enqueue failed:", nextLayerEnqueueError);
       }
+    } else if (kind !== "skill") {
+      try {
+        completedRevision = await recordCompletedDistillationRevision({
+          stateRoot,
+          accountId: runtime.accountId,
+          target: kind,
+          projectId,
+          ...(conversationId ? { conversationId } : {}),
+          evidence: resolvedEvidence,
+          resultId,
+          content,
+          committedAt: coreCommittedAt!
+        });
+      } catch (error) {
+        throw new Error(
+          `Memory Core committed ${kind.toUpperCase()} but its immutable revision ledger could not be recorded; retry the same idempotent submit for reconciliation: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
     }
+    const resultEvidenceRef = completedRevision && kind !== "skill"
+      ? `${kind}:${resultId}:${completedRevision.job_id}`
+      : undefined;
     if (kind === "l2" && projectId && projectDescription) {
       // Complete the source job before optional routing metadata: a slow or
       // failed secondary update must not hold a live distillation lease open
@@ -270,6 +302,7 @@ export async function submitDistillationControl(input: {
       contract: DISTILLATION_CONTRACT_VERSION,
       job_id: jobId,
       memory: result,
+      ...(resultEvidenceRef ? { result_evidence_ref: resultEvidenceRef } : {}),
       ...(projectDescriptionError ? { project_description_error: projectDescriptionError } : {}),
       ...(nextLayerEnqueueError ? { next_layer_enqueue_error: nextLayerEnqueueError } : {}),
       ...(queuedNext ? { next_layer_job: queuedNext } : {})

@@ -31,15 +31,14 @@ Edition-specific packaging notes live under [../editions/](../editions/).
 - [Remote authentication](operations/remote-auth.md)
 - [Cloudflare Tunnel](operations/cloudflare-tunnel.md)
 - [Memory Core migration](operations/migration.md)
+- [v0.2.6 acceptance, production results and scope limits](operations/release-acceptance-2026-09-27.md) — dated candidate and post-release evidence; legacy Windows migration applies only to an existing old installation.
 
-The [public product website](https://phsanqi.github.io/Memhub/) contains
-documentation and fictional examples, not a shared memory workspace.
-For your own Server Edition, replace `memory.example.com` with a domain
-you control and configure its authentication boundary.
+The canonical hosted project deployment is **https://service-1.example.com/**. Self-hosted documentation uses `memory.example.com` as a placeholder.
 
 ## Maintain the project
 
 - [Upstream attribution](maintainers/upstream.md)
 - [Long-term content audit Skill](skills/memhub-long-term-content-audit-v2.md)
+- [Internal UI/review contracts](internal/)
 
 Current Truth belongs in the Project Registry, current architecture, and the active documents linked above. Historical implementation records belong to Git history rather than the active documentation navigation.

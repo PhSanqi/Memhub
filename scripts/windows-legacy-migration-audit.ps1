@@ -105,14 +105,32 @@ function Get-MemhubLegacyMigrationAudit {
   $runtime = Join-Path $root "runtime"
   $memory = Join-Path $root "memory"
   $config = Join-Path $root "memory-config.yaml"
-  $token = Resolve-MemhubMemoryToken -ConfigPath $config -MemoryDir $memory
-  if (-not $token) { throw "Legacy Memory config/token missing; refusing migration audit" }
-
+  # Do not inspect protected config or scan processes when no eligible task
+  # exists on this machine. This is a normal, explicit not-installed result,
+  # not evidence that a legacy migration was attempted.
+  $knownNames = @(
+    "Memhub-Server-Memory", "Memhub-Server", "Memhub-Memory",
+    "Memhub-Local", "Memhub-Bridge", "Memhub-Server-Stack",
+    "Memhub-Local-Stack"
+  )
+  $observedNames = @($knownNames | Where-Object {
+    $null -ne (Get-MemhubInstallTask -Name $_)
+  })
+  if ($observedNames.Count -eq 0) {
+    throw "No eligible legacy Memhub tasks found; refusing migration audit"
+  }
   $managedName = if ($Mode -eq "server") { "Memhub-Server-Stack" } else { "Memhub-Local-Stack" }
   if ($null -ne (Get-MemhubInstallTask -Name $managedName)) {
     throw "Managed stack task exists; refusing to treat mixed/current installation as legacy"
   }
-  $processSnapshot = @(Get-MemhubLegacyProcessSnapshot)
+  $oppositeNames = if ($Mode -eq "server") {
+    @("Memhub-Memory", "Memhub-Local", "Memhub-Bridge", "Memhub-Local-Stack")
+  } else {
+    @("Memhub-Server-Memory", "Memhub-Server", "Memhub-Server-Stack")
+  }
+  if (@($observedNames | Where-Object { $_ -in $oppositeNames }).Count -gt 0) {
+    throw "Opposite-edition or mixed Memhub task set; refusing migration audit"
+  }
   $specs = if ($Mode -eq "server") {
     @(
       @{ Name = "Memhub-Server-Memory"; Launcher = "memory-server.cmd"; Kind = "memory" },
@@ -125,6 +143,16 @@ function Get-MemhubLegacyMigrationAudit {
       @{ Name = "Memhub-Bridge"; Launcher = "bridge.cmd"; Kind = "bridge" }
     )
   }
+  foreach ($spec in $specs) {
+    if ($spec.Name -notin $observedNames) {
+      throw "Partial legacy task set: missing $($spec.Name); refusing migration audit"
+    }
+  }
+  # Task-family validation precedes reading protected config and querying
+  # all Node processes; a wrong/partial installation is not a migration.
+  $token = Resolve-MemhubMemoryToken -ConfigPath $config -MemoryDir $memory
+  if (-not $token) { throw "Legacy Memory config/token missing; refusing migration audit" }
+  $processSnapshot = @(Get-MemhubLegacyProcessSnapshot)
   $evidence = @()
   foreach ($spec in $specs) {
     $task = Get-MemhubInstallTask -Name $spec.Name

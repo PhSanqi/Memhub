@@ -30,12 +30,9 @@ import {
   authenticateDevice,
   listCaptureIndexEntries,
   createDevice,
-  isCaptureIngested,
   listCaptureEvents,
   listDevices,
-  markCaptureIngested,
-  revokeDevice,
-  storeCaptureEvent
+  revokeDevice
 } from "./capture.js";
 import { captureSessionId } from "./capture-ingest.js";
 import { handleCaptureHttpRequest } from "./capture-http.js";
@@ -50,17 +47,14 @@ import {
 } from "./distillation-control.js";
 import { discoverDistillationJobs } from "./distillation-discovery.js";
 import {
-  assertActiveDistillationLease,
-  completeDistillationJob,
-  enqueueDerivedDistillationJob,
-  failDistillationJob,
+  distillationResultTimestamp,
   getDistillationConfig,
   listDistillationJobs,
-  retryDistillationJob,
-  setDistillationConfig,
+  type DistillationEvidenceItem,
   type DistillationJob
 } from "./distillation-jobs.js";
 import { createMemhubRuntime, type MemhubRuntime, type MemhubRuntimeOptions } from "./runtime.js";
+import type { ContextItem } from "./context-capsule.js";
 import type { ProjectDescriptor, ProjectTodo } from "./project-registry.js";
 import {
   DISTILLATION_CONTRACT_VERSION,
@@ -71,7 +65,6 @@ import {
   handleMemoryControlRead
 } from "./memory-control-http.js";
 import { handleMemoryControlAction } from "./memory-control-actions.js";
-import { queueLegacyLayerRebuild } from "./legacy-rebuild.js";
 import { recentL1Continuity, upsertL1Turn } from "./turn-log.js";
 import { asHttpJsonBodyError, readJsonBody } from "./http-json.js";
 import {
@@ -82,6 +75,7 @@ import {
   type SkillExecutionStage
 } from "./skill-telemetry.js";
 import { enrichSkillCandidateReliability, skillSelectionMetadataFromBody } from "./skill-router.js";
+import { assertNextSkillVersion } from "./skill-version.js";
 import { tokenizeRetrievalText } from "./retrieval-ranker.js";
 import { JsonResultTransport } from "./result-transport.js";
 import { renderConsole, renderDocs, renderLanding, renderUnprovisionedAccount } from "./web-ui.js";
@@ -285,7 +279,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   });
 
   server.registerTool("memmy_context", {
-    description: "当 Memhub 被提及或调用时，先用本工具结合当前请求读取相关长期记忆。Harness 若能提供稳定 conversation_id 就传入，并可随后用 memmy_project action=current 核对持久 conversation binding；若 transport 没有稳定 conversation_id，不要伪造，直接使用本工具返回的 resolvedProjectId 与本轮显式 project/workspace 证据。若项目未唯一解析或名称相近，先调用 memmy_project_list 比较 canonical slug、aliases 与 description；不要尝试另一个大小写或盲目新建。当前轮的显式项目、workspace、项目名和 semantic_projects 优先于旧会话绑定；会话绑定只作为无本轮证据时的 fallback。业务记忆/架构只来自唯一 primary project；可复用 Skill 可从其他项目单独召回，不带入其业务 Current Truth。",
+    description: "当 Memhub 被提及或调用时，先用本工具结合当前请求读取相关长期记忆。Harness 若能提供稳定 conversation_id 就传入，并可随后用 memmy_project action=current 核对持久 conversation binding；若 transport 没有稳定 conversation_id，不要伪造，直接使用本工具返回的 resolvedProjectId 与本轮显式 project/workspace 证据。若项目未唯一解析或名称相近，先调用 memmy_project_list 比较 canonical slug、aliases 与 description；不要尝试另一个大小写或盲目新建。当前轮的显式项目、workspace、项目名和 semantic_projects 优先于旧会话绑定；会话绑定只作为无本轮证据时的 fallback。业务记忆/架构只来自唯一 primary project；可复用 Skill 可从其他项目单独召回，不带入其业务 Current Truth。对能够证明当前 revision 的 L2/L3/L4 Memory，返回 item.evidenceRef；下游蒸馏必须原样回传该 exact ref，不要从稳定 Memory id 自行拼接或解析 latest。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
@@ -335,6 +329,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         : [],
       limit: optionalInteger(args.limit)
     });
+    await attachExactEvidenceRefsToContext(stateRoot, runtime, capsule);
     if (capsule.reusableSkills.length > 0) {
       capsule.reusableSkills = await Promise.all(capsule.reusableSkills.map(async (item) => {
         const summary = await skillTelemetrySummary(stateRoot, runtime.accountId, item.id);
@@ -580,7 +575,11 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         if (content === skill.body) throw new Error("Skill revision must change the actual procedure");
       }
       const authorizationId = randomUUID();
-      const expiresAt = Date.now() + 10 * 60_000;
+      // Governance plans require a real user approval round-trip. Ten minutes is
+      // too short for chat/MCP transports where the next user turn may arrive
+      // well after the plan was rendered. Keep the authorization one-shot and
+      // fingerprint-bound, but allow a normal human approval window.
+      const expiresAt = Date.now() + 24 * 60 * 60_000;
       skillMutationAuthorizations.set(authorizationId, {
         accountId: runtime.accountId, skillId, operation,
         expectedFingerprint: skillFingerprint(skill),
@@ -713,10 +712,10 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         title: { type: "string", description: "可选标题；Skill 必填" },
         tags: { type: "array", items: { type: "string" } },
         source_harness: { type: "string", description: "产生该沉淀的 Harness，例如 codex / claude-code" },
-        artifact_id: { type: "string", description: "可覆盖默认 canonical artifact id；通常无需填写" },
-        version: { type: "string", description: "Harness 侧产物版本；主要用于 Skill" }
+        artifact_id: { type: "string", description: "可覆盖默认 canonical artifact id；Skill 必填，且同一 workflow 的所有 revision 必须保持稳定不变" },
+        version: { type: "string", description: "Harness 侧产物版本；Skill 必填 numeric dotted 版本，例如 1.1.0" }
         ,project_description: { type: "string", description: "L2 可附带 1-3 句项目描述，概括目标、范围与当前重点；必须来自同一批证据。人工描述存在时不会被覆盖。" }
-        ,evidence_refs: { type: "array", items: { type: "string" }, description: "支持该产物的 Memory/RawTurn/Episode 等稳定引用" }
+        ,evidence_refs: { type: "array", items: { type: "string" }, description: "支持该产物的精确证据引用。L2 使用不可变 L1 ref；L3/L4 必须原样使用 memmy_context 或 leased job 返回的 exact revision ref（l2:<memory-id>:<revision-id> / l3:<memory-id>:<revision-id>），禁止只提交稳定 Memory id 或自动解析 latest。" }
         ,source_conversations: { type: "array", items: { type: "string" }, description: "产物来源对话 ID；与 distilled_by 分开保存" }
         ,confidence: { type: "number", minimum: 0, maximum: 1 }
         ,job_id: { type: "string", description: "submit/next 的 leased job，reconcile_derived 的已完成 L2 source job，或 reconcile_l4 的当前最新 L3 source job" }
@@ -1094,7 +1093,10 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       }
 
       const authorizationId = randomUUID();
-      const expiresAt = Date.now() + 10 * 60_000;
+      // Project governance has the same human-in-the-loop approval boundary as
+      // Skill governance; use the same one-day approval window. Execute remains
+      // one-shot and validates the planned object before mutation.
+      const expiresAt = Date.now() + 24 * 60 * 60_000;
       projectMutationAuthorizations.set(authorizationId, {
         accountId: runtime.accountId,
         operation: operation as "create" | "update" | "archive" | "unarchive" | "delete" | "merge",
@@ -2011,11 +2013,6 @@ function defaultStateRoot(): string {
   return resolve(process.env.MEMHUB_STATE_ROOT ?? join(homedir(), ".memmy", "memhub"));
 }
 
-function isJsonRequest(request: import("node:http").IncomingMessage): boolean {
-  const contentType = singleHeader(request.headers["content-type"]);
-  return Boolean(contentType && /^application\/json(?:\s*;|$)/i.test(contentType));
-}
-
 function webSecurityHeaders(): Record<string, string> {
   return {
     "x-content-type-options": "nosniff",
@@ -2135,21 +2132,6 @@ function skillFingerprint(skill: Awaited<ReturnType<typeof loadSkillForAccount>>
   ])).digest("hex");
 }
 
-function assertNextSkillVersion(current: string, next: string): void {
-  const parse = (value: string): number[] => {
-    if (!/^\d+(?:\.\d+){0,2}$/.test(value)) {
-      throw new TypeError("Skill revision versions must be numeric dotted values such as 1.1.0");
-    }
-    return value.split(".").map(Number).concat([0, 0]).slice(0, 3);
-  };
-  const oldVersion = parse(current);
-  const newVersion = parse(next);
-  if (!newVersion.some((value, index) => value > oldVersion[index]! &&
-      newVersion.slice(0, index).every((part, i) => part === oldVersion[i]))) {
-    throw new Error(`Skill revision must advance version beyond ${current}`);
-  }
-}
-
 function projectIdFromSkillTags(tags: readonly string[]): string | undefined {
   const tag = tags.find((value) => value.startsWith("project:"));
   const projectId = tag?.slice("project:".length).trim();
@@ -2221,6 +2203,43 @@ async function assertManagedMemory(runtime: MemhubRuntime, memoryId: string): Pr
   throw new Error(`managed memory not found for account: ${memoryId}`);
 }
 
+async function attachExactEvidenceRefsToContext(
+  stateRoot: string,
+  runtime: MemhubRuntime,
+  capsule: { globalMemory: ContextItem[]; projectMemory: ContextItem[] }
+): Promise<void> {
+  const jobs = await listDistillationJobs(stateRoot, runtime.accountId);
+  const items = [...capsule.globalMemory, ...capsule.projectMemory];
+  for (const item of items) {
+    const layer = item.provenance?.memoryLayer;
+    const prefix = layer === "L2" ? "l2" : layer === "L3" ? "l3" : layer === "L4" ? "l4" : null;
+    if (!prefix || !item.updatedAt) continue;
+    const updatedAt = Date.parse(item.updatedAt);
+    if (!Number.isFinite(updatedAt)) continue;
+    const candidate = jobs
+      .filter((job) =>
+        job.status === "completed" &&
+        job.target === prefix &&
+        job.result_kind === prefix &&
+        job.result_id === item.id &&
+        Boolean(job.result_content?.trim()) &&
+        Boolean(distillationResultTimestamp(job))
+      )
+      .sort((a, b) =>
+        (distillationResultTimestamp(b) ?? "").localeCompare(distillationResultTimestamp(a) ?? "") ||
+        b.job_id.localeCompare(a.job_id)
+      )
+      .find((job) => {
+        const committedAt = Date.parse(distillationResultTimestamp(job)!);
+        // Core and the local revision ledger are committed by the same submit
+        // operation but do not share one clock write. A narrow window proves
+        // this is the current revision while rejecting stale historical jobs.
+        return Number.isFinite(committedAt) && Math.abs(updatedAt - committedAt) <= 60_000;
+      });
+    if (candidate) item.evidenceRef = `${prefix}:${item.id}:${candidate.job_id}`;
+  }
+}
+
 async function validateDistillationEvidenceChain(input: {
   stateRoot: string;
   runtime: MemhubRuntime;
@@ -2228,8 +2247,8 @@ async function validateDistillationEvidenceChain(input: {
   projectId: string | null;
   evidenceRefs: string[];
   job?: DistillationJob;
-}): Promise<void> {
-  if (input.kind === "skill") return;
+}): Promise<DistillationEvidenceItem[]> {
+  if (input.kind === "skill") return [];
 
   if (input.job) {
     const expectedLayer = input.kind === "l2" ? "L1" : input.kind === "l3" ? "L2" : "L3";
@@ -2249,17 +2268,17 @@ async function validateDistillationEvidenceChain(input: {
       if (input.job.reason === "migration") {
         await validateMigrationL1EvidenceScope(input.runtime, input.projectId, input.job.evidence);
       }
-      return;
+      return structuredClone(input.job.evidence);
     }
     if (input.kind === "l3") {
       if (!input.projectId || input.job.evidence.some((item) => !item.project_id || !projectStorageIds?.has(item.project_id))) {
         throw new Error("L3 job evidence must be L2 from the same project");
       }
-      return;
+      return structuredClone(input.job.evidence);
     }
     const projects = new Set(input.job.evidence.map((item) => item.project_id).filter(Boolean));
     if (projects.size < 2) throw new Error("L4 job requires L3 evidence from at least two projects");
-    return;
+    return structuredClone(input.job.evidence);
   }
 
   if (input.kind === "l2") {
@@ -2267,6 +2286,7 @@ async function validateDistillationEvidenceChain(input: {
     const projectStorageIds = new Set(await input.runtime.projects.storageIds(input.runtime.accountId, input.projectId));
     const captures = await listCaptureEvents(input.stateRoot, input.runtime.accountId);
     const byId = new Map(captures.map((item) => [item.event_id, item]));
+    const resolved: DistillationEvidenceItem[] = [];
     for (const ref of input.evidenceRefs) {
       const eventId = parseLayerEvidenceRef(ref, "l1");
       const event = byId.get(eventId);
@@ -2276,52 +2296,137 @@ async function validateDistillationEvidenceChain(input: {
       if (!event.project_hint || !projectStorageIds.has(event.project_hint)) {
         throw new Error(`L2 evidence belongs to another or unresolved project: ${ref}`);
       }
+      resolved.push({
+        ref,
+        kind: "turn",
+        layer: "L1",
+        timestamp: event.timestamp,
+        project_id: event.project_hint,
+        conversation_id: event.conversation_id,
+        user_text: event.user_text.trim(),
+        assistant_text: event.assistant_text.trim(),
+        ...(event.reasoning_summary?.trim() ? { reasoning_summary: event.reasoning_summary.trim() } : {})
+      });
     }
-    return;
+    return resolved;
   }
 
   const expectedLayer = input.kind === "l3" ? "L2" : "L3";
   const expectedPrefix = input.kind === "l3" ? "l2" : "l3";
-  const layerItems: Array<Record<string, unknown>> = [];
-  const storageProjectIds = input.kind === "l3" && input.projectId
-    ? await input.runtime.projects.storageIds(input.runtime.accountId, input.projectId)
-    : [undefined];
-  for (const storageProjectId of storageProjectIds) {
-    const params = new URLSearchParams({ limit: "500", userId: input.runtime.userId });
-    if (storageProjectId) params.set("projectId", storageProjectId);
-    const layerPayload = objectRecord(await input.runtime.memoryClient.viewerGet(
-      `/api/v1/${input.kind === "l3" ? "l2" : "l3"}?${params.toString()}`
-    ));
-    if (Array.isArray(layerPayload.items)) layerItems.push(...layerPayload.items.map(objectRecord));
-  }
-  const byId = new Map(layerItems
-    .filter((item) => typeof item.id === "string")
-    .map((item) => [String(item.id), item] as const));
-  const projects = new Set<string>();
   const projectStorageIds = input.kind === "l3" && input.projectId
     ? new Set(await input.runtime.projects.storageIds(input.runtime.accountId, input.projectId))
     : null;
+  const jobs = await listDistillationJobs(input.stateRoot, input.runtime.accountId);
+  const candidateRefs = completedRevisionCandidates(jobs, expectedPrefix, projectStorageIds);
+  const resolved: DistillationEvidenceItem[] = [];
+  const projects = new Set<string>();
+
   for (const ref of input.evidenceRefs) {
-    const memoryId = parseLayerEvidenceRef(ref, expectedPrefix);
-    const detail = byId.get(memoryId);
-    if (!detail) throw new Error(`${expectedLayer} evidence is not visible in the current account scope: ${ref}`);
-    if (detail.memoryLayer !== expectedLayer) {
-      throw new Error(`${input.kind.toUpperCase()} evidence must reference ${expectedLayer}: ${ref}`);
+    const parsed = parseVersionedLayerEvidenceRef(ref, expectedPrefix);
+    if (!parsed) {
+      throw exactEvidenceRefError({
+        requiredLayer: expectedLayer,
+        received: ref,
+        projectId: input.projectId,
+        expectedPrefix,
+        candidateRefs
+      });
     }
-    const tags = Array.isArray(detail.tags)
-      ? detail.tags.filter((tag): tag is string => typeof tag === "string")
-      : [];
-    const projectTag = tags.find((tag) => tag.startsWith("project:"));
-    const project = projectTag?.slice("project:".length).trim();
-    if (!project) throw new Error(`${expectedLayer} evidence is missing project provenance: ${ref}`);
+    const source = jobs.find((item) => item.job_id === parsed.revisionId);
+    if (!source ||
+        source.status !== "completed" ||
+        source.target !== expectedPrefix ||
+        source.result_kind !== expectedPrefix ||
+        source.result_id !== parsed.memoryId ||
+        !source.result_content?.trim() ||
+        !distillationResultTimestamp(source)) {
+      throw exactEvidenceRefError({
+        requiredLayer: expectedLayer,
+        received: ref,
+        projectId: input.projectId,
+        expectedPrefix,
+        candidateRefs
+      });
+    }
+    const project = source.project_id?.trim();
+    if (!project) {
+      throw new Error(`${expectedLayer} revision is missing project provenance: ${ref}`);
+    }
     if (input.kind === "l3" && !projectStorageIds?.has(project)) {
       throw new Error(`L3 evidence belongs to another project: ${ref}`);
     }
     projects.add(project);
+    resolved.push({
+      ref,
+      kind: "artifact",
+      layer: expectedLayer,
+      timestamp: distillationResultTimestamp(source)!,
+      project_id: project,
+      title: canonicalLayerTitle(expectedPrefix, project),
+      content: source.result_content
+    });
   }
   if (input.kind === "l4" && projects.size < 2) {
     throw new Error("L4 requires L3 evidence from at least two distinct projects");
   }
+  return resolved;
+}
+
+function completedRevisionCandidates(
+  jobs: DistillationJob[],
+  expectedPrefix: "l2" | "l3",
+  projectStorageIds: Set<string> | null
+): string[] {
+  return jobs
+    .filter((job) =>
+      job.status === "completed" &&
+      job.target === expectedPrefix &&
+      job.result_kind === expectedPrefix &&
+      Boolean(job.result_id?.trim()) &&
+      Boolean(job.result_content?.trim()) &&
+      Boolean(distillationResultTimestamp(job)) &&
+      (!projectStorageIds || Boolean(job.project_id && projectStorageIds.has(job.project_id)))
+    )
+    .sort((a, b) =>
+      (distillationResultTimestamp(b) ?? "").localeCompare(distillationResultTimestamp(a) ?? "") ||
+      b.job_id.localeCompare(a.job_id)
+    )
+    .slice(0, 5)
+    .map((job) => `${expectedPrefix}:${job.result_id}:${job.job_id}`);
+}
+
+function exactEvidenceRefError(input: {
+  requiredLayer: "L2" | "L3";
+  received: string;
+  projectId: string | null;
+  expectedPrefix: "l2" | "l3";
+  candidateRefs: string[];
+}): Error {
+  return new Error([
+    "MEMHUB_EVIDENCE_REF_INVALID",
+    `required_layer: ${input.requiredLayer}`,
+    `received: ${input.received}`,
+    `resolved_project: ${input.projectId ?? "account"}`,
+    `valid_evidence_ref_example: ${input.expectedPrefix}:<memory-id>:<revision-id>`,
+    "hint: Use the exact evidenceRef returned by memmy_context; do not rebuild it from the stable Memory id.",
+    ...(input.candidateRefs.length > 0
+      ? [`candidate_evidence_refs: ${input.candidateRefs.join(", ")}`]
+      : [])
+  ].join(" | "));
+}
+
+function parseVersionedLayerEvidenceRef(
+  ref: string,
+  expectedPrefix: "l2" | "l3"
+): { memoryId: string; revisionId: string } | null {
+  const prefix = `${expectedPrefix}:`;
+  if (!ref.startsWith(prefix)) return null;
+  const value = ref.slice(prefix.length).trim();
+  const separator = value.lastIndexOf(":");
+  if (separator <= 0 || separator === value.length - 1) return null;
+  const memoryId = value.slice(0, separator).trim();
+  const revisionId = value.slice(separator + 1).trim();
+  return memoryId && revisionId ? { memoryId, revisionId } : null;
 }
 
 async function unfinishedDistillationJobsForProject(
@@ -2415,14 +2520,6 @@ function stringArray(value: unknown): string[] | undefined {
   return values.length ? [...new Set(values)] : undefined;
 }
 
-function stringArrayAllowEmpty(value: unknown): string[] {
-  if (!Array.isArray(value)) throw new TypeError("value must be an array");
-  return [...new Set(value
-    .filter((item): item is string => typeof item === "string")
-    .map((item) => item.trim())
-    .filter(Boolean))];
-}
-
 function uniqueStrings(values: string[]): string[] | undefined {
   const normalized = values.map((value) => value.trim()).filter(Boolean);
   return normalized.length ? [...new Set(normalized)] : undefined;
@@ -2483,23 +2580,10 @@ function optionalInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : undefined;
 }
 
-function optionalNumber(value: unknown): number | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "number" || !Number.isFinite(value)) throw new TypeError("value must be a finite number");
-  return value;
-}
-
 function optionalBoolean(value: unknown): boolean | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "boolean") throw new TypeError("value must be a boolean");
   return value;
-}
-
-function objectValue(value: unknown, field: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new TypeError(`${field} must be an object`);
-  }
-  return value as Record<string, unknown>;
 }
 
 async function resolveToolScope(

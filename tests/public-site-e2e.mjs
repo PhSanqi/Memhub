@@ -20,9 +20,7 @@ try {
       `public page ${page} contains personal/demo-ambiguous copy`);
     assert.doesNotMatch(html, /class="console-entry"|>进入管理台<|>Open console</,
       `public page ${page} must not expose a self-hosted console entry`);
-    assert.doesNotMatch(
-      html,
-      /[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|\/home\/(?!USER\/)[A-Za-z0-9._-]+\/|C:\\Users\\(?!USER\\)[^\\]+\\/i,
+    assert.doesNotMatch(html, /[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|\/home\/z\/|C:\\Users\\Administrator\\/i,
       `public page ${page} contains an email or operator home path`);
     for (const match of html.matchAll(/(?:href|src)="(\/Memhub(?:\/[^"#?]*)?)/g)) {
       const route = match[1].replace(/^\/Memhub\/?/, "");

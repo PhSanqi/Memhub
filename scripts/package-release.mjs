@@ -5,11 +5,13 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
+import { runAssetHygiene } from "./asset-hygiene.mjs";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const CHECK_ONLY = process.argv.includes("--check");
 const WORKTREE = process.argv.includes("--worktree");
 const REF = argumentValue("--ref") ?? "HEAD";
+const OUTPUT_ROOT_ARG = argumentValue("--output-root");
 
 const variants = [
   { id: "linux-local", os: "linux", edition: "local", format: "tar.gz" },
@@ -18,6 +20,9 @@ const variants = [
   { id: "windows-server", os: "windows", edition: "server", format: "zip" }
 ];
 
+// Standard archives are source-build distributions: the edition installers
+// run `npm ci` and `npm run build` when dependencies/dist are absent. Keep the
+// TypeScript source/build config, but do not ship repository-only tests/docs.
 const commonPaths = [
   "LICENSE",
   "CHANGELOG.md",
@@ -29,11 +34,9 @@ const commonPaths = [
   "tsconfig.json",
   "src",
   "scripts",
-  "tests",
   "web-assets",
   "deploy",
   "adapters",
-  "docs",
   "vendor",
   "editions/README.md"
 ];
@@ -81,8 +84,11 @@ if (CHECK_ONLY) {
 }
 
 const commit = WORKTREE ? gitText("rev-parse", "HEAD").trim() : gitText("rev-parse", `${REF}^{commit}`).trim();
-const outputRoot = resolve(ROOT, "release", `v${version}`);
-await rm(outputRoot, { recursive: true, force: true });
+const outputRoot = OUTPUT_ROOT_ARG ? resolve(ROOT, OUTPUT_ROOT_ARG) : resolve(ROOT, "release", `v${version}`);
+// The canonical version directory is fully regenerated. A caller-supplied
+// output root may be a shared or temporary directory, so never recursively
+// delete it; individual assets/manifests below are replaced in place.
+if (!OUTPUT_ROOT_ARG) await rm(outputRoot, { recursive: true, force: true });
 await mkdir(outputRoot, { recursive: true });
 const tempRoot = WORKTREE ? await mkdtemp(join(tmpdir(), "memhub-release-")) : null;
 
@@ -132,6 +138,19 @@ await writeFile(
   JSON.stringify({ format: "memhub-release-v1", version, commit, ref: WORKTREE ? "WORKTREE" : REF, assets }, null, 2) + "\n",
   "utf8"
 );
+
+// Persistent canonical packaging keeps one release version. Explicit
+// --output-root builds are disposable/QA outputs and must never mutate the
+// canonical release directory. Explicit historical --ref packaging also
+// leaves canonical retention untouched.
+if (!OUTPUT_ROOT_ARG && (WORKTREE || REF === "HEAD")) {
+  await runAssetHygiene({
+    root: ROOT,
+    apply: true,
+    releaseOnly: true,
+    currentReleaseOverride: `v${version}`
+  });
+}
 
 console.log(JSON.stringify({ ok: true, version, commit, ref: WORKTREE ? "WORKTREE" : REF, outputRoot, assets }, null, 2));
 

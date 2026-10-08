@@ -1,4 +1,4 @@
-import { isRecord } from "../../utils/json.js";
+import { isRecord, redactSecretFields } from "../../utils/json.js";
 import { detailSummaryForMemory } from "./memory.js";
 import { nowIso, resolveTimeZone } from "../../utils/time.js";
 import { panelAverage, panelDateKey, panelDateKeys, panelLastSevenDateKeys, panelPercentile95, panelRecallScore, panelRoundDecimal, panelRoundInt, panelToolLatency } from "./model-costs.js";
@@ -164,7 +164,7 @@ export class PanelReadModel {
         const config = this.deps.config();
         return {
             version: config.version,
-            config: redactConfig(config),
+            config: redactSecretFields(config),
             redacted: true,
             serverTime: this.now()
         };
@@ -258,7 +258,10 @@ export class PanelReadModel {
             ? this.deps.repos.memories.getMany(this.deps.repos.memories.searchPanelIds(input.q, { ...filter, status: filter.status ?? ["activated", "resolving"] }, pageSize, offset).map((hit) => hit.id))
             : this.deps.repos.memories.list(filter, pageSize, offset);
         return {
-            items: memories.map((memory) => panelListItemFromMemory(this.deps.repos.memories.toListItem(memory), memory, this.deps.repos.processing.get(memory.id))),
+            items: memories.map((memory) => ({
+                ...panelListItemFromMemory(this.deps.repos.memories.toListItem(memory), memory, this.deps.repos.processing.get(memory.id)),
+                ...(input.includeBody ? { body: memory.memoryValue } : {})
+            })),
             page,
             pageSize,
             total,

@@ -6,6 +6,13 @@ export type ContextScope = "global" | "project" | "conversation" | "capability";
 
 export interface ContextItem {
   id: string;
+  /**
+   * Exact immutable provenance reference for this recalled durable Memory
+   * revision when Memhub can prove one. Callers should pass this value back
+   * unchanged as a downstream distillation evidence_ref instead of rebuilding
+   * a reference from the stable Memory id.
+   */
+  evidenceRef?: string;
   content: string;
   authority: ContextAuthority;
   scope: ContextScope;

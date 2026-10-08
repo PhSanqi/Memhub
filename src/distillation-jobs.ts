@@ -193,6 +193,88 @@ export async function enqueueDerivedDistillationJob(input: {
   });
 }
 
+
+/**
+ * Record a direct/manual L2-L4 Core write as an immutable completed revision.
+ *
+ * Job-backed distillation already gets this identity from its leased job.
+ * Direct submit used to update the stable Memory id without leaving a durable
+ * revision handle, which made downstream provenance race with later updates.
+ * This ledger entry gives every successful direct write the same
+ * <result_id>:<job_id> evidence identity as the queued path.
+ */
+export async function recordCompletedDistillationRevision(input: {
+  stateRoot: string;
+  accountId: string;
+  target: "l2" | "l3" | "l4";
+  projectId: string | null;
+  conversationId?: string;
+  evidence: DistillationEvidenceItem[];
+  resultId: string;
+  content: string;
+  committedAt: string;
+}): Promise<DistillationJob> {
+  const resultId = input.resultId.trim();
+  const content = input.content.trim();
+  if (!resultId) throw new TypeError("completed revision requires resultId");
+  if (!content) throw new TypeError("completed revision requires content");
+  if ((input.target === "l2" || input.target === "l3") && !input.projectId) {
+    throw new Error(`${input.target.toUpperCase()} completed revision requires projectId`);
+  }
+  if (input.target === "l4" && input.projectId) {
+    throw new Error("L4 completed revision must be account-scoped");
+  }
+  if (input.evidence.length === 0) {
+    throw new Error(`${input.target.toUpperCase()} completed revision requires evidence`);
+  }
+  const committedAtMs = Date.parse(input.committedAt);
+  if (!Number.isFinite(committedAtMs)) throw new TypeError("completed revision requires a valid committedAt");
+  const committedAt = new Date(committedAtMs).toISOString();
+  const evidence = uniqueEvidence(input.evidence);
+  const evidenceHash = createHash("sha256")
+    .update(JSON.stringify({ target: input.target, project: input.projectId, evidence }), "utf8")
+    .digest("hex");
+
+  return withMutation(input.stateRoot, async () => {
+    const store = await loadStore(input.stateRoot);
+    const existing = store.jobs.find((job) =>
+      job.account_id === input.accountId &&
+      job.target === input.target &&
+      job.project_id === input.projectId &&
+      job.status === "completed" &&
+      job.result_kind === input.target &&
+      job.result_id === resultId &&
+      job.result_content === content &&
+      job.evidence_hash === evidenceHash
+    );
+    if (existing) return structuredClone(existing);
+
+    const job: DistillationJob = {
+      job_id: randomUUID(),
+      account_id: input.accountId,
+      target: input.target,
+      scope: input.projectId ? "project" : "account",
+      project_id: input.projectId,
+      ...(input.conversationId ? { conversation_id: input.conversationId } : {}),
+      status: "completed",
+      reason: "manual",
+      created_at: committedAt,
+      updated_at: committedAt,
+      completed_at: committedAt,
+      result_kind: input.target,
+      result_id: resultId,
+      result_content: content,
+      result_committed_at: committedAt,
+      evidence_refs: evidence.map((item) => item.ref),
+      evidence_hash: evidenceHash,
+      evidence
+    };
+    store.jobs.push(job);
+    await saveStore(input.stateRoot, store);
+    return structuredClone(job);
+  });
+}
+
 export async function enqueueLegacyL1DistillationJob(input: {
   stateRoot: string;
   accountId: string;

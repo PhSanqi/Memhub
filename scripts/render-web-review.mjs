@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { copyFile, mkdir, readFile, writeFile, access } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, writeFile, access } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -132,8 +132,8 @@ async function main() {
 
   const packDir = await uniquePackDir();
   await mkdir(packDir, { recursive: true });
-  await copyFile(resolve(repo, "docs/maintainers/web-design-contract.md"), join(packDir, "DESIGN.md"));
-  await copyFile(resolve(repo, "docs/maintainers/web-redesign-brief.md"), join(packDir, "BRIEF.md"));
+  await copyFile(resolve(repo, "docs/internal/web-design-contract.md"), join(packDir, "DESIGN.md"));
+  await copyFile(resolve(repo, "docs/internal/web-redesign-brief.md"), join(packDir, "BRIEF.md"));
 
   const cdp = new CdpPipe(chrome); await cdp.start();
   const metrics = { generatedAt: new Date().toISOString(), chromium: chrome, method: "Chrome DevTools Protocol over --remote-debugging-pipe / Emulation.setDeviceMetricsOverride", viewports: {}, states: {} };
@@ -182,6 +182,10 @@ async function main() {
   await writeFile(join(packDir, "deterministic-metrics.json"), JSON.stringify(metrics, null, 2));
   await mkdir(runtimeDir, { recursive: true });
   await writeFile(join(runtimeDir, "latest-pack.txt"), packDir + "\n");
+  // Review pages are staging-only. Preserve them on failure for diagnosis,
+  // but after a successful capture keep only the completed review packs.
+  await rm(pagesDir, { recursive: true, force: true });
+  await run(process.execPath, ["scripts/asset-hygiene.mjs", "--apply", "--review-packs-only", "--keep-review", "2"]);
   console.log(`WEB_REVIEW_PACK=${packDir}`);
 }
 

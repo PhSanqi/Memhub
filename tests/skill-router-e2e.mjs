@@ -57,4 +57,23 @@ const recallHitShape = compactSkillContextItem({
 assert.equal(recallHitShape.provenance.skillRouter.title, "Memhub Long-Term Content Audit");
 assert.doesNotMatch(recallHitShape.provenance.skillRouter.title, /bounded/i);
 
+const legacyFrontmatter = compactSkillContextItem({
+  id: "skill-legacy-frontmatter",
+  content: `---
+name: ponytail-review
+description: >
+  Review a repository and rank findings by impact.
+---
+# Ponytail Review
+
+## Procedure
+SECRET LEGACY PROCEDURE`,
+  authority: "remembered", scope: "capability", source: "memory-core",
+  provenance: { tags: ["artifact:skill", "legacy-import", "cross-agent-skill"] }
+});
+assert.equal(legacyFrontmatter.provenance.skillRouter.title, "ponytail-review");
+assert.equal(legacyFrontmatter.provenance.skillRouter.summary, "Review a repository and rank findings by impact.");
+assert.doesNotMatch(legacyFrontmatter.provenance.skillRouter.title, /^---$/);
+assert.doesNotMatch(legacyFrontmatter.content, /SECRET LEGACY PROCEDURE/);
+
 console.log("memhub-skill-router-e2e: ok");

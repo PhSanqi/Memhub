@@ -9,11 +9,15 @@ $self = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $token = "a" * 64
 $script:fakeTasks = @{}
 $script:fakeProcesses = @()
+$script:processSnapshotReads = 0
 $script:xmlVariant = ''
 $script:xmlDrift = $false
 $script:xmlReads = @{}
 function Get-MemhubInstallTask { param([string]$Name) return $script:fakeTasks[$Name] }
-function Get-MemhubLegacyProcessSnapshot { return $script:fakeProcesses }
+function Get-MemhubLegacyProcessSnapshot {
+  $script:processSnapshotReads++
+  return $script:fakeProcesses
+}
 function schtasks.exe { throw "Read-only audit must not mutate Task Scheduler" }
 function Export-ScheduledTask {
   [CmdletBinding()]
@@ -68,6 +72,20 @@ function WriteLegacy([string]$mode) {
 
 try {
   New-Item -ItemType Directory -Force -Path $runtime,$memory | Out-Null
+  # An uninstalled host must not be characterized as a failed migration or
+  # require an otherwise nonexistent Memory config.
+  $script:fakeTasks.Clear()
+  ExpectRefusal { Get-MemhubLegacyMigrationAudit -Mode server -StateRoot $root } 'No eligible legacy Memhub tasks found'
+  ExpectRefusal { Get-MemhubLegacyMigrationAudit -Mode local -StateRoot $root } 'No eligible legacy Memhub tasks found'
+  if ($script:processSnapshotReads -ne 0) {
+    throw 'Uninstalled host must not query all Node processes'
+  }
+  $script:fakeTasks['Memhub-Server-Memory'] = FakeTask 'Memhub-Server-Memory' (Join-Path $runtime 'memory-server.cmd')
+  ExpectRefusal { Get-MemhubLegacyMigrationAudit -Mode server -StateRoot $root } 'Partial legacy task set'
+  if ($script:processSnapshotReads -ne 0) {
+    throw 'Partial task set must not scan processes'
+  }
+  $script:fakeTasks.Clear()
   Set-Content -LiteralPath (Join-Path $root 'memory-config.yaml') -Encoding UTF8 -Value ('{"memmyMemory":{"storage":{"token":"' + $token + '"}}}')
   Set-Content -LiteralPath (Join-Path $memory 'memory.sqlite') -Encoding ASCII -Value 'protected simulated database'
   foreach ($mode in @('server','local')) {
@@ -111,6 +129,10 @@ try {
     $script:fakeTasks[$managedName] = FakeTask $managedName (Join-Path $runtime 'stack.cmd')
     ExpectRefusal { Get-MemhubLegacyMigrationAudit -Mode $mode -StateRoot $root } 'Managed stack task exists'
     $script:fakeTasks.Remove($managedName)
+    $opposite = if ($mode -eq 'server') { 'Memhub-Bridge' } else { 'Memhub-Server' }
+    $script:fakeTasks[$opposite] = FakeTask $opposite (Join-Path $runtime 'opposite.cmd')
+    ExpectRefusal { Get-MemhubLegacyMigrationAudit -Mode $mode -StateRoot $root } 'Opposite-edition or mixed'
+    $script:fakeTasks.Remove($opposite)
     # Identical Node image alone is not a match: require exact quoted binary
     # and entrypoint. Even a unique candidate remains unattributed to the task.
     $memoryFile = if ($mode -eq 'server') { 'memory-server.cmd' } else { 'memory.cmd' }

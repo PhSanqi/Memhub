@@ -59,11 +59,13 @@ export async function handleMemoryControlRead(input: {
     runtime,
     kind: kindRaw as MemoryControlKind,
     projects,
+    includeOverviewItems: !adminView,
     ...(projectId ? { projectId } : {})
   });
   response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" })
     .end(JSON.stringify({
       ...objectRecord(payload),
+      ...(kindRaw === "overview" && adminView ? { account_count: accounts.length } : {}),
       account: {
         account_id: selectedAccount.account_id,
         username: selectedAccount.username,

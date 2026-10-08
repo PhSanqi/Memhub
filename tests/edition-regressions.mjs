@@ -10,6 +10,18 @@ const packageJson = JSON.parse(await readFile(new URL("../package.json", import.
 const pluginJson = JSON.parse(await readFile(new URL("../adapters/plugin/plugin.json", import.meta.url), "utf8"));
 assert.equal(pluginJson.version, packageJson.version, "plugin and runtime release versions must stay aligned");
 assert.equal(packageJson.version, "0.2.6", "release regression expects the v0.2.6 line");
+for (const unusedDependency of ["fast-xml-parser", "smol-toml", "ignore"]) {
+  assert.equal(packageJson.dependencies?.[unusedDependency], undefined,
+    `${unusedDependency} must not remain a direct production dependency without a runtime import`);
+}
+assert.equal(packageJson.dependencies?.typescript, undefined,
+  "TypeScript is a build tool and must not remain a production dependency");
+assert.ok(packageJson.devDependencies?.typescript,
+  "source-build releases still require TypeScript as a development dependency");
+assert.match(packageJson.scripts?.["qa:windows:installer-lifecycle"] ?? "", /windows-installer-lifecycle-e2e\.ps1/,
+  "the real Windows installer lifecycle regression must remain wired to an explicit QA entrypoint");
+assert.match(packageJson.scripts?.["qa:windows:legacy-source-lineage"] ?? "", /windows-legacy-source-lineage-e2e\.mjs/,
+  "legacy source provenance must remain wired to an explicit QA entrypoint");
 
 const editions = [
   {
@@ -48,6 +60,15 @@ for (const id of ["linux-local", "linux-server", "windows-local", "windows-serve
 }
 assert.match(releaseScript, /release-manifest\.json/, "release packaging must emit a commit-bound manifest");
 assert.match(releaseScript, /SHA256SUMS\.txt/, "release packaging must emit checksums");
+assert.match(releaseScript, /--output-root/, "standard release QA must support disposable output roots");
+assert.match(releaseScript, /releaseOnly:\s*true/, "canonical standard release packaging must prune superseded release versions");
+const releaseCommonPaths = releaseScript.match(/const commonPaths = \[(.*?)\];/s)?.[1] ?? "";
+assert.match(releaseCommonPaths, /["']src["']/,
+  "standard releases build dist on the target and therefore must retain src");
+assert.doesNotMatch(releaseCommonPaths, /["']tests["']/,
+  "standard runtime releases must not ship the repository test suite");
+assert.doesNotMatch(releaseCommonPaths, /["']docs["']/,
+  "standard runtime releases must not duplicate the documentation tree");
 
 const deployInstaller = await readFile(new URL("../deploy/install-user-service.sh", import.meta.url), "utf8");
 const deployUnit = await readFile(new URL("../deploy/memhub.service.in", import.meta.url), "utf8");
@@ -84,6 +105,7 @@ for (const [name, source] of [["README.md", readme], ["README.zh-CN.md", readmeZ
   assert.doesNotMatch(source, /(?:plugin|memhub|letter)\.sanqi\.org/, name + ": public docs must not expose operator-specific hostnames");
 }
 const completePackager = await readFile(new URL("../scripts/package-complete-release.mjs", import.meta.url), "utf8");
+assert.match(completePackager, /releaseOnly:\s*true/, "canonical Complete packaging must prune superseded release versions");
 const completeSmoke = await readFile(new URL("../scripts/complete-runtime-smoke.cjs", import.meta.url), "utf8");
 const windowsTaskOwnership = await readFile(new URL("../scripts/windows-task-ownership.ps1", import.meta.url), "utf8");
 const windowsStackOwner = await readFile(new URL("../scripts/windows-stack-owner.ps1", import.meta.url), "utf8");

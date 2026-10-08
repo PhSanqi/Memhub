@@ -28,6 +28,16 @@ export function asStringArray(value) {
         return [];
     return value.filter((item) => typeof item === "string");
 }
+export function redactSecretFields(value, replacement = "********") {
+    if (Array.isArray(value))
+        return value.map((item) => redactSecretFields(item, replacement));
+    if (!isRecord(value))
+        return value;
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+        key,
+        /token|apiKey|secret|password/i.test(key) && item ? replacement : redactSecretFields(item, replacement)
+    ]));
+}
 export function isRecord(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }

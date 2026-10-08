@@ -1,4 +1,4 @@
-export const DISTILLATION_CONTRACT_VERSION = "memhub-distill-v2";
+export const DISTILLATION_CONTRACT_VERSION = "memhub-distill-v3";
 
 const PROMPT_CONTAMINATION = [
   /generate\s+0\s+to\s+3\s+hyperpersonalized\s+suggestions/i,
@@ -54,11 +54,13 @@ export function distillationContract() {
       "Keep content source separate from the model/harness that performs distillation.",
       "Do not turn system/developer prompts, tool schemas, safety policies, ambient suggestion prompts, or transient test instructions into user memory.",
       "Use project scope only when the project is explicit or deterministically conversation-bound.",
+      "For L3 and L4, use exact immutable L2/L3 revision refs returned by Memhub (for example l2:<memory-id>:<revision-id>); never rebuild evidence from a stable Memory id or silently resolve the latest revision.",
       "L2 is a project-scoped chronological development narrative derived from L1 turns; preserve sequence, state changes, decisions, current truth, and superseded history.",
       "When producing L2, also provide a concise evidence-backed project description when the project objective/scope/current focus is supported; Memhub stores it as distilled routing metadata without overwriting an explicit manual description.",
       "L3 is a project-scoped set of durable user rules, preferences, experience, and working habits derived from L2; do not promote one-off events without support.",
       "L4 is an account-scoped cross-project user profile derived from L3 artifacts; require repeated or cross-project evidence and do not infer sensitive traits.",
       "Skill is an executable reusable procedure and is orthogonal to L1-L4.",
+      "Every Skill must use a stable artifact_id as source identity across revisions and a numeric dotted version; revisions replace/archive the prior current Skill instead of creating parallel active truths.",
       "Prefer a compact durable artifact over copying raw conversation text."
     ]
   };

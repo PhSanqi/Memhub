@@ -1,3 +1,4 @@
+import { parse as parseYaml } from "yaml";
 import type { ContextItem } from "./context-capsule.js";
 import { tokenizeRetrievalText } from "./retrieval-ranker.js";
 
@@ -19,9 +20,10 @@ export function compactSkillContextItem(
   telemetryReliability?: number
 ): ContextItem {
   const tags = provenanceTags(item);
-  const title = skillTitle(item.content);
-  const summary = skillSummary(item.content, title);
-  const whenToUse = skillWhenToUse(item.content, summary);
+  const frontmatter = skillFrontmatter(item.content);
+  const title = skillTitle(item.content, frontmatter);
+  const summary = skillSummary(item.content, title, frontmatter);
+  const whenToUse = skillWhenToUse(item.content, summary, frontmatter);
   const taggedReliability = numericTag(tags, ["reliability", "confidence"]);
   const reliability = clamp01(
     telemetryReliability ?? taggedReliability ?? 0.5
@@ -86,9 +88,10 @@ export function skillSelectionMetadataFromBody(
   body: string,
   input: { projectId?: string; tags?: readonly string[]; telemetryReliability?: number } = {}
 ): SkillSelectionMetadata {
-  const title = skillTitle(body);
-  const summary = skillSummary(body, title);
-  const whenToUse = skillWhenToUse(body, summary);
+  const frontmatter = skillFrontmatter(body);
+  const title = skillTitle(body, frontmatter);
+  const summary = skillSummary(body, title, frontmatter);
+  const whenToUse = skillWhenToUse(body, summary, frontmatter);
   const tags = input.tags ?? [];
   const taggedReliability = numericTag(tags, ["reliability", "confidence"]);
   const reliability = clamp01(input.telemetryReliability ?? taggedReliability ?? 0.5);
@@ -106,7 +109,30 @@ export function skillSelectionMetadataFromBody(
   };
 }
 
-function skillTitle(content: string): string {
+function skillFrontmatter(content: string): Record<string, unknown> {
+  const match = content.match(/^\s*---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (!match?.[1]) return {};
+  try {
+    const parsed = parseYaml(match[1]);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function frontmatterString(frontmatter: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = frontmatter[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function skillTitle(content: string, frontmatter: Record<string, unknown>): string {
+  const declared = frontmatterString(frontmatter, "name", "title");
+  if (declared) return clip(declared, 160);
   const lines = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const firstNonArtifact = lines.find((line) => !/^(?:skill\.import:|artifact:)/i.test(line));
   // Recall hits prepend Memory Core's structured title to the snippet. Prefer
@@ -128,7 +154,9 @@ function skillTitle(content: string): string {
   return clip(firstNonArtifact ?? "Reusable Skill", 160);
 }
 
-function skillSummary(content: string, title: string): string {
+function skillSummary(content: string, title: string, frontmatter: Record<string, unknown>): string {
+  const declared = frontmatterString(frontmatter, "description", "summary");
+  if (declared) return clip(declared.replace(/\s+/g, " "), 240);
   const lines = content.split(/\r?\n/).map((line) => line.trim());
   const candidates = lines.filter((line) =>
     line &&
@@ -139,12 +167,14 @@ function skillSummary(content: string, title: string): string {
   );
   const candidate = candidates[0] ?? title;
   if (/\s+#{1,6}\s+/.test(candidate)) {
-    return clip(skillWhenToUse(content, title), 240);
+    return clip(skillWhenToUse(content, title, frontmatter), 240);
   }
   return clip(candidate, 240);
 }
 
-function skillWhenToUse(content: string, fallback: string): string {
+function skillWhenToUse(content: string, fallback: string, frontmatter: Record<string, unknown>): string {
+  const declared = frontmatterString(frontmatter, "when_to_use", "whenToUse");
+  if (declared) return clip(declared.replace(/\s+/g, " "), 320);
   const lines = content.split(/\r?\n/);
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!.trim();

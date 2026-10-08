@@ -7,6 +7,23 @@ permissions:
   contents: read
 
 jobs:
+  windows-source-regressions:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.20.0
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build source tree
+        run: npm run build
+      - name: Verify legacy source lineage
+        run: npm run qa:windows:legacy-source-lineage
+      - name: Verify installer lifecycle
+        run: npm run qa:windows:installer-lifecycle
+
   build-windows-complete:
     runs-on: ubuntu-latest
     steps:
