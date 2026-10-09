@@ -1,6 +1,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   authenticateDevice,
+  captureIsFullyExcludedFromMemory,
+  markCaptureIngested,
   normalizeCaptureEvent,
   storeCaptureEvent,
   withCaptureIngestAttempt
@@ -118,6 +120,19 @@ export async function handleCaptureHttpRequest(input: {
       duplicate: true,
       project_id: projectId
     };
+  if (captureIsFullyExcludedFromMemory(stored.event)) {
+    await markCaptureIngested(stateRoot, device.account_id, stored.event.event_id);
+    json(response, stored.created ? 201 : 200, {
+      accepted: true,
+      duplicate: !stored.created && !stored.updated,
+      updated: stored.updated,
+      event_id: stored.event.event_id,
+      device_id: device.device_id,
+      excluded_from_memory: true,
+      ingestion: { ingested: false, excluded: true, project_id: projectId }
+    });
+    return;
+  }
   try {
     const attempt = await withCaptureIngestAttempt({
       stateRoot,
@@ -139,6 +154,20 @@ export async function handleCaptureHttpRequest(input: {
     const frozenConflict = /capture (changed before ingestion|ingest intent\/payload conflict)/.test(
       error instanceof Error ? error.message : String(error)
     );
+    if (!upstreamConflict && !frozenConflict && retryableIngestError(error)) {
+      json(response, 202, {
+        accepted: true,
+        durable: true,
+        retryable: true,
+        duplicate: !stored.created && !stored.updated,
+        updated: stored.updated,
+        event_id: stored.event.event_id,
+        device_id: device.device_id,
+        ingestion: { ingested: false, pending: true, project_id: projectId },
+        warning: "memory_core_temporarily_unavailable"
+      });
+      return;
+    }
     json(response, upstreamConflict || frozenConflict ? 409 : 503, {
       error: upstreamConflict || frozenConflict
         ? "capture_ingest_conflict"
@@ -178,6 +207,22 @@ export async function handleCaptureHttpRequest(input: {
     ingestion,
     ...(distillation_queue_error ? { distillation_queue_error } : {})
   });
+}
+
+export function retryableIngestError(error: unknown): boolean {
+  if (error instanceof MemoryCoreHttpError) {
+    return error.status === 408 || error.status === 429 || error.status >= 500;
+  }
+  const candidate = error as { name?: unknown; code?: unknown; cause?: unknown; message?: unknown };
+  const cause = candidate?.cause as { code?: unknown; message?: unknown } | undefined;
+  const name = typeof candidate?.name === "string" ? candidate.name : "";
+  const code = typeof candidate?.code === "string"
+    ? candidate.code
+    : typeof cause?.code === "string" ? cause.code : "";
+  const message = [candidate?.message, cause?.message].filter((item) => typeof item === "string").join(" ");
+  return name === "AbortError" || name === "TimeoutError" ||
+    ["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH"].includes(code) ||
+    /fetch failed|network|connection refused|timed? ?out|socket hang up/i.test(message);
 }
 
 function json(response: ServerResponse, status: number, value: unknown): void {

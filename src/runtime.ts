@@ -73,7 +73,8 @@ export function createMemhubRuntime(options: MemhubRuntimeOptions = {}): MemhubR
   const architecture = architectureDisabled
     ? new NullProjectArchitectureSource()
     : new FileProjectArchitectureSource({
-      rootDir: architectureRoot
+      rootDir: architectureRoot,
+      managedRootDir: join(dirname(bindingsPath), "project-architecture")
     });
   const bindings = new JsonConversationProjectBindingStore(bindingsPath);
   const branches = new JsonProjectBranchStore(resolve(

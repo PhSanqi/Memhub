@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { createServer, request as httpRequest } from "node:http";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -195,12 +195,21 @@ function consoleHtmlWithBrowserMocks(html) {
     ]},
     l1:{total:1,items:[{event_id:"turn-browser-1",source_kind:"capture",user_text:"A long source turn that exercises realistic wrapping and drawer rendering.",assistant_text:"The assistant response is intentionally non-trivial so the row is representative.",capture_status:"complete",project_hint:"alpha",timestamp:"2026-09-21T08:10:00.000Z"}]},
     l2:{total:1,items:[{id:"l2-browser-1",project_id:"alpha",title:"Alpha timeline",summary:"Current project chronology",body:"# Alpha timeline\\n\\n## 2026-09-20 Initial decision\\nThe first durable decision was recorded.\\n\\n## 2026-09-21 Responsive review\\nThe mobile review identified navigation discoverability work.",updatedAt:"2026-09-21T08:20:00.000Z"}]},
-    l3:{total:1,items:[{id:"l3-browser-1",project_id:"alpha",title:"Alpha durable rules",summary:"Durable project rules",body:"- Preserve root overflow at zero.\\n- Keep mobile navigation discoverable.\\n- Verify browser evidence before acceptance.",updatedAt:"2026-09-21T08:25:00.000Z"}]},
+    l3:{total:1,items:[{id:"l3-browser-1",project_id:"alpha",title:"Alpha durable rules",summary:"Durable project rules",body:"Project guidance should remain readable before the detailed rules.\\n\\n## Interaction rules\\n- Preserve root overflow at zero.\\n- Keep mobile navigation discoverable.\\n- Verify browser evidence before acceptance.\\n\\nClosing context should remain visible after the bullet list.",updatedAt:"2026-09-21T08:25:00.000Z"}]},
     l4:{total:1,items:[{id:"l4-browser-1",title:"Cross-project profile",summary:"Stable cross-project working profile",body:"- Prefers evidence-backed verification.\\n- Prefers minimal sufficient architecture.",updatedAt:"2026-09-21T08:30:00.000Z"}]},
     skills:{total:2,items:[
       {id:"skill-browser-1",title:"Responsive review",summary:"Reusable frontend review procedure",status:"activated",tags:["distilled","artifact:skill","project:alpha"]},
       {id:"skill-browser-external",title:"Review agent",summary:"Installed external review workflow",status:"activated",tags:["legacy-import","agent-source","cross-agent-skill"]}
     ]},
+    visualization:{schema_version:2,visualization_contract:"memhub-project-state-ir-v1",source_of_truth:"canonical-l2",revision_source:"exact-l2-revision-ledger",projection_only:true,project_id:"alpha",requires_project:false,stats:{events:4,workstreams:2,l2_revisions:3,versions:2,pending_todos:1},state:{current_head_event_id:"event-dashboard-v2",current_l2_memory_ids:["l2-browser-1"],workstreams:[
+      {id:"stream-capture",label:"Capture",basis:"inferred",event_count:2,current_event_id:"event-capture-v2",versions:["v1","v2"]},
+      {id:"stream-dashboard",label:"Dashboard",basis:"inferred",event_count:2,current_event_id:"event-dashboard-v2",versions:["v1","v2"]}
+    ],events:[
+      {id:"event-capture-v1",memory_id:"l2-browser-1",date:"2026-09-20",date_label:"2026-09-20",title:"Capture v1 candidate",summary:"Capture validation started.",order:1,workstream_id:"stream-capture",workstream_label:"Capture",workstream_basis:"inferred",stage:"active",version:"v1",current_head:false,workstream_head:false,source_revision_refs:["l2:l2-browser-1:revision-old"],latest_revision_ref:"l2:l2-browser-1:revision-old",evidence_refs:["l1:turn-browser-1"],first_seen_at:"2026-09-20T08:20:00.000Z",last_seen_at:"2026-09-20T08:20:00.000Z"},
+      {id:"event-dashboard-v1",memory_id:"l2-browser-1",date:"2026-09-20",date_label:"2026-09-20",title:"Dashboard v1 start",summary:"Project status view started.",order:2,workstream_id:"stream-dashboard",workstream_label:"Dashboard",workstream_basis:"inferred",stage:"active",version:"v1",current_head:false,workstream_head:false,source_revision_refs:["l2:l2-browser-1:revision-old"],latest_revision_ref:"l2:l2-browser-1:revision-old",evidence_refs:["l1:turn-browser-1"],first_seen_at:"2026-09-20T08:20:00.000Z",last_seen_at:"2026-09-20T08:20:00.000Z"},
+      {id:"event-capture-v2",memory_id:"l2-browser-1",date:"2026-09-21",date_label:"2026-09-21",title:"Capture v2 completed",summary:"Capture v2 passed regression.",order:3,workstream_id:"stream-capture",workstream_label:"Capture",workstream_basis:"inferred",stage:"completed",version:"v2",current_head:false,workstream_head:true,source_revision_refs:["l2:l2-browser-1:revision-current"],latest_revision_ref:"l2:l2-browser-1:revision-current",evidence_refs:["l1:turn-browser-1"],first_seen_at:"2026-09-21T08:20:00.000Z",last_seen_at:"2026-09-21T08:20:00.000Z"},
+      {id:"event-dashboard-v2",memory_id:"l2-browser-1",date:"2026-09-21",date_label:"2026-09-21",title:"Dashboard v2 pending",summary:"Browser acceptance is still pending.",order:4,workstream_id:"stream-dashboard",workstream_label:"Dashboard",workstream_basis:"inferred",stage:"pending",version:"v2",current_head:true,workstream_head:true,source_revision_refs:["l2:l2-browser-1:revision-current"],latest_revision_ref:"l2:l2-browser-1:revision-current",evidence_refs:["l1:turn-browser-1"],first_seen_at:"2026-09-21T08:20:00.000Z",last_seen_at:"2026-09-21T08:20:00.000Z"}
+    ]},drilldown:{revisions:[{ref:"l2:l2-browser-1:revision-old",memory_id:"l2-browser-1",committed_at:"2026-09-20T08:20:00.000Z",current:false,event_ids:["event-capture-v1","event-dashboard-v1"],evidence_refs:["l1:turn-browser-1"]},{ref:"l2:l2-browser-1:revision-current",memory_id:"l2-browser-1",committed_at:"2026-09-21T08:20:00.000Z",current:true,event_ids:["event-capture-v1","event-dashboard-v1","event-capture-v2","event-dashboard-v2"],evidence_refs:["l1:turn-browser-1"]}],todos:[{id:"todo-1",text:"Verify responsive governance layout",status:"pending",created_at:"2026-09-21T08:00:00.000Z",updated_at:"2026-09-21T08:00:00.000Z",completed_at:null}]},archify:{role:"optional_export_and_design_reference",compatible_diagram_types:["lifecycle"],invariant:"projection only",lifecycle_ir:{meta:{title:"Alpha project state",subtitle:"Canonical L2 projection",output:"memhub-project-state-alpha.html"},lanes:[{id:"stream-capture",label:"Capture"},{id:"stream-dashboard",label:"Dashboard"}],states:[],transitions:[]}}},
     processing:{config:{auto_enabled:true,turn_threshold:8,idle_minutes:30},items:[
       {job_id:"job-browser-1",target:"l2",project_id:"alpha",reason:"threshold",evidence_refs:["l1:browser"],status:"failed",failure:"Simulated L2 evidence mismatch",failure_kind:"core_error",failed_at:"2026-09-21T08:35:00.000Z",attempts:2,updated_at:"2026-09-21T08:35:00.000Z"},
       {job_id:"job-browser-ambiguous",target:"l2",project_id:"beta",reason:"threshold",evidence_refs:["l1:ambiguous"],status:"failed",failure:"Ambiguous Core commit requires manual reconciliation",failure_kind:"ambiguous_core_commit",failed_at:"2026-09-21T08:34:00.000Z",attempts:1,updated_at:"2026-09-21T08:34:00.000Z"}
@@ -240,13 +249,14 @@ async function runConsoleBrowserScenario({chromium,html,page,width,full}) {
     "const clickView=async view=>{const mobile=d.getElementById(\'mobile-view-select\');if(mobile&&w.innerWidth<=900){const mr=mobile.getBoundingClientRect();check(\'mobile-view-visible\',mr.width>0&&mr.height>=44);mobile.value=view;mobile.dispatchEvent(new Event(\'change\',{bubbles:true}))}else{const b=d.querySelector(\'aside button[data-view=\\\"\'+view+\'\\\"]\');check(\'view-button-\'+view,!!b);b.click()}await settle();check(\'url-view-\'+view,new URL(w.location.href).searchParams.get(\'view\')===view,w.location.href)};",
     "await settle(230);const initialMobile=d.getElementById(\'mobile-view-select\'),menuToggle=d.getElementById(\'console-menu-toggle\');check(\'initial-view-from-url\',w.innerWidth<=900?initialMobile?.value===\'l2\':d.querySelector(\'aside button[data-view=\\\"l2\\\"]\')?.classList.contains(\'active\'));if(w.innerWidth<=900){const mr=initialMobile?.getBoundingClientRect(),tr=menuToggle?.getBoundingClientRect();check(\'mobile-view-selector-visible\',!!mr&&mr.width>0&&mr.height>=44);check(\'mobile-cross-page-menu-visible\',!!tr&&tr.width>=44&&tr.height>=44)}check(\'initial-project-from-url\',d.getElementById(\'project-select\')?.value===\'alpha\');check(\'root-overflow-initial\',d.documentElement.scrollWidth===d.documentElement.clientWidth);",
     "const sidebar=d.querySelector(\'.console-sidebar\'),flow=d.querySelector(\'.memory-flow\');check(\'lifecycle-four-layers\',flow?.querySelectorAll(\'[data-view-target]\').length===4);if("+width+"===390)check(\'lifecycle-complete-mobile\',flow.scrollWidth<=flow.clientWidth+1);",
-    "if("+JSON.stringify(page)+"==='workspace'){const ps=d.getElementById('project-select');ps.value='';ps.dispatchEvent(new Event('change',{bubbles:true}));await settle();await clickView('overview');check('all-projects-portfolio',d.querySelectorAll('.portfolio-record').length>=2,String(d.querySelectorAll('.portfolio-record').length));check('overview-title-continue',/Continue working|继续工作/.test(d.getElementById('workspace-title')?.textContent||''));await clickView('l2');check('subview-title-specific',!/Continue working|继续工作/.test(d.getElementById('workspace-title')?.textContent||'')&&/Project chronology|项目时间线/.test(d.getElementById('workspace-title')?.textContent||''))}",
+    "if("+JSON.stringify(page)+"==='workspace'){const ps=d.getElementById('project-select');ps.value='';ps.dispatchEvent(new Event('change',{bubbles:true}));await settle();await clickView('overview');check('all-projects-portfolio',d.querySelectorAll('.portfolio-record').length>=2,String(d.querySelectorAll('.portfolio-record').length));check('overview-title-continue',/Continue working|继续工作/.test(d.getElementById('workspace-title')?.textContent||''));ps.value='alpha';ps.dispatchEvent(new Event('change',{bubbles:true}));await settle();const todoRow=d.querySelector('.project-overview-todo-row'),todoMarker=todoRow?.querySelector('.todo-marker');check('project-overview-todo-separated',!!todoRow&&todoRow.getBoundingClientRect().height>=70,String(todoRow?.getBoundingClientRect().height));check('project-overview-todo-marker',todoMarker?.textContent==='•'&&parseFloat(w.getComputedStyle(todoMarker).fontSize)>=20,w.getComputedStyle(todoMarker||d.body).fontSize);await clickView('l2');check('subview-title-specific',!/Continue working|继续工作/.test(d.getElementById('workspace-title')?.textContent||'')&&/Project chronology|项目时间线/.test(d.getElementById('workspace-title')?.textContent||''))}",
     "if(!"+fullFlag+"){await clickView(\'processing\');await settle(260);check(\'mobile-view-processing\',d.getElementById(\'mobile-view-select\')?.value===\'processing\');check(\'root-overflow-after-nav\',d.documentElement.scrollWidth===d.documentElement.clientWidth);out.textContent=JSON.stringify({checks});return}",
-    "for(const v of ['overview','projects','l1','l2','l3','l4','skills','processing']){await clickView(v);check('rendered-'+v,!!d.getElementById('items')?.textContent.trim())}",
-    "if("+JSON.stringify(page)+"==='admin'){await clickView('skills');check('skill-governed-group',d.querySelectorAll('.skill-group.governed .memory-row').length===1);check('skill-external-group',d.querySelectorAll('.skill-group.external .memory-row').length===1);check('skill-external-collapsed',!d.querySelector('.skill-group.external')?.open);await clickView('overview');check('overview-single-heading',d.getElementById('view-title').getClientRects().length===0);check('overview-followup-wide',d.querySelector('.overview-todos')?.getBoundingClientRect().width>=d.querySelector('.admin-health-card')?.getBoundingClientRect().width-1);await clickView('processing');const toggle=d.getElementById('cfg-auto');check('policy-switch-semantic',toggle?.getAttribute('role')==='switch'&&toggle?.closest('label')?.textContent.includes('Automatic'));check('processing-failure-summary',d.querySelector('.job-error')?.textContent.includes('evidence mismatch'));check('processing-retry-action',d.querySelectorAll('.job-quick-retry').length===1);check('processing-ambiguous-no-quick-retry',d.querySelectorAll('.job-entry').length===2&&d.querySelectorAll('.job-entry')[1]?.querySelector('.job-quick-retry')===null);d.querySelector('.job-row')?.click();await settle(40);check('processing-detail-failure',d.querySelector('.job-failure-detail')?.textContent.includes('evidence mismatch'));w.closeDrawer();await settle(30);d.querySelectorAll('.job-row')[1]?.click();await settle(40);check('processing-ambiguous-drawer-no-retry',!d.querySelector('#drawer-body [data-retry-index]'));w.closeDrawer();await settle(30);await clickView('accounts');check('account-email-primary',d.querySelector('.account-identity')?.textContent==='operator.long.identity@example.org');check('account-uuid-secondary',d.querySelector('.account-record-meta code')?.textContent==='acct-browser');check('account-no-default-json',!d.querySelector('.account-record pre'));d.querySelector('.account-record-main')?.click();await settle(40);check('account-structured-detail',!!d.querySelector('.account-detail')&&d.getElementById('drawer-title')?.textContent.includes('operator.long.identity@example.org'));w.closeDrawer()}",
-    "await clickView('projects');check('long-project-content',d.querySelector('.project-ledger-record p')?.textContent.length>80);w.__browserMock.delayNextGet=true;d.querySelector('aside button[data-view=\\\"l1\\\"]')?.click();check('loading-state-visible',!!d.querySelector('.loading-state'));await settle(230);check('loading-state-clears',!d.querySelector('.loading-state'));",
+    "for(const v of ['overview','projects','l1','l2','l3','l4','skills','processing']){await clickView(v);check('rendered-'+v,!!d.getElementById('items')?.textContent.trim())}await clickView('l3');check('secondary-description-visible',d.getElementById('workspace-description')?.getClientRects().length>0);check('secondary-panel-heading-visible',d.getElementById('view-title')?.getClientRects().length>0);const l3text=d.getElementById('items')?.textContent||'';check('l3-mixed-content-complete',l3text.includes('Project guidance should remain readable')&&l3text.includes('Interaction rules')&&l3text.includes('Closing context should remain visible'));",
+    "await clickView('visualization');check('project-state-workstreams',d.querySelectorAll('.project-state-lane-row').length===2,String(d.querySelectorAll('.project-state-lane-row').length));check('project-state-events',d.querySelectorAll('.project-state-event').length===4,String(d.querySelectorAll('.project-state-event').length));check('project-state-current-head',d.querySelectorAll('.project-state-event.is-current').length===1);check('project-state-no-old-graph',d.querySelectorAll('.visual-node,.visual-edge').length===0);const stateEvent=d.querySelector('.project-state-event.is-current');stateEvent?.dispatchEvent(new MouseEvent('click',{bubbles:true}));await settle(40);check('project-state-drawer',!d.getElementById('drawer').classList.contains('hidden'));check('project-state-drawer-revision',/revision-current/.test(d.getElementById('drawer-body')?.textContent||''));check('project-state-drawer-todo',/Verify responsive governance layout/.test(d.getElementById('drawer-body')?.textContent||''));w.closeDrawer();await settle(30);",
+    "if("+JSON.stringify(page)+"==='admin'){await clickView('skills');check('skill-governed-group',d.querySelectorAll('.skill-group.governed .memory-row').length===1);check('skill-external-group',d.querySelectorAll('.skill-group.external .memory-row').length===1);check('skill-external-collapsed',!d.querySelector('.skill-group.external')?.open);await clickView('overview');check('overview-single-heading',d.getElementById('view-title').getClientRects().length===0);check('overview-followup-wide',d.querySelector('.overview-todos')?.getBoundingClientRect().width>=d.querySelector('.admin-health-card')?.getBoundingClientRect().width-1);check('overview-human-status',/Failed|处理失败/.test(d.querySelector('.health-metric.failed small')?.textContent||'')&&!/^(failed|pending|leased)$/.test(d.querySelector('.health-metric.failed small')?.textContent||''));await clickView('processing');const toggle=d.getElementById('cfg-auto');check('policy-switch-semantic',toggle?.getAttribute('role')==='switch'&&toggle?.closest('label')?.textContent.includes('Automatic'));check('processing-human-status',d.querySelector('.job-state')?.textContent==='Failed');check('processing-failure-summary',d.querySelector('.job-error')?.textContent.includes('evidence mismatch'));check('processing-retry-action',d.querySelectorAll('.job-quick-retry').length===1);check('processing-ambiguous-no-quick-retry',d.querySelectorAll('.job-entry').length===2&&d.querySelectorAll('.job-entry')[1]?.querySelector('.job-quick-retry')===null);d.querySelector('.job-row')?.click();await settle(40);check('processing-detail-failure',d.querySelector('.job-failure-detail')?.textContent.includes('evidence mismatch'));w.closeDrawer();await settle(30);d.querySelectorAll('.job-row')[1]?.click();await settle(40);check('processing-ambiguous-drawer-no-retry',!d.querySelector('#drawer-body [data-retry-index]'));w.closeDrawer();await settle(30);await clickView('accounts');check('account-email-primary',d.querySelector('.account-identity')?.textContent==='operator.long.identity@example.org');check('account-uuid-secondary',d.querySelector('.account-record-meta code')?.textContent==='acct-browser');check('account-no-default-json',!d.querySelector('.account-record pre'));d.querySelector('.account-record-main')?.click();await settle(40);check('account-structured-detail',!!d.querySelector('.account-detail')&&d.getElementById('drawer-title')?.textContent.includes('operator.long.identity@example.org'));w.closeDrawer()}",
+    "await clickView('projects');check('long-project-content',d.querySelector('.project-ledger-record p')?.textContent.length>80);check('primary-projects-no-json',!d.querySelector('#items pre')&&!/\\{\\s*\\\"/.test(d.getElementById('items')?.textContent||''));w.__browserMock.delayNextGet=true;d.querySelector('aside button[data-view=\\\"l1\\\"]')?.click();check('loading-state-visible',!!d.querySelector('.loading-state'));await settle(230);check('loading-state-clears',!d.querySelector('.loading-state'));",
     "w.__browserMock.failNext=true;d.getElementById('refresh').click();await settle(110);check('load-error-visible',!!d.querySelector('.load-error'));check('load-error-retry',!!d.querySelector('.load-error button'));check('load-error-details',!!d.querySelector('.load-error details'));d.querySelector('.load-error button').click();await settle();check('load-error-recovers',!d.querySelector('.load-error'));",
-    "await clickView('projects');const card=d.querySelector('.project-ledger-record');card.focus();card.click();await settle(40);const drawer=d.getElementById('drawer');check('drawer-open',!drawer.classList.contains('hidden'));const labelled=drawer.getAttribute('aria-labelledby');check('drawer-accessible-name',!!(labelled&&d.getElementById(labelled)?.textContent.trim()));check('drawer-focus-enters',drawer.contains(d.activeElement));check('background-inert',d.getElementById('main-content').hasAttribute('inert'));let fs=[...drawer.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),summary,[tabindex]:not([tabindex=\\\"-1\\\"])')].filter(e=>e.getClientRects().length);fs.at(-1).focus();d.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}));check('drawer-tab-trap',d.activeElement===fs[0]);",
+    "await clickView('projects');const card=d.querySelector('.project-ledger-record');card.focus();card.click();await settle(40);const drawer=d.getElementById('drawer'),scrim=d.getElementById('drawer-scrim');check('drawer-open',!drawer.classList.contains('hidden'));check('drawer-scrim-visible',!scrim.classList.contains('hidden')&&scrim.getClientRects().length>0);check('project-structured-detail',!!d.querySelector('.drawer-readable-section')&&!!d.querySelector('.drawer-facts'));check('raw-json-collapsed',d.querySelector('#drawer-body details')?.open===false);const labelled=drawer.getAttribute('aria-labelledby');check('drawer-accessible-name',!!(labelled&&d.getElementById(labelled)?.textContent.trim()));check('drawer-focus-enters',drawer.contains(d.activeElement));check('background-inert',d.getElementById('main-content').hasAttribute('inert'));scrim.click();await settle(30);check('drawer-outside-click-closes',drawer.classList.contains('hidden'));check('drawer-outside-click-clears-inert',!d.getElementById('main-content').hasAttribute('inert'));check('drawer-outside-click-restores-focus',d.activeElement===card);card.click();await settle(40);check('drawer-reopens',!drawer.classList.contains('hidden'));let fs=[...drawer.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),summary,[tabindex]:not([tabindex=\\\"-1\\\"])')].filter(e=>e.getClientRects().length);fs.at(-1).focus();d.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}));check('drawer-tab-trap',d.activeElement===fs[0]);",
     "d.querySelector('[data-project-action=\\\"todos\\\"]')?.click();await settle(40);const todo=d.getElementById('project-todo-text');check('todo-accessible-name',!!(todo?.labels?.length||todo?.getAttribute('aria-label')));d.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));await settle(30);check('drawer-escape-closes',drawer.classList.contains('hidden'));check('drawer-focus-restores',d.activeElement===card||(d.activeElement?.classList?.contains('project-ledger-record')&&d.activeElement?.dataset?.itemIndex===card.dataset.itemIndex),d.activeElement?.outerHTML?.slice(0,160)||String(d.activeElement));check('background-inert-clears',!d.getElementById('main-content').hasAttribute('inert'));",
     "const before=d.documentElement.dataset.theme;d.getElementById('theme-toggle').click();check('theme-toggle',d.documentElement.dataset.theme!==before);check('theme-color-sync',d.querySelector('meta[name=\\\"theme-color\\\"]').content==='#101216');d.getElementById('lang').click();check('language-toggle',d.documentElement.lang==='zh-CN');",
     "await clickView('l3');const ps=d.getElementById('project-select');ps.value='beta';ps.dispatchEvent(new Event('change',{bubbles:true}));await settle();check('url-project-beta',new URL(w.location.href).searchParams.get('project')==='beta');await clickView('l4');w.history.back();await settle(180);check('history-back-view',new URL(w.location.href).searchParams.get('view')==='l3');check('history-back-project',d.getElementById('project-select').value==='beta');w.history.forward();await settle(180);check('history-forward-view',new URL(w.location.href).searchParams.get('view')==='l4');",
@@ -298,7 +308,7 @@ const insertMemory = historyDb.prepare(`
 `);
 insertMemory.run(
   "history-project-memory-1", historyUserId, "legacy-project-chat", "Project architecture decision from earlier history",
-  "L1", JSON.stringify(["project:atlas"]), JSON.stringify({ project_id: "atlas" }), "{}",
+  "L1", JSON.stringify(["project:aide"]), JSON.stringify({ project_id: "aide" }), "{}",
   "2026-09-17T08:00:00.000Z", "2026-09-17T08:00:00.000Z"
 );
 insertMemory.run(
@@ -800,6 +810,15 @@ async function testLocalAdmin(memoryPort) {
     assert.match(authenticatedHtml, /data-view="l3"/);
     assert.match(authenticatedHtml, /data-view="l4"/);
     assert.match(authenticatedHtml, /data-view="skills"/);
+    assert.match(authenticatedHtml, /data-view="visualization"/);
+    assert.match(authenticatedHtml, /Export Archify IR/);
+    assert.match(authenticatedHtml, /Export current-view HTML/);
+    assert.match(authenticatedHtml, /function projectStateSearchText/);
+    assert.match(authenticatedHtml, /Workstreams are derived from repeated L2 terminology/);
+    assert.match(authenticatedHtml, /project-state-scope-note/);
+    assert.match(authenticatedHtml, /current mainline comes from the canonical L2 head/);
+    assert.doesNotMatch(authenticatedHtml, /function selectVisualNodes/);
+    assert.doesNotMatch(authenticatedHtml, /openVisualNode/);
     assert.match(authenticatedHtml, /data-view="processing"/);
     assert.match(authenticatedHtml, /id="account-select"/);
     assert.match(authenticatedHtml, /id="mobile-view-select"/);
@@ -1212,6 +1231,19 @@ async function testLocalAdmin(memoryPort) {
     );
     if (l2ViewPayload.items.length > 0) assert.equal(typeof l2ViewPayload.items[0].body, "string");
 
+    const visualizationView = await fetch(`http://127.0.0.1:${port}/memhub/user/api?kind=visualization`, { headers: { authorization } });
+    assert.equal(visualizationView.status, 200);
+    const visualizationPayload = await visualizationView.json();
+    assert.equal(visualizationPayload.visualization_contract, "memhub-project-state-ir-v1");
+    assert.equal(visualizationPayload.source_of_truth, "canonical-l2");
+    assert.equal(visualizationPayload.revision_source, "exact-l2-revision-ledger");
+    assert.equal(visualizationPayload.projection_only, true);
+    assert.equal(visualizationPayload.requires_project, true);
+    assert.deepEqual(visualizationPayload.state.events, []);
+    assert.deepEqual(visualizationPayload.state.workstreams, []);
+    assert.deepEqual(visualizationPayload.drilldown.revisions, []);
+    assert.equal(visualizationPayload.archify.role, "optional_export_and_design_reference");
+
     const adminOverview = await fetch(`http://127.0.0.1:${port}/memhub/admin/api?kind=overview`, { headers: { authorization } });
     assert.equal(adminOverview.status, 200);
     assert.equal((await adminOverview.json()).account_count, 1);
@@ -1311,23 +1343,45 @@ function rawHttp(port, path, headers = {}) {
 
 async function testStdio(memoryPort) {
   const stateRoot = join(root, "stdio-state");
-  const architectureDir = join(root, "normify-atlas", "modules", "atlas");
+  const architectureDir = join(root, "normify-aide", "modules", "aide");
   const currentArchitectureDir = join(root, "Memhub", "docs");
+  const nestedSelfmediaDir = join(root, "codex-workspace", "selfmedia");
   await mkdir(architectureDir, { recursive: true });
   await mkdir(currentArchitectureDir, { recursive: true });
+  await mkdir(nestedSelfmediaDir, { recursive: true });
   await writeFile(join(root, "Memhub", "package.json"), JSON.stringify({ name: "memhub-test-project" }) + "\n");
   await writeFile(
     join(architectureDir, "core.md"),
-    "# atlas Core Architecture\n\nBroker routes work to the harness router. Current constraint: preserve explicit workspace ownership.\n"
+    "# AIDE Core Architecture\n\nBroker routes work to the harness router. Current constraint: preserve explicit workspace ownership.\n"
   );
   await writeFile(
     join(currentArchitectureDir, "ARCHITECTURE.md"),
     "# Memhub Current Architecture\n\nL1 is authoritative source evidence. L2 and L3 are project-scoped, L4 is account-scoped.\n"
   );
+  const selfmediaRepoArchitecture = join(nestedSelfmediaDir, "ARCHITECTURE.md");
+  const selfmediaRepoBody = "# Selfmedia Repository Architecture\n\nRepository architecture is a read-only migration seed.\n";
+  await writeFile(selfmediaRepoArchitecture, selfmediaRepoBody);
   const architectureReader = new FileProjectArchitectureSource({ rootDir: root });
+  const selfmediaTarget = await architectureReader.inspectProjectArchitecture({ accountId: "acct-test", projectId: "selfmedia" });
+  assert.ok(selfmediaTarget);
+  assert.equal(selfmediaTarget.exists, false);
+  assert.match(selfmediaTarget.path, /\.memhub-project-architecture\/[^/]+\/selfmedia\/ARCHITECTURE\.md$/);
+  assert.match(selfmediaTarget.content, /Repository architecture is a read-only migration seed/);
+  const selfmediaWritten = await architectureReader.writeProjectArchitecture({
+    accountId: "acct-test",
+    projectId: "selfmedia",
+    expectedPath: selfmediaTarget.path,
+    expectedFingerprint: selfmediaTarget.fingerprint,
+    content: "# Selfmedia Managed Architecture\n\nMemhub-managed architecture is canonical after explicit migration.\n"
+  });
+  assert.equal(selfmediaWritten.after.exists, true);
+  assert.match(selfmediaWritten.after.content, /Memhub-managed architecture is canonical/);
+  assert.equal(await readFile(selfmediaRepoArchitecture, "utf8"), selfmediaRepoBody,
+    "Architecture writer must never mutate the repository source document");
   const discoveredArchitectureProjects = await architectureReader.listProjects("acct-test");
-  assert.ok(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "atlas"));
+  assert.ok(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "aide"));
   assert.ok(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "memhub"));
+  assert.ok(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "selfmedia"));
   assert.equal(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "docs"), false);
   const currentDocs = await architectureReader.getProjectArchitecture({
     accountId: "acct-test",
@@ -1336,6 +1390,13 @@ async function testStdio(memoryPort) {
   });
   assert.ok(currentDocs.some((item) => /Memhub Current Architecture/.test(item.content)));
   assert.ok(currentDocs.some((item) => item.provenance?.format === "project-docs"));
+  const selfmediaDocs = await architectureReader.getProjectArchitecture({
+    accountId: "acct-test",
+    projectId: "selfmedia",
+    query: "canonical managed architecture"
+  });
+  assert.ok(selfmediaDocs.some((item) => /Memhub-managed architecture is canonical/.test(item.content)));
+  assert.ok(selfmediaDocs.every((item) => item.provenance?.format === "managed-project-doc"));
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [mcpEntry, "--account", "acct-test", "--memory-url", `http://127.0.0.1:${memoryPort}`, "--state-root", stateRoot, "--bindings", join(root, "stdio-bindings.json"), "--normify-root", root],
@@ -1346,9 +1407,115 @@ async function testStdio(memoryPort) {
   try {
     await client.connect(transport);
     await exerciseClient(client, "stdio-chat", stateRoot);
+    await exerciseArchitectureGovernance(client, stateRoot);
   } finally {
     await client.close();
   }
+}
+
+async function exerciseArchitectureGovernance(client, stateRoot) {
+  const before = JSON.parse((await client.callTool({
+    name: "memmy_project",
+    arguments: { action: "architecture", project: "memhub", workspace_project: "memhub", query: "L1 L2 L3 L4" }
+  })).content[0].text);
+  assert.ok(before.architecture.some((item) => /Memhub Current Architecture/.test(item.content)));
+
+  const replacement = "# Memhub Current Architecture\n\nL1 is evidence. L2 is project chronology. L3 is project durable rules. L4 is account-wide durable profile.\n";
+  const plan = JSON.parse((await client.callTool({
+    name: "memmy_project",
+    arguments: {
+      action: "architecture_plan",
+      project: "memhub",
+      workspace_project: "memhub",
+      content: replacement
+    }
+  })).content[0].text);
+  assert.equal(plan.status, "awaiting_user_authorization");
+  assert.equal(plan.proposed_content, replacement);
+  assert.match(plan.proposed_sha256, /^[0-9a-f]{64}$/);
+  const executed = JSON.parse((await client.callTool({
+    name: "memmy_project",
+    arguments: {
+      action: "architecture_execute",
+      project: "memhub",
+      workspace_project: "memhub",
+      authorization_id: plan.authorization_id
+    }
+  })).content[0].text);
+  assert.equal(executed.ok, true);
+  assert.equal(executed.rollback_available, true);
+  assert.match(executed.revision_id, /^[0-9a-f-]{36}$/i);
+
+  const after = JSON.parse((await client.callTool({
+    name: "memmy_project",
+    arguments: { action: "architecture", project: "memhub", workspace_project: "memhub", query: "chronology durable rules" }
+  })).content[0].text);
+  assert.ok(after.architecture.some((item) => /L2 is project chronology/.test(item.content)));
+  const history = JSON.parse((await client.callTool({
+    name: "memmy_project",
+    arguments: { action: "architecture_history", project: "memhub", workspace_project: "memhub" }
+  })).content[0].text);
+  assert.ok(history.revisions.some((item) => item.revision_id === executed.revision_id && item.status === "committed"));
+  assert.ok(history.revisions.some((item) => /L1 is authoritative source evidence/.test(item.before_content)));
+
+  const stalePlan = JSON.parse((await client.callTool({
+    name: "memmy_project",
+    arguments: {
+      action: "architecture_plan",
+      project: "memhub",
+      workspace_project: "memhub",
+      content: "# Memhub Current Architecture\n\nThis stale plan must never overwrite a newer file.\n"
+    }
+  })).content[0].text);
+  await writeFile(stalePlan.path, "# Memhub Current Architecture\n\nOut-of-band change after plan.\n");
+  const staleExecute = await client.callTool({
+    name: "memmy_project",
+    arguments: {
+      action: "architecture_execute",
+      project: "memhub",
+      workspace_project: "memhub",
+      authorization_id: stalePlan.authorization_id
+    }
+  });
+  assert.equal(staleExecute.isError, true);
+  assert.match(staleExecute.content[0].text, /changed after plan/);
+
+  const restorePlan = JSON.parse((await client.callTool({
+    name: "memmy_project",
+    arguments: {
+      action: "architecture_plan",
+      project: "memhub",
+      workspace_project: "memhub",
+      content: replacement
+    }
+  })).content[0].text);
+  const restored = JSON.parse((await client.callTool({
+    name: "memmy_project",
+    arguments: {
+      action: "architecture_execute",
+      project: "memhub",
+      workspace_project: "memhub",
+      authorization_id: restorePlan.authorization_id
+    }
+  })).content[0].text);
+  assert.equal(restored.ok, true);
+  assert.equal((await listArchitectureAuditFiles(stateRoot)).length >= 2, true);
+}
+
+async function listArchitectureAuditFiles(stateRoot) {
+  const rootPath = join(stateRoot, "architecture-history");
+  const found = [];
+  async function walk(path) {
+    let entries = [];
+    try { entries = await readdir(path, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const next = join(path, entry.name);
+      if (entry.isDirectory()) await walk(next);
+      else if (entry.isFile() && entry.name.endsWith(".json")) found.push(next);
+    }
+  }
+  await walk(rootPath);
+  return found;
 }
 
 async function testHttp(memoryPort) {
@@ -1384,12 +1551,12 @@ async function testHttp(memoryPort) {
       await client.connect(transport);
       await exerciseClient(client, "http-chat", stateRoot);
       const projects = JSON.parse((await client.callTool({ name: "memmy_project", arguments: { action: "list" } })).content[0].text);
-      assert.ok(projects.projects.includes("atlas"));
+      assert.ok(projects.projects.includes("aide"));
       assert.ok(!projects.projects.some((project) => /^ws_[a-f0-9]{32,}$/i.test(project)));
 
       const longContext = JSON.parse((await client.callTool({
         name: "memmy_context",
-        arguments: { query: "__long_context_probe__", project: "atlas", limit: 1 }
+        arguments: { query: "__long_context_probe__", project: "aide", limit: 1 }
       })).content[0].text);
       const longContextItem = longContext.globalMemory.find((item) => item.id === "long-context-probe");
       assert.ok(longContextItem);
@@ -1471,7 +1638,7 @@ async function testHttp(memoryPort) {
       conversation_id: "capture-conversation",
       turn_id: "turn-1",
       timestamp: "2026-09-18T08:00:00.000Z",
-      project_hint: "atlas",
+      project_hint: "aide",
       user_text: "continue implementation",
       assistant_text: "implemented capture protocol"
     };
@@ -1551,7 +1718,7 @@ async function testHttp(memoryPort) {
         conversation_id: "partial-conversation",
         turn_id: "partial-turn",
         timestamp: "2026-09-18T08:01:05.000Z",
-        project_hint: "atlas",
+        project_hint: "aide",
         assistant_text: "assistant side later"
       })
     });
@@ -1559,7 +1726,7 @@ async function testHttp(memoryPort) {
     const completedPartialBody = await completedPartial.json();
     assert.equal(completedPartialBody.updated, true);
     assert.equal(completedPartialBody.ingestion.ingested, true);
-    assert.equal(completedPartialBody.ingestion.project_id, "atlas");
+    assert.equal(completedPartialBody.ingestion.project_id, "aide");
     assert.equal(await countCaptureEvents(stateRoot), captureCountBaseline + 2);
     assert.equal(
       requests.filter((entry) => entry.url?.startsWith("/api/v1/turns/") && entry.url.endsWith("/complete")).length,
@@ -1574,7 +1741,7 @@ async function testHttp(memoryPort) {
         body: JSON.stringify({
           event_id: `capture-workspace-${index + 1}`, host: "codex",
           conversation_id: "workspace-changing-conversation", continuity_id: "workspace-changing-continuity",
-          timestamp: `2026-09-18T08:02:0${index}.000Z`, project_hint: "atlas",
+          timestamp: `2026-09-18T08:02:0${index}.000Z`, project_hint: "aide",
           workspace_path: workspacePath, user_text: `workspace user ${index}`, assistant_text: `workspace answer ${index}`,
           capture_status: "complete"
         })
@@ -1591,7 +1758,7 @@ async function testHttp(memoryPort) {
     const queued = await enqueueDistillationJob({
       stateRoot,
       accountId: "acct-test",
-      projectId: "atlas",
+      projectId: "aide",
       conversationId: "partial-conversation",
       captures: capturesForDistillation.filter((item) => item.conversation_id === "partial-conversation" && item.ingested),
       reason: "manual"
@@ -1603,7 +1770,7 @@ async function testHttp(memoryPort) {
       await distillClient.connect(distillTransport);
       const next = await distillClient.callTool({
         name: "memhub_distill",
-        arguments: { action: "next", scope: "project", project: "atlas", source_harness: "test-harness" }
+        arguments: { action: "next", scope: "project", project: "aide", source_harness: "test-harness" }
       });
       const nextPayload = JSON.parse(next.content[0].text);
       assert.equal(nextPayload.job.job_id, queued.job.job_id);
@@ -1625,12 +1792,12 @@ async function testHttp(memoryPort) {
     const retryQueued = await enqueueDistillationJob({
       stateRoot,
       accountId: "acct-test",
-      projectId: "atlas",
+      projectId: "aide",
       conversationId: "capture-conversation",
       captures: retrySource,
       reason: "manual"
     });
-    const retryLeased = await leaseDistillationJob(stateRoot, "acct-test", { projectId: "atlas", harness: "retry-test" });
+    const retryLeased = await leaseDistillationJob(stateRoot, "acct-test", { projectId: "aide", harness: "retry-test" });
     assert.equal(retryLeased.job_id, retryQueued.job.job_id);
     assert.equal(retryLeased.attempts, 1);
     await failDistillationJob(stateRoot, "acct-test", retryLeased.job_id, "simulated commit failure", "retry-test");
@@ -1640,7 +1807,7 @@ async function testHttp(memoryPort) {
     const duplicateAfterFailure = await enqueueDistillationJob({
       stateRoot,
       accountId: "acct-test",
-      projectId: "atlas",
+      projectId: "aide",
       conversationId: "capture-conversation",
       captures: retrySource,
       reason: "manual"
@@ -1686,7 +1853,7 @@ async function testHttp(memoryPort) {
       body: JSON.stringify({
         event_id: "capture-core-conflict", host: "codex", conversation_id: "capture-core-conflict",
         continuity_id: "capture-core-conflict", timestamp: "2026-09-18T08:10:00.000Z",
-        project_hint: "atlas", user_text: "inject core idempotency conflict",
+        project_hint: "aide", user_text: "inject core idempotency conflict",
         assistant_text: "Core returns an explicit 409", capture_status: "complete"
       })
     });
@@ -1704,13 +1871,18 @@ async function testHttp(memoryPort) {
       body: JSON.stringify({
         event_id: "capture-core-transient", host: "codex", conversation_id: "capture-core-transient",
         continuity_id: "capture-core-transient", timestamp: "2026-09-18T08:11:00.000Z",
-        project_hint: "atlas", user_text: "inject core transient failure",
+        project_hint: "aide", user_text: "inject core transient failure",
         assistant_text: "Core returns an explicit 500", capture_status: "complete"
       })
     });
-    assert.equal(transientCapture.status, 503);
+    assert.equal(transientCapture.status, 202);
     assert.match(transientCapture.headers.get("x-memhub-request-id") ?? "", /^[0-9a-f-]{36}$/);
-    assert.equal((await transientCapture.json()).error, "capture_ingest_failed");
+    const transientBody = await transientCapture.json();
+    assert.equal(transientBody.accepted, true);
+    assert.equal(transientBody.durable, true);
+    assert.equal(transientBody.retryable, true);
+    assert.equal(transientBody.ingestion.pending, true);
+    assert.equal(transientBody.warning, "memory_core_temporarily_unavailable");
     assert.equal((await listCaptureEvents(stateRoot, "acct-test"))
       .find((item) => item.event_id === "capture-core-transient")?.ingested, false);
     assert.equal(stderr.includes(createdDevice.token), false, "Gateway logs must not leak device tokens");
@@ -1719,13 +1891,13 @@ async function testHttp(memoryPort) {
     const recoveryCapture = {
       event_id: "capture-recover-target", host: "codex", conversation_id: "capture-recover-chat",
       continuity_id: "capture-recover-chat", timestamp: "2026-09-18T08:20:00.000Z",
-      project_hint: "atlas", user_text: "recovered user", assistant_text: "recovered assistant",
+      project_hint: "aide", user_text: "recovered user", assistant_text: "recovered assistant",
       capture_status: "complete"
     };
     await storeCaptureEvent(stateRoot, createdDevice.device, recoveryCapture);
     const completedBeforeDryRun = requests.filter((item) =>
       item.url?.startsWith("/api/v1/turns/") && item.url.endsWith("/complete")).length;
-    const recoveryArgs = { action: "recover_ingest", event_id: recoveryCapture.event_id, project: "atlas" };
+    const recoveryArgs = { action: "recover_ingest", event_id: recoveryCapture.event_id, project: "aide" };
     const dryRecovery = JSON.parse((await recoveryClient.callTool({
       name: "memhub_distill", arguments: { ...recoveryArgs, dry_run: true }
     })).content[0].text);
@@ -1788,7 +1960,7 @@ async function testHttp(memoryPort) {
       conversation_id: "capture-http-versus-recover",
       continuity_id: "capture-http-versus-recover",
       timestamp: "2026-09-18T08:25:00.000Z",
-      project_hint: "atlas",
+      project_hint: "aide",
       user_text: "http and recover racing on same event",
       assistant_text: "only one Core completion",
       capture_status: "complete"
@@ -1812,7 +1984,7 @@ async function testHttp(memoryPort) {
         arguments: {
           action: "recover_ingest",
           event_id: transportRaceEvent.event_id,
-          project: "atlas"
+          project: "aide"
         }
       });
       await new Promise((resolve) => setTimeout(resolve, 60));
@@ -1925,7 +2097,7 @@ async function testHttp(memoryPort) {
         event_id: "ambiguous-bridge-ack", host: "codex",
         conversation_id: "ambiguous-bridge-ack", continuity_id: "ambiguous-bridge-ack",
         timestamp: "2026-09-18T09:00:00.000Z",
-        project_hint: "atlas", user_text: "bridge user", assistant_text: "bridge assistant",
+        project_hint: "aide", user_text: "bridge user", assistant_text: "bridge assistant",
         capture_status: "complete"
       });
       const ambiguousConfig = await (await import("../dist/bridge.js"))
@@ -2037,22 +2209,54 @@ async function testHttp(memoryPort) {
       try {
         await bridgeClient.connect(bridgeTransport);
         const bridgeTools = await bridgeClient.listTools();
-        assert.deepEqual(bridgeTools.tools.map((tool) => tool.name).sort(), ["memhub_branch", "memhub_distill", "memhub_result", "memhub_skill", "memhub_todo", "memmy_context", "memmy_project", "memmy_project_list", "memmy_project_manage", "memmy_turn"]);
+        assert.deepEqual(bridgeTools.tools.map((tool) => tool.name).sort(), ["memhub_branch", "memhub_distill", "memhub_memory", "memhub_result", "memhub_skill", "memhub_todo", "memmy_context", "memmy_project", "memmy_project_list", "memmy_project_manage", "memmy_turn"]);
         const bridgeContext = await bridgeClient.callTool({
           name: "memmy_context",
-          arguments: { query: "continue through local bridge", project: "atlas", conversation_id: "bridge-proxy-chat" }
+          arguments: { query: "continue through local bridge", project: "aide", conversation_id: "bridge-proxy-chat" }
         });
         assert.equal(bridgeContext.isError, undefined);
-        assert.equal(JSON.parse(bridgeContext.content[0].text).resolvedProjectId, "atlas");
+        assert.equal(JSON.parse(bridgeContext.content[0].text).resolvedProjectId, "aide");
         const automaticContext = await fetch(`http://127.0.0.1:${bridgePort}/context`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ query: "continue atlas", conversation_id: "bridge-proxy-chat", project: "atlas", limit: 12 })
+          body: JSON.stringify({ query: "continue aide", conversation_id: "bridge-proxy-chat", project: "aide", limit: 12 })
         });
         assert.equal(automaticContext.status, 200);
-        const automaticContextBody = await automaticContext.json();
-        assert.equal(automaticContextBody.resolvedProjectId, "atlas");
-        assert.equal(automaticContextBody.recallScope, "global_and_project");
+      const automaticContextBody = await automaticContext.json();
+      assert.equal(automaticContextBody.resolvedProjectId, "aide");
+      assert.equal(automaticContextBody.recallScope, "global_and_project");
+
+      const fullyPrivateBridgeId = "bridge-fully-private-capture";
+      const fullyPrivateBridgeCapture = await fetch(`http://127.0.0.1:${bridgePort}/capture`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          event_id: fullyPrivateBridgeId,
+          host: "bridge-test",
+          conversation_id: "bridge-fully-private",
+          timestamp: "2026-10-09T00:00:00.000Z",
+          project_hint: "aide",
+          user_text: "<private>bridge private user text</private>",
+          assistant_text: "<no-memory>bridge private assistant text</no-memory>",
+          capture_status: "complete"
+        })
+      });
+      assert.equal(fullyPrivateBridgeCapture.status, 202);
+      const privateDeadline = Date.now() + 5_000;
+      let privateBridgeStatus;
+      while (Date.now() < privateDeadline) {
+        privateBridgeStatus = await (await fetch(`http://127.0.0.1:${bridgePort}/status`)).json();
+        if (privateBridgeStatus.pending === 0) break;
+        await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+      }
+      assert.equal(privateBridgeStatus?.pending, 0, JSON.stringify(privateBridgeStatus));
+      const fullyPrivateStored = (await listCaptureEvents(stateRoot, "acct-test"))
+        .find((item) => item.event_id === fullyPrivateBridgeId);
+      assert.ok(fullyPrivateStored);
+      assert.equal(fullyPrivateStored.user_text, undefined);
+      assert.equal(fullyPrivateStored.assistant_text, undefined);
+      assert.equal(fullyPrivateStored.provenance?.memhub_privacy?.fully_excluded, true);
+      assert.equal(await isCaptureIngested(stateRoot, "acct-test", fullyPrivateBridgeId), true);
       } finally {
         await bridgeClient.close();
       }
@@ -2098,7 +2302,7 @@ async function testHttp(memoryPort) {
     const dirtyRaw = JSON.parse(await readFile(dirtyRawPath, "utf8"));
     dirtyRaw.assistant_text = "Complete the turn in the authoritative raw file.";
     dirtyRaw.capture_status = "complete";
-    dirtyRaw.project_hint = "atlas";
+    dirtyRaw.project_hint = "aide";
     await writeFile(dirtyRawPath, JSON.stringify(dirtyRaw, null, 2) + "\n");
     const captureIndexDb = new Database(join(stateRoot, "capture-index.sqlite"));
     captureIndexDb.prepare("INSERT OR REPLACE INTO capture_index_dirty(account_id,event_id) VALUES (?,?)")
@@ -2106,7 +2310,7 @@ async function testHttp(memoryPort) {
     captureIndexDb.close();
     const dirtyRecovered = (await listCaptureEvents(stateRoot, "acct-test", { conversationId: "dirty-recovery" }))[0];
     assert.equal(dirtyRecovered.capture_status, "complete");
-    assert.equal(dirtyRecovered.project_hint, "atlas");
+    assert.equal(dirtyRecovered.project_hint, "aide");
 
     const boundCaptureId = "capture-bound-project-backfill";
     const boundCapture = await postCapture({
@@ -2120,7 +2324,7 @@ async function testHttp(memoryPort) {
     });
     assert.equal(boundCapture.status, 201);
     const storedBoundCapture = (await listCaptureEvents(stateRoot, "acct-test")).find((item) => item.event_id === boundCaptureId);
-    assert.equal(storedBoundCapture.project_hint, "atlas");
+    assert.equal(storedBoundCapture.project_hint, "aide");
 
     await setDistillationConfig(stateRoot, { auto_enabled: true, turn_threshold: 2, idle_minutes: 30 });
     for (let index = 1; index <= 2; index += 1) {
@@ -2147,7 +2351,7 @@ async function testHttp(memoryPort) {
         conversation_id: "threshold-auto",
         turn_id: `threshold-auto-${index}`,
         timestamp: `2026-09-18T08:04:0${index}.000Z`,
-        project_hint: "atlas",
+        project_hint: "aide",
         user_text: `threshold user ${index}`,
         assistant_text: `threshold assistant ${index}`
       });
@@ -2171,12 +2375,12 @@ async function testHttp(memoryPort) {
       assert.ok(report.already_queued >= 4);
       for (let index = 1; index <= 2; index += 1) {
         const opened = await discoveryClient.callTool({ name: "memmy_turn", arguments: {
-          action: "open", conversation_id: "mcp-auto-conversation", project: "atlas", user_text: `MCP user ${index}`
+          action: "open", conversation_id: "mcp-auto-conversation", project: "aide", user_text: `MCP user ${index}`
         } });
         const eventId = JSON.parse(opened.content[0].text).turn.event_id;
         const committed = await discoveryClient.callTool({ name: "memmy_turn", arguments: {
           action: "commit", event_id: eventId, conversation_id: "mcp-auto-conversation",
-          project: "atlas", assistant_text: `MCP assistant ${index}`
+          project: "aide", assistant_text: `MCP assistant ${index}`
         } });
         assert.equal(JSON.parse(committed.content[0].text).turn.ingested, true);
       }
@@ -2193,7 +2397,7 @@ async function testHttp(memoryPort) {
       await writeFile(jobsPath, "{invalid-json");
       faultResponse = await postCapture({
         event_id: "capture-queue-fault-1", host: "codex", conversation_id: "queue-fault-conversation",
-        timestamp: "2026-09-18T08:04:10.000Z", project_hint: "atlas",
+        timestamp: "2026-09-18T08:04:10.000Z", project_hint: "aide",
         user_text: "queue failure must not undo L1", assistant_text: "L1 was committed", capture_status: "complete"
       });
       assert.equal(faultResponse.status, 201);
@@ -2205,7 +2409,7 @@ async function testHttp(memoryPort) {
     }
     const recovered = await postCapture({
       event_id: "capture-queue-fault-2", host: "codex", conversation_id: "queue-fault-conversation",
-      timestamp: "2026-09-18T08:04:11.000Z", project_hint: "atlas",
+      timestamp: "2026-09-18T08:04:11.000Z", project_hint: "aide",
       user_text: "next complete L1", assistant_text: "queue recovered", capture_status: "complete"
     });
     assert.equal(recovered.status, 201);
@@ -2218,7 +2422,7 @@ async function testHttp(memoryPort) {
       host: "codex",
       conversation_id: "long-utf8",
       timestamp: "2026-09-18T08:05:00.000Z",
-      project_hint: "atlas",
+      project_hint: "aide",
       user_text: "界".repeat(300_000),
       reasoning_summary: "理".repeat(100_000),
       capture_status: "partial"
@@ -2295,10 +2499,11 @@ async function exerciseClient(client, conversationId, stateRoot) {
   const packageVersion = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).version;
   assert.equal(client.getServerVersion()?.version, packageVersion);
   const listed = await client.listTools();
-  assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["memhub_branch", "memhub_distill", "memhub_result", "memhub_skill", "memhub_todo", "memmy_context", "memmy_project", "memmy_project_list", "memmy_project_manage", "memmy_turn"]);
+  assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["memhub_branch", "memhub_distill", "memhub_memory", "memhub_result", "memhub_skill", "memhub_todo", "memmy_context", "memmy_project", "memmy_project_list", "memmy_project_manage", "memmy_turn"]);
   assert.match(listed.tools.find((tool) => tool.name === "memmy_context")?.description ?? "", /conversation_id.*不要伪造|不要伪造.*conversation_id/);
   assert.match(listed.tools.find((tool) => tool.name === "memhub_branch")?.description ?? "", /不新增 L1\/L2\/L3\/L4/);
   assert.match(listed.tools.find((tool) => tool.name === "memhub_result")?.description ?? "", /result_id.*next_offset|next_offset.*result_id/);
+  assert.match(listed.tools.find((tool) => tool.name === "memhub_memory")?.description ?? "", /Progressive-disclosure.*exact evidenceRef|exact evidenceRef.*Progressive-disclosure/);
   assert.match(listed.tools.find((tool) => tool.name === "memmy_project")?.description ?? "", /action=current.*没有 conversation_id 时不会报错/);
   assert.match(listed.tools.find((tool) => tool.name === "memmy_project_list")?.description ?? "", /description.*禁止盲目新建/);
   assert.match(listed.tools.find((tool) => tool.name === "memmy_project_manage")?.description ?? "", /action=plan.*明确授权.*action=execute/);
@@ -2308,7 +2513,9 @@ async function exerciseClient(client, conversationId, stateRoot) {
     ["memmy_project_manage", ["plan", "execute"], ["action"]],
     ["memhub_todo", ["list", "add", "complete", "reopen"], ["action"]],
     ["memhub_skill", ["load", "record", "status"], ["action", "skill_id"]],
-    ["memhub_distill", ["audit", "discover", "recover_ingest", "reconcile_derived", "reconcile_l4", "next", "renew", "submit", "skip"], []]
+    ["memhub_distill", ["audit", "discover", "consolidate", "recover_ingest", "reconcile_derived", "reconcile_l4", "next", "renew", "submit", "skip"], []],
+    ["memhub_memory", ["load", "plan", "execute"], ["action"]],
+    ["memmy_project", ["list", "current", "bind", "unbind", "architecture", "architecture_plan", "architecture_execute", "architecture_history"], ["action"]]
   ]) {
     const schema = listed.tools.find((tool) => tool.name === name)?.inputSchema;
     assert.ok(schema, `${name} must expose its live input schema`);
@@ -2321,15 +2528,15 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(distillHelp.properties.lease_token.type, "string");
   assert.equal(distillHelp.properties.lease_token_supported.type, "boolean");
   assert.equal(distillHelp.properties.lease_seconds.minimum, 30);
-  let projectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "atlas" } })).content[0].text);
-  if (!projectList.projects.some((project) => project.project === "atlas")) {
+  let projectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "AIDE" } })).content[0].text);
+  if (!projectList.projects.some((project) => project.project === "aide")) {
     const createPlan = JSON.parse((await client.callTool({
       name: "memmy_project_manage",
       arguments: {
         action: "plan",
         operation: "create",
-        project: "atlas",
-        description: "atlas project used by MCP integration tests."
+        project: "aide",
+        description: "AIDE project used by MCP integration tests."
       }
     })).content[0].text);
     assert.equal(createPlan.status, "awaiting_user_authorization");
@@ -2338,9 +2545,9 @@ async function exerciseClient(client, conversationId, stateRoot) {
       arguments: { action: "execute", authorization_id: createPlan.authorization_id }
     })).content[0].text);
     assert.equal(createResult.ok, true);
-    projectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "atlas" } })).content[0].text);
+    projectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "AIDE" } })).content[0].text);
   }
-  assert.ok(projectList.projects.some((project) => project.project === "atlas"));
+  assert.ok(projectList.projects.some((project) => project.project === "aide"));
   const distillationAudit = JSON.parse((await client.callTool({
     name: "memhub_distill", arguments: { action: "audit" }
   })).content[0].text);
@@ -2348,7 +2555,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(distillationAudit.account_scoped, true);
   assert.equal(distillationAudit.bridge.inspected, false,
     "Gateway must not inspect an unrelated default Bridge home without explicit service configuration");
-  assert.equal(projectList.matches[0]?.project, "atlas");
+  assert.equal(projectList.matches[0]?.project, "aide");
   let workspaceProjectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "memhub" } })).content[0].text);
   if (!workspaceProjectList.projects.some((project) => project.project === "memhub")) {
     const createWorkspacePlan = JSON.parse((await client.callTool({
@@ -2371,24 +2578,24 @@ async function exerciseClient(client, conversationId, stateRoot) {
   const branchConversation = `${conversationId}-branches`;
   const retrievalBranch = JSON.parse((await client.callTool({
     name: "memhub_branch",
-    arguments: { action: "create", project: "atlas", name: "Retrieval", goal: "Improve semantic BM25 retrieval precision." }
+    arguments: { action: "create", project: "aide", name: "Retrieval", goal: "Improve semantic BM25 retrieval precision." }
   })).content[0].text).branch;
   const webBranch = JSON.parse((await client.callTool({
     name: "memhub_branch",
-    arguments: { action: "create", project: "atlas", name: "Web", goal: "Finish the Control Plane web interface." }
+    arguments: { action: "create", project: "aide", name: "Web", goal: "Finish the Control Plane web interface." }
   })).content[0].text).branch;
   await client.callTool({
     name: "memhub_branch",
-    arguments: { action: "create", project: "atlas", name: "Network", goal: "Diagnose Cloudflare transport stability." }
+    arguments: { action: "create", project: "aide", name: "Network", goal: "Diagnose Cloudflare transport stability." }
   });
   const branchList = JSON.parse((await client.callTool({
     name: "memhub_branch",
-    arguments: { action: "list", project: "atlas" }
+    arguments: { action: "list", project: "aide" }
   })).content[0].text);
   assert.equal(branchList.branches.length, 3);
   await client.callTool({
     name: "memhub_branch",
-    arguments: { action: "switch", project: "atlas", conversation_id: branchConversation, branch: retrievalBranch.branchId }
+    arguments: { action: "switch", project: "aide", conversation_id: branchConversation, branch: retrievalBranch.branchId }
   });
   const retrievalTurn = JSON.parse((await client.callTool({
     name: "memmy_turn",
@@ -2396,7 +2603,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
       action: "open",
       conversation_id: branchConversation,
       continuity_id: branchConversation,
-      project: "atlas",
+      project: "aide",
       user_text: "Tune semantic BM25 retrieval precision for the Retrieval branch."
     }
   })).content[0].text);
@@ -2412,14 +2619,14 @@ async function exerciseClient(client, conversationId, stateRoot) {
   });
   let branchContext = JSON.parse((await client.callTool({
     name: "memmy_context",
-    arguments: { query: "继续", project: "atlas", conversation_id: branchConversation, continuity_id: branchConversation }
+    arguments: { query: "继续", project: "aide", conversation_id: branchConversation, continuity_id: branchConversation }
   })).content[0].text);
   assert.equal(branchContext.branchContext.branchId, retrievalBranch.branchId);
   assert.equal(branchContext.branchContext.source, "conversation_binding");
   assert.ok(branchContext.recentSession.some((item) => /BM25 retrieval/.test(item.content)));
   branchContext = JSON.parse((await client.callTool({
     name: "memmy_context",
-    arguments: { query: "继续", project: "atlas", conversation_id: branchConversation, branch: webBranch.branchId }
+    arguments: { query: "继续", project: "aide", conversation_id: branchConversation, branch: webBranch.branchId }
   })).content[0].text);
   assert.equal(branchContext.branchContext.branchId, webBranch.branchId);
   assert.equal(branchContext.branchContext.source, "explicit");
@@ -2429,7 +2636,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
       action: "open",
       conversation_id: branchConversation,
       continuity_id: branchConversation,
-      project: "atlas",
+      project: "aide",
       user_text: "Finish the Control Plane web interface for the Web branch."
     }
   })).content[0].text);
@@ -2447,7 +2654,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     name: "memmy_context",
     arguments: {
       query: "继续",
-      project: "atlas",
+      project: "aide",
       conversation_id: branchConversation,
       continuity_id: branchConversation
     }
@@ -2457,31 +2664,31 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.ok(webScopedContext.recentSession.every((item) => !/BM25 retrieval/.test(item.content)));
   const branchCurrent = JSON.parse((await client.callTool({
     name: "memhub_branch",
-    arguments: { action: "current", project: "atlas", conversation_id: branchConversation }
+    arguments: { action: "current", project: "aide", conversation_id: branchConversation }
   })).content[0].text);
   assert.equal(branchCurrent.branch.branchId, webBranch.branchId);
   await client.callTool({
     name: "memhub_branch",
-    arguments: { action: "close", project: "atlas", branch: webBranch.branchId }
+    arguments: { action: "close", project: "aide", branch: webBranch.branchId }
   });
   const branchAfterClose = JSON.parse((await client.callTool({
     name: "memhub_branch",
-    arguments: { action: "current", project: "atlas", conversation_id: branchConversation }
+    arguments: { action: "current", project: "aide", conversation_id: branchConversation }
   })).content[0].text);
   assert.equal(branchAfterClose.branch, null);
   const branchListWithClosed = JSON.parse((await client.callTool({
     name: "memhub_branch",
-    arguments: { action: "list", project: "atlas", include_closed: true }
+    arguments: { action: "list", project: "aide", include_closed: true }
   })).content[0].text);
   assert.ok(branchListWithClosed.branches.length >= 3);
   assert.equal(branchListWithClosed.branches.find((branch) => branch.branchId === webBranch.branchId).status, "closed");
   const baselineTodos = JSON.parse((await client.callTool({
     name: "memhub_todo",
-    arguments: { action: "list", project: "atlas", status: "all" }
+    arguments: { action: "list", project: "aide", status: "all" }
   })).content[0].text);
-  assert.equal(baselineTodos.project, "atlas");
+  assert.equal(baselineTodos.project, "aide");
   const blankTodo = await client.callTool({
-    name: "memhub_todo", arguments: { action: "add", project: "atlas", text: "   " }
+    name: "memhub_todo", arguments: { action: "add", project: "aide", text: "   " }
   });
   assert.equal(blankTodo.isError, true);
   assert.match(blankTodo.content[0].text, /text.*required|text.*non-empty/i);
@@ -2489,49 +2696,49 @@ async function exerciseClient(client, conversationId, stateRoot) {
   const baselineTotalCount = baselineTodos.total;
   const addedTodo = JSON.parse((await client.callTool({
     name: "memhub_todo",
-    arguments: { action: "add", project: "atlas", text: "Verify the dedicated MCP todo lifecycle." }
+    arguments: { action: "add", project: "AIDE", text: "Verify the dedicated MCP todo lifecycle." }
   })).content[0].text);
   assert.equal(addedTodo.ok, true);
-  assert.equal(addedTodo.project, "atlas");
+  assert.equal(addedTodo.project, "aide");
   assert.equal(addedTodo.todo.status, "pending");
   assert.equal(addedTodo.pending_count, baselinePendingCount + 1);
   const contextWithRelevantTodo = JSON.parse((await client.callTool({
     name: "memmy_context",
-    arguments: { query: "dedicated MCP todo lifecycle", project: "atlas" }
+    arguments: { query: "dedicated MCP todo lifecycle", project: "AIDE" }
   })).content[0].text);
-  const atlasCandidateWithTodo = contextWithRelevantTodo.projectCandidates.find((project) => project.project === "atlas");
-  assert.ok(atlasCandidateWithTodo);
-  assert.equal(atlasCandidateWithTodo.relevantTodos[0].id, addedTodo.todo.id);
-  assert.equal(atlasCandidateWithTodo.relevantTodos.length, 1);
-  assert.deepEqual(atlasCandidateWithTodo.relevantTodos[0].matchedTerms, ["dedicated", "mcp", "todo", "lifecycle"]);
+  const aideCandidateWithTodo = contextWithRelevantTodo.projectCandidates.find((project) => project.project === "aide");
+  assert.ok(aideCandidateWithTodo);
+  assert.equal(aideCandidateWithTodo.relevantTodos[0].id, addedTodo.todo.id);
+  assert.equal(aideCandidateWithTodo.relevantTodos.length, 1);
+  assert.deepEqual(aideCandidateWithTodo.relevantTodos[0].matchedTerms, ["dedicated", "mcp", "todo", "lifecycle"]);
   const pendingTodos = JSON.parse((await client.callTool({
     name: "memhub_todo",
-    arguments: { action: "list", project: "atlas" }
+    arguments: { action: "list", project: "aide" }
   })).content[0].text);
   assert.equal(pendingTodos.pending_count, baselinePendingCount + 1);
   assert.ok(pendingTodos.todos.some((todo) => todo.id === addedTodo.todo.id));
   const allTodosAfterAdd = JSON.parse((await client.callTool({
     name: "memhub_todo",
-    arguments: { action: "list", project: "atlas", status: "all" }
+    arguments: { action: "list", project: "aide", status: "all" }
   })).content[0].text);
   assert.equal(allTodosAfterAdd.total, baselineTotalCount + 1);
   const completedTodo = JSON.parse((await client.callTool({
     name: "memhub_todo",
-    arguments: { action: "complete", project: "atlas", todo_id: addedTodo.todo.id }
+    arguments: { action: "complete", project: "aide", todo_id: addedTodo.todo.id }
   })).content[0].text);
   assert.equal(completedTodo.todo.status, "done");
   assert.ok(completedTodo.todo.completedAt);
   assert.equal(completedTodo.pending_count, baselinePendingCount);
   const repeatedComplete = JSON.parse((await client.callTool({
     name: "memhub_todo",
-    arguments: { action: "complete", project: "atlas", todo_id: addedTodo.todo.id }
+    arguments: { action: "complete", project: "aide", todo_id: addedTodo.todo.id }
   })).content[0].text);
   assert.equal(repeatedComplete.todo.completedAt, completedTodo.todo.completedAt);
   assert.equal(repeatedComplete.todo.updatedAt, completedTodo.todo.updatedAt);
   assert.equal(repeatedComplete.pending_count, baselinePendingCount);
   const reopenedTodo = JSON.parse((await client.callTool({
     name: "memhub_todo",
-    arguments: { action: "reopen", project: "atlas", todo_id: addedTodo.todo.id }
+    arguments: { action: "reopen", project: "aide", todo_id: addedTodo.todo.id }
   })).content[0].text);
   assert.equal(reopenedTodo.todo.status, "pending");
   assert.equal(reopenedTodo.todo.completedAt, undefined);
@@ -2541,9 +2748,9 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: { action: "list" }
   })).content[0].text);
   assert.equal(accountTodos.scope, "account");
-  assert.ok(accountTodos.projects.some((project) => project.project === "atlas" && project.todos.some((todo) => todo.id === addedTodo.todo.id)));
-  const projectListWithTodo = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "atlas" } })).content[0].text);
-  assert.equal(projectListWithTodo.projects.find((project) => project.project === "atlas")?.pendingTodoCount, baselinePendingCount + 1);
+  assert.ok(accountTodos.projects.some((project) => project.project === "aide" && project.todos.some((todo) => todo.id === addedTodo.todo.id)));
+  const projectListWithTodo = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "AIDE" } })).content[0].text);
+  assert.equal(projectListWithTodo.projects.find((project) => project.project === "aide")?.pendingTodoCount, baselinePendingCount + 1);
   const currentWithoutConversation = JSON.parse((await client.callTool({
     name: "memmy_project",
     arguments: { action: "current" }
@@ -2553,22 +2760,22 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(currentWithoutConversation.resolution_source, "conversation_id_unavailable");
   const currentExplicitWithoutConversation = JSON.parse((await client.callTool({
     name: "memmy_project",
-    arguments: { action: "current", project: "atlas" }
+    arguments: { action: "current", project: "AIDE" }
   })).content[0].text);
-  assert.equal(currentExplicitWithoutConversation.project, "atlas");
+  assert.equal(currentExplicitWithoutConversation.project, "aide");
   assert.equal(currentExplicitWithoutConversation.binding_available, false);
   assert.equal(currentExplicitWithoutConversation.resolution_source, "explicit_project");
   assert.equal(currentExplicitWithoutConversation.persisted, false);
   const currentWorkspaceWithoutConversation = JSON.parse((await client.callTool({
     name: "memmy_project",
-    arguments: { action: "current", workspace_project: "atlas" }
+    arguments: { action: "current", workspace_project: "AIDE" }
   })).content[0].text);
-  assert.equal(currentWorkspaceWithoutConversation.project, "atlas");
+  assert.equal(currentWorkspaceWithoutConversation.project, "aide");
   assert.equal(currentWorkspaceWithoutConversation.resolution_source, "workspace_project");
   const workspacePriorityConversation = `${conversationId}-workspace-priority`;
   await client.callTool({
     name: "memmy_project",
-    arguments: { action: "bind", conversation_id: workspacePriorityConversation, project: "atlas" }
+    arguments: { action: "bind", conversation_id: workspacePriorityConversation, project: "aide" }
   });
   const workspacePriority = JSON.parse((await client.callTool({
     name: "memmy_project",
@@ -2581,7 +2788,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     name: "memhub_todo",
     arguments: {
       action: "add",
-      project: "atlas",
+      project: "aide",
       workspace_project: "memhub",
       text: "This conflicting scope must never be written."
     }
@@ -2590,39 +2797,39 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.match(conflictingTodoScope.content[0].text, /project\/workspace conflict/);
   const unresolved = JSON.parse((await client.callTool({
     name: "memmy_context",
-    arguments: { query: "continue the ATLASE work", project: "atlase", conversation_id: conversationId + "-unknown" }
+    arguments: { query: "continue the AIDEE work", project: "aidee", conversation_id: conversationId + "-unknown" }
   })).content[0].text);
   assert.equal(unresolved.resolvedProjectId, null);
   assert.equal(unresolved.recallScope, "global_only");
-  assert.ok(unresolved.projectCandidates.some((project) => project.project === "atlas"));
+  assert.ok(unresolved.projectCandidates.some((project) => project.project === "aide"));
   assert.ok(unresolved.projectCandidates.every((project) => project.relevantTodos === undefined));
   const unchangedUpdate = await client.callTool({
     name: "memmy_project_manage",
-    arguments: { action: "plan", operation: "update", project: "atlas", name: projectList.projects.find((item) => item.project === "atlas").name }
+    arguments: { action: "plan", operation: "update", project: "aide", name: projectList.projects.find((item) => item.project === "aide").name }
   });
   assert.equal(unchangedUpdate.isError, true);
   assert.match(unchangedUpdate.content[0].text, /no effective changes/);
   const invalidAliases = await client.callTool({
     name: "memmy_project_manage",
-    arguments: { action: "plan", operation: "update", project: "atlas", aliases: ["valid", 42] }
+    arguments: { action: "plan", operation: "update", project: "aide", aliases: ["valid", 42] }
   });
   assert.equal(invalidAliases.isError, true);
   const blankAlias = await client.callTool({
     name: "memmy_project_manage",
-    arguments: { action: "plan", operation: "update", project: "atlas", aliases: ["valid", ""] }
+    arguments: { action: "plan", operation: "update", project: "aide", aliases: ["valid", ""] }
   });
   assert.equal(blankAlias.isError, true);
   assert.match(blankAlias.content[0].text, /aliases must contain only non-empty strings/);
-  const updatedDescription = projectList.projects.find((item) => item.project === "atlas").description ===
-    "atlas project used by MCP integration tests (verified)."
-    ? "atlas project used by MCP integration tests (reverified)."
-    : "atlas project used by MCP integration tests (verified).";
+  const updatedDescription = projectList.projects.find((item) => item.project === "aide").description ===
+    "AIDE project used by MCP integration tests (verified)."
+    ? "AIDE project used by MCP integration tests (reverified)."
+    : "AIDE project used by MCP integration tests (verified).";
   const updatePlanResult = await client.callTool({
     name: "memmy_project_manage",
     arguments: {
       action: "plan",
       operation: "update",
-      project: "atlas",
+      project: "aide",
       description: updatedDescription
     }
   });
@@ -2638,8 +2845,8 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: { action: "execute", authorization_id: updatePlan.authorization_id }
   });
   assert.match(replayedAuthorization.content[0].text, /invalid or already-used project authorization/);
-  const updatedList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "atlas" } })).content[0].text);
-  assert.match(updatedList.projects.find((project) => project.project === "atlas")?.description ?? "", /integration tests/);
+  const updatedList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "aide" } })).content[0].text);
+  assert.match(updatedList.projects.find((project) => project.project === "aide")?.description ?? "", /integration tests/);
   const mergeTarget = `merge-target-${conversationId}`;
   const mergeSource = `merge-source-${conversationId}`;
   const deleteProject = `delete-${conversationId}`;
@@ -2761,19 +2968,19 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(historicalProjects.find((project) => project.project === mergeSource)?.state, "merged");
   assert.equal(historicalProjects.find((project) => project.project === mergeSource)?.mergedInto, mergeTarget);
   assert.equal(historicalProjects.find((project) => project.project === deleteProject)?.state, "deleted");
-  await client.callTool({ name: "memmy_project", arguments: { action: "bind", conversation_id: conversationId, project: "atlas" } });
+  await client.callTool({ name: "memmy_project", arguments: { action: "bind", conversation_id: conversationId, project: "aide" } });
   const context = await client.callTool({ name: "memmy_context", arguments: { query: "continue", conversation_id: conversationId } });
   const capsule = JSON.parse(context.content[0].text);
-  assert.equal(capsule.resolvedProjectId, "atlas");
+  assert.equal(capsule.resolvedProjectId, "aide");
   assert.equal(capsule.globalMemory.length, 1);
   assert.equal(capsule.projectMemory.length, 1);
   if (conversationId === "stdio-chat") {
-    assert.ok(capsule.projectArchitecture.some((item) => /atlas Core Architecture/.test(item.content)));
+    assert.ok(capsule.projectArchitecture.some((item) => /AIDE Core Architecture/.test(item.content)));
     const architecture = JSON.parse((await client.callTool({
       name: "memmy_project",
-      arguments: { action: "architecture", project: "atlas", query: "broker workspace ownership" }
+      arguments: { action: "architecture", project: "aide", query: "broker workspace ownership" }
     })).content[0].text);
-    assert.equal(architecture.project, "atlas");
+    assert.equal(architecture.project, "aide");
     assert.ok(architecture.architecture.some((item) => /Broker routes work/.test(item.content)));
   }
   const openedTurn = JSON.parse((await client.callTool({
@@ -2787,7 +2994,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     }
   })).content[0].text);
   assert.equal(openedTurn.turn.status, "open");
-  assert.equal(openedTurn.turn.project_hint, "atlas");
+  assert.equal(openedTurn.turn.project_hint, "aide");
   const l1EventId = openedTurn.turn.event_id;
   await client.callTool({
     name: "memmy_turn",
@@ -2841,7 +3048,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: {
       action: "open",
       conversation_id: largeResultConversation,
-      project: "atlas",
+      project: "aide",
       user_text: "Verify generic MCP result chunk transport."
     }
   })).content[0].text);
@@ -2876,14 +3083,14 @@ async function exerciseClient(client, conversationId, stateRoot) {
     name: "memmy_turn",
     arguments: {
       action: "open",
-      project: "atlas",
+      project: "aide",
       user_text: "Capture this turn even when the transport exposes no conversation id."
     }
   })).content[0].text);
   assert.equal(unboundOpen.binding_available, false);
   assert.equal(unboundOpen.transport_conversation_id, null);
   assert.match(unboundOpen.turn.conversation_id, /^memhub-unbound:l1_/);
-  assert.equal(unboundOpen.turn.project_hint, "atlas");
+  assert.equal(unboundOpen.turn.project_hint, "aide");
   const unboundEventId = unboundOpen.turn.event_id;
   const unboundCommit = JSON.parse((await client.callTool({
     name: "memmy_turn",
@@ -2897,7 +3104,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(unboundCommit.turn.event_id, unboundEventId);
   assert.equal(unboundCommit.turn.status, "complete");
   assert.equal(unboundCommit.turn.ingested, true);
-  assert.equal(unboundCommit.project_id, "atlas");
+  assert.equal(unboundCommit.project_id, "aide");
   const colonEventId = `codex:${conversationId}:colon-turn`;
   await client.callTool({
     name: "memmy_turn",
@@ -2906,7 +3113,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
       event_id: colonEventId,
       conversation_id: conversationId,
       continuity_id: conversationId,
-      project: "atlas",
+      project: "aide",
       user_text: "Verify L1 evidence ids containing colons remain intact."
     }
   });
@@ -2925,7 +3132,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: {
       kind: "l2",
       scope: "project",
-      project: "atlas",
+      project: "aide",
       content: "Colon-bearing L1 evidence is accepted without truncating its event id.",
       evidence_refs: [`l1:${colonEventId}`],
       dry_run: true
@@ -2963,7 +3170,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
       kind: "l4",
       scope: "account",
       content: "Durable cross-project evidence-backed user profile candidate.",
-      evidence_refs: [golden.atlasL3Ref, golden.betaL3Ref],
+      evidence_refs: [golden.aideL3Ref, golden.betaL3Ref],
       dry_run: true
     }
   });
@@ -2972,20 +3179,180 @@ async function exerciseClient(client, conversationId, stateRoot) {
 
   const exactContext = JSON.parse((await client.callTool({
     name: "memmy_context",
-    arguments: { query: "__exact_evidence_ref_probe__", project: "atlas" }
+    arguments: { query: "__exact_evidence_ref_probe__", project: "aide" }
   })).content[0].text);
-  const exactL2 = exactContext.projectMemory.find((item) => item.id === golden.atlasL2Id);
+  const exactL2 = exactContext.projectMemory.find((item) => item.id === golden.aideL2Id);
   assert.ok(exactL2);
-  assert.equal(exactL2.evidenceRef, golden.atlasL2Ref);
+  assert.equal(exactL2.evidenceRef, golden.aideL2Ref);
+  assert.equal(exactL2.provenance.hydration.tool, "memhub_memory");
+  assert.equal(exactContext.progressiveDisclosure.discover, "memmy_context");
+  const hydratedL2 = JSON.parse((await client.callTool({
+    name: "memhub_memory",
+    arguments: { action: "load", evidence_ref: exactL2.evidenceRef }
+  })).content[0].text);
+  assert.equal(hydratedL2.item.evidence_ref, golden.aideL2Ref);
+  assert.equal(hydratedL2.item.layer, "L2");
+  assert.match(hydratedL2.item.content, /AIDE/);
+  assert.equal(hydratedL2.telemetry.hydrations, 1);
+
+  const governedL3Content = "# AIDE Project Rules\n\n- Validate current state before modifying project truth.\n- Preserve explicit project and workspace boundaries.\n- User-confirmed rules replace the canonical L3 only after full-text approval.\n";
+  const governedL3Plan = JSON.parse((await client.callTool({
+    name: "memhub_memory",
+    arguments: {
+      action: "plan",
+      kind: "l3",
+      project: "aide",
+      workspace_project: "aide",
+      base_evidence_ref: golden.aideL3Ref,
+      content: governedL3Content,
+      note: "User explicitly requested a new project rule."
+    }
+  })).content[0].text);
+  assert.equal(governedL3Plan.status, "awaiting_user_authorization");
+  assert.equal(governedL3Plan.proposed_content, governedL3Content);
+  assert.equal(governedL3Plan.current_evidence_ref, golden.aideL3Ref);
+  assert.ok(governedL3Plan.instructions.some((line) => /Show proposed_content.*in full/i.test(line)));
+  const l3Confirmation = JSON.parse((await client.callTool({
+    name: "memmy_turn",
+    arguments: {
+      action: "open",
+      conversation_id: `${conversationId}-l3-confirmation`,
+      continuity_id: `${conversationId}-l3-confirmation`,
+      project: "aide",
+      user_text: "Yes. Write the exact full L3 replacement you just showed me."
+    }
+  })).content[0].text);
+  const governedL3 = JSON.parse((await client.callTool({
+    name: "memhub_memory",
+    arguments: {
+      action: "execute",
+      authorization_id: governedL3Plan.authorization_id,
+      confirmation_evidence_ref: `l1:${l3Confirmation.turn.event_id}`
+    }
+  })).content[0].text);
+  assert.equal(governedL3.ok, true);
+  assert.equal(governedL3.kind, "l3");
+  assert.equal(governedL3.project, "aide");
+  assert.equal(governedL3.derived_jobs_enqueued, 0);
+  assert.match(governedL3.result_evidence_ref, /^l3:[^:]+:[^:]+$/);
+  await client.callTool({
+    name: "memmy_turn",
+    arguments: {
+      action: "commit",
+      event_id: l3Confirmation.turn.event_id,
+      conversation_id: `${conversationId}-l3-confirmation`,
+      continuity_id: `${conversationId}-l3-confirmation`,
+      assistant_text: "The explicitly approved full L3 replacement was committed."
+    }
+  });
+  const governedL3Hydrated = JSON.parse((await client.callTool({
+    name: "memhub_memory",
+    arguments: { action: "load", evidence_ref: governedL3.result_evidence_ref }
+  })).content[0].text);
+  assert.equal(governedL3Hydrated.item.content.trim(), governedL3Content.trim());
+
+  const governedL4Content = "# Cross-project User Profile\n\n- When the user explicitly declares a cross-project rule, show the complete new L4 text before writing it.\n- Only commit after explicit approval of that exact full replacement.\n";
+  const governedL4Plan = JSON.parse((await client.callTool({
+    name: "memhub_memory",
+    arguments: {
+      action: "plan",
+      kind: "l4",
+      base_evidence_ref: golden.l4Ref,
+      content: governedL4Content,
+      note: "User explicitly requested an account-wide rule."
+    }
+  })).content[0].text);
+  assert.equal(governedL4Plan.current_evidence_ref, golden.l4Ref);
+  const l4Confirmation = JSON.parse((await client.callTool({
+    name: "memmy_turn",
+    arguments: {
+      action: "open",
+      conversation_id: `${conversationId}-l4-confirmation`,
+      continuity_id: `${conversationId}-l4-confirmation`,
+      project: "aide",
+      user_text: "Confirmed. Write exactly that full L4 replacement."
+    }
+  })).content[0].text);
+  const governedL4 = JSON.parse((await client.callTool({
+    name: "memhub_memory",
+    arguments: {
+      action: "execute",
+      authorization_id: governedL4Plan.authorization_id,
+      confirmation_evidence_ref: `l1:${l4Confirmation.turn.event_id}`
+    }
+  })).content[0].text);
+  assert.equal(governedL4.ok, true);
+  assert.equal(governedL4.kind, "l4");
+  assert.equal(governedL4.project, null);
+  assert.equal(governedL4.derived_jobs_enqueued, 0);
+  await client.callTool({
+    name: "memmy_turn",
+    arguments: {
+      action: "commit",
+      event_id: l4Confirmation.turn.event_id,
+      conversation_id: `${conversationId}-l4-confirmation`,
+      continuity_id: `${conversationId}-l4-confirmation`,
+      assistant_text: "The explicitly approved full L4 replacement was committed."
+    }
+  });
+  const governedL4Hydrated = JSON.parse((await client.callTool({
+    name: "memhub_memory",
+    arguments: { action: "load", evidence_ref: governedL4.result_evidence_ref }
+  })).content[0].text);
+  assert.equal(governedL4Hydrated.item.content.trim(), governedL4Content.trim());
+
+  const staleGovernedPlan = JSON.parse((await client.callTool({
+    name: "memhub_memory",
+    arguments: {
+      action: "plan",
+      kind: "l3",
+      project: "aide",
+      workspace_project: "aide",
+      base_evidence_ref: governedL3.result_evidence_ref,
+      content: "# AIDE Project Rules\n\nThis stale proposal must not overwrite a newer canonical L3.\n"
+    }
+  })).content[0].text);
+  const concurrentL3 = JSON.parse((await client.callTool({
+    name: "memhub_distill",
+    arguments: {
+      kind: "l3",
+      scope: "project",
+      project: "aide",
+      content: "# AIDE Project Rules\n\nA concurrent canonical L3 update happened after the governed plan.\n",
+      evidence_refs: [golden.aideL2Ref],
+      source_harness: "concurrent-update-test"
+    }
+  })).content[0].text);
+  assert.match(concurrentL3.result_evidence_ref, /^l3:[^:]+:[^:]+$/);
+  const staleConfirmation = JSON.parse((await client.callTool({
+    name: "memmy_turn",
+    arguments: {
+      action: "open",
+      conversation_id: `${conversationId}-stale-l3-confirmation`,
+      continuity_id: `${conversationId}-stale-l3-confirmation`,
+      project: "aide",
+      user_text: "Confirm the stale plan."
+    }
+  })).content[0].text);
+  const staleGovernedExecute = await client.callTool({
+    name: "memhub_memory",
+    arguments: {
+      action: "execute",
+      authorization_id: staleGovernedPlan.authorization_id,
+      confirmation_evidence_ref: `l1:${staleConfirmation.turn.event_id}`
+    }
+  });
+  assert.equal(staleGovernedExecute.isError, true);
+  assert.match(staleGovernedExecute.content[0].text, /changed after plan/);
 
   const stableRefRejected = await client.callTool({
     name: "memhub_distill",
     arguments: {
       kind: "l3",
       scope: "project",
-      project: "atlas",
+      project: "aide",
       content: "A mutable stable Memory id must not be accepted as exact L2 evidence.",
-      evidence_refs: [`l2:${golden.atlasL2Id}`],
+      evidence_refs: [`l2:${golden.aideL2Id}`],
       dry_run: true
     }
   });
@@ -2998,10 +3365,10 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: {
       kind: "l3",
       scope: "project",
-      project: "atlas",
+      project: "aide",
       artifact_id: `direct-ledger-${conversationId}`,
       content: "Direct manual L3 writes also leave an immutable completed revision ledger.",
-      evidence_refs: [golden.atlasL2Ref],
+      evidence_refs: [golden.aideL2Ref],
       source_harness: "direct-ledger-test"
     }
   })).content[0].text);
@@ -3023,7 +3390,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: {
       kind: "l3",
       scope: "project",
-      project: "atlas",
+      project: "aide",
       content: "This must not validate against invented evidence.",
       evidence_refs: ["l2:not-a-real-memory"],
       dry_run: true
@@ -3040,22 +3407,22 @@ async function exerciseClient(client, conversationId, stateRoot) {
     title: "Other account timeline",
     summary: "Must never be accepted as current-account evidence.",
     body: "Must never be accepted as current-account evidence.",
-    tags: ["artifact:l2", "project:atlas"],
-    namespace: { tenantId: "acct-other", userId: "acct_other_user", projectId: "atlas" },
+    tags: ["artifact:l2", "project:aide"],
+    namespace: { tenantId: "acct-other", userId: "acct_other_user", projectId: "aide" },
     version: 1
   });
   const otherAccountRevision = await recordCompletedDistillationRevision({
     stateRoot,
     accountId: "acct-other",
     target: "l2",
-    projectId: "atlas",
+    projectId: "aide",
     conversationId: "other-account-conversation",
     evidence: [{
       ref: "l1:other-account-turn",
       kind: "turn",
       layer: "L1",
       timestamp: new Date().toISOString(),
-      project_id: "atlas",
+      project_id: "aide",
       conversation_id: "other-account-conversation",
       user_text: "other account user",
       assistant_text: "other account assistant"
@@ -3069,7 +3436,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: {
       kind: "l3",
       scope: "project",
-      project: "atlas",
+      project: "aide",
       content: "This must not validate against another account's L2.",
       evidence_refs: [`l2:${otherAccountEvidenceId}:${otherAccountRevision.job_id}`],
       dry_run: true
@@ -3082,7 +3449,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     name: "memhub_distill",
     arguments: {
       kind: "skill", scope: "project", conversation_id: conversationId,
-      title: "atlas unstable skill", content: "Reusable procedure", version: "1.0.0", dry_run: true
+      title: "AIDE unstable skill", content: "Reusable procedure", version: "1.0.0", dry_run: true
     }
   });
   assert.equal(missingSkillIdentity.isError, true);
@@ -3091,22 +3458,22 @@ async function exerciseClient(client, conversationId, stateRoot) {
     name: "memhub_distill",
     arguments: {
       kind: "skill", scope: "project", conversation_id: conversationId,
-      title: "atlas unstable skill", content: "Reusable procedure", artifact_id: "atlas-unstable",
+      title: "AIDE unstable skill", content: "Reusable procedure", artifact_id: "aide-unstable",
       version: "1.0-retracted", dry_run: true
     }
   });
   assert.equal(invalidSkillVersion.isError, true);
   assert.match(invalidSkillVersion.content[0].text, /numeric dotted/);
 
-  const reconnectArtifactId = `atlas-reconnect-${conversationId}`;
+  const reconnectArtifactId = `aide-reconnect-${conversationId}`;
   await client.callTool({
     name: "memhub_distill",
     arguments: {
       kind: "skill",
       scope: "project",
       conversation_id: conversationId,
-      title: "atlas reconnect workflow",
-      content: "Use this when atlas reconnect fails. Inspect state, repair the bridge, then verify reconnection.",
+      title: "AIDE reconnect workflow",
+      content: "Use this when AIDE reconnect fails. Inspect state, repair the bridge, then verify reconnection.",
       source_harness: "codex",
       artifact_id: reconnectArtifactId,
       version: "1.0.0",
@@ -3117,20 +3484,20 @@ async function exerciseClient(client, conversationId, stateRoot) {
   });
   const skillWrite = [...requests].reverse().find((entry) => entry.url === "/api/v1/memory/add");
   assert.equal(skillWrite.body.layer, "Skill");
-  assert.equal(skillWrite.body.namespace.projectId, "atlas");
+  assert.equal(skillWrite.body.namespace.projectId, "aide");
   assert.equal(skillWrite.body.namespace.tenantId, "acct-test");
   assert.equal(skillWrite.body.sourceAgentId, "codex");
   assert.equal(skillWrite.body.sourceSkillId, reconnectArtifactId);
   assert.equal(skillWrite.body.sourceSkillVersion, "1.0.0");
   assert.ok(skillWrite.body.tags.includes("artifact:skill"));
-  assert.ok(skillWrite.body.tags.includes("project:atlas"));
+  assert.ok(skillWrite.body.tags.includes("project:aide"));
   assert.ok(skillWrite.body.tags.includes("distill-contract:memhub-distill-v3"));
   assert.ok(skillWrite.body.tags.includes("evidence:l1:test-turn"));
   assert.ok(skillWrite.body.tags.includes(`source-conversation:${conversationId}`));
   assert.equal(typeof skillWrite.body.requestId, "string");
 
   const skillRecord = [...memoryById.values()].find((item) => item.memoryLayer === "Skill" &&
-    item.title === "atlas reconnect workflow" &&
+    item.title === "AIDE reconnect workflow" &&
     item.metadata?.properties?.internal_info?.source_skill_id === reconnectArtifactId);
   assert.ok(skillRecord);
   const loadedSkill = JSON.parse((await client.callTool({
@@ -3141,7 +3508,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(typeof loadedSkill.execution_id, "string");
   assert.match(loadedSkill.content, /repair the bridge/);
   assert.equal(loadedSkill.metadata.loadRequired, true);
-  assert.equal(loadedSkill.metadata.scope, "project:atlas");
+  assert.equal(loadedSkill.metadata.scope, "project:aide");
 
   const invalidSkillRecord = await client.callTool({
     name: "memhub_skill", arguments: { action: "record", skill_id: skillRecord.id, stage: "success" }
@@ -3196,12 +3563,12 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(foreignLoad.isError, true, "cross-account Skill must not be loaded");
   memoryById.delete(foreignSkillId);
 
-  const revisionContent = `# atlas reconnect workflow\n\n## When to use\nWhen atlas reconnect fails.\n\n## Procedure\nRead the current project state, repair the bridge, and verify reconnection with a real MCP round trip. Never infer success from a local build alone.`;
+  const revisionContent = `# AIDE reconnect workflow\n\n## When to use\nWhen AIDE reconnect fails.\n\n## Procedure\nRead the current project state, repair the bridge, and verify reconnection with a real MCP round trip. Never infer success from a local build alone.`;
   const plan = JSON.parse((await client.callTool({
     name: "memhub_skill",
     arguments: {
       action: "plan", operation: "revise", skill_id: skillRecord.id,
-      version: "2.0.0", content: revisionContent, title: "atlas reconnect workflow",
+      version: "2.0.0", content: revisionContent, title: "AIDE reconnect workflow",
       tags: ["reconnect", "reusable"], note: "replace stale reconnect checks"
     }
   })).content[0].text);
@@ -3222,7 +3589,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(revisedWrite.body.sourceSkillId, reconnectArtifactId);
   assert.equal(revisedWrite.body.sourceSkillVersion, "2.0.0");
   assert.ok(revisedWrite.body.tags.includes(`revision-of:${skillRecord.id}`));
-  assert.equal(revisedWrite.body.namespace.projectId, "atlas");
+  assert.equal(revisedWrite.body.namespace.projectId, "aide");
   const oldLoad = await client.callTool({ name: "memhub_skill", arguments: { action: "load", skill_id: skillRecord.id } });
   assert.equal(oldLoad.isError, true, "superseded Skill cannot start another execution");
   assert.match(oldLoad.content[0].text, /archived or inactive/);
@@ -3276,81 +3643,81 @@ async function exerciseClient(client, conversationId, stateRoot) {
 
 }
 
-async function exerciseGoldenDistillationChain(client, stateRoot, conversationId, atlasL1EventId) {
+async function exerciseGoldenDistillationChain(client, stateRoot, conversationId, aideL1EventId) {
   const harnessA = `golden-a-${conversationId}`;
   const harnessB = `golden-b-${conversationId}`;
   const harnessGlobal = `golden-global-${conversationId}`;
   const parseTool = (result) => JSON.parse(result.content[0].text);
 
   const captures = await listCaptureEvents(stateRoot, "acct-test");
-  const atlasCapture = captures.find((item) => item.event_id === atlasL1EventId);
-  assert.ok(atlasCapture);
-  const atlasQueued = await enqueueDistillationJob({
+  const aideCapture = captures.find((item) => item.event_id === aideL1EventId);
+  assert.ok(aideCapture);
+  const aideQueued = await enqueueDistillationJob({
     stateRoot,
     accountId: "acct-test",
-    projectId: "atlas",
+    projectId: "aide",
     conversationId,
-    captures: [atlasCapture],
+    captures: [aideCapture],
     reason: "manual"
   });
-  assert.equal(atlasQueued.created, true);
-  const atlasNext = parseTool(await client.callTool({
+  assert.equal(aideQueued.created, true);
+  const aideNext = parseTool(await client.callTool({
     name: "memhub_distill",
-    arguments: { action: "next", kind: "l2", scope: "project", project: "atlas", source_harness: harnessA, lease_token_supported: true }
+    arguments: { action: "next", kind: "l2", scope: "project", project: "aide", source_harness: harnessA, lease_token_supported: true }
   }));
-  assert.equal(atlasNext.job.job_id, atlasQueued.job.job_id);
-  assert.ok(atlasNext.job.lease_token);
+  assert.equal(aideNext.job.job_id, aideQueued.job.job_id);
+  assert.ok(aideNext.job.lease_token);
   const missingToken = await client.callTool({
     name: "memhub_distill",
-    arguments: { action: "next", job_id: atlasNext.job.job_id, source_harness: harnessA }
+    arguments: { action: "next", job_id: aideNext.job.job_id, source_harness: harnessA }
   });
   assert.equal(missingToken.isError, true);
   assert.match(missingToken.content[0].text, /lease token is missing or stale/i);
   const renewed = parseTool(await client.callTool({
     name: "memhub_distill",
-    arguments: { action: "renew", job_id: atlasNext.job.job_id, source_harness: harnessA, lease_token: atlasNext.job.lease_token, lease_seconds: 600 }
+    arguments: { action: "renew", job_id: aideNext.job.job_id, source_harness: harnessA, lease_token: aideNext.job.lease_token, lease_seconds: 600 }
   }));
-  assert.equal(renewed.lease_token, atlasNext.job.lease_token);
+  assert.equal(renewed.lease_token, aideNext.job.lease_token);
   const wrongOwner = await client.callTool({
     name: "memhub_distill",
     arguments: {
       action: "submit",
-      job_id: atlasNext.job.job_id,
+      job_id: aideNext.job.job_id,
       content: "This write must be rejected before reaching Memory Core.",
       source_harness: "wrong-harness"
     }
   });
   assert.equal(wrongOwner.isError, true);
   assert.match(wrongOwner.content[0].text, /leased by another harness/i);
-  const atlasL2V1 = parseTool(await client.callTool({
+  const aideL2V1 = parseTool(await client.callTool({
     name: "memhub_distill",
     arguments: {
       action: "submit",
-      job_id: atlasNext.job.job_id,
-      content: "atlas timeline v1: the project binding was validated before memory changes.",
-      project_description: "atlas is an AI development environment focused on project-scoped orchestration and safe routing of work between harnesses.",
+      job_id: aideNext.job.job_id,
+      content: "AIDE timeline v1: the project binding was validated before memory changes.",
+      project_description: "AIDE is an AI development environment focused on project-scoped orchestration and safe routing of work between harnesses.",
       source_harness: harnessA,
-      lease_token: atlasNext.job.lease_token
+      lease_token: aideNext.job.lease_token
     }
   }));
-  assert.equal(atlasL2V1.kind, "l2");
-  assert.equal(atlasL2V1.next_layer_job.job.target, "l3");
+  assert.equal(aideL2V1.kind, "l2");
+  assert.equal(aideL2V1.next_layer_job.job.target, "l3");
   const derivedDryRun = parseTool(await client.callTool({
     name: "memhub_distill",
     arguments: {
       action: "reconcile_derived",
-      job_id: atlasNext.job.job_id,
-      project: "atlas"
+      job_id: aideNext.job.job_id,
+      project: "aide"
     }
   }));
   assert.equal(derivedDryRun.dry_run, true, "reconcile_derived must default to read-only");
   assert.equal(derivedDryRun.already_queued, true);
-  assert.equal(derivedDryRun.derived_job_id, atlasL2V1.next_layer_job.job.job_id);
+  assert.equal(derivedDryRun.derived_job_id, aideL2V1.next_layer_job.job.job_id);
   const foreignRepair = await client.callTool({
     name: "memhub_distill",
     arguments: {
       action: "reconcile_derived",
-      job_id: atlasNext.job.job_id,
+      job_id: aideNext.job.job_id,
       project: "nonexistent-project",
       dry_run: false
     }
@@ -3360,40 +3727,40 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
     name: "memhub_distill",
     arguments: {
       action: "reconcile_derived",
-      job_id: atlasNext.job.job_id,
+      job_id: aideNext.job.job_id,
       dry_run: false
     }
   });
   assert.equal(missingRepairProject.isError, true, "repair requires an explicit project");
-  const atlasAfterDistilledDescription = parseTool(await client.callTool({
+  const aideAfterDistilledDescription = parseTool(await client.callTool({
     name: "memmy_project_list",
-    arguments: { query: "atlas" }
-  })).projects.find((project) => project.project === "atlas");
-  assert.ok(atlasAfterDistilledDescription);
-  assert.match(atlasAfterDistilledDescription.description, /^atlas project used by MCP integration tests \((?:re)?verified\)\.$/);
-  assert.equal(atlasAfterDistilledDescription.descriptionSource, "manual");
-  assert.match(atlasAfterDistilledDescription.distilledDescription, /AI development environment focused on project-scoped orchestration/);
-  const atlasL2Id = atlasL2V1.memory.id;
-  const atlasL2WriteV1 = [...requests].reverse().find((entry) =>
-    entry.url === "/api/v1/memory/add" && entry.body?.layer === "L2" && entry.body?.namespace?.projectId === "atlas"
+    arguments: { query: "aide" }
+  })).projects.find((project) => project.project === "aide");
+  assert.ok(aideAfterDistilledDescription);
+  assert.match(aideAfterDistilledDescription.description, /^AIDE project used by MCP integration tests \((?:re)?verified\)\.$/);
+  assert.equal(aideAfterDistilledDescription.descriptionSource, "manual");
+  assert.match(aideAfterDistilledDescription.distilledDescription, /AI development environment focused on project-scoped orchestration/);
+  const aideL2Id = aideL2V1.memory.id;
+  const aideL2WriteV1 = [...requests].reverse().find((entry) =>
+    entry.url === "/api/v1/memory/add" && entry.body?.layer === "L2" && entry.body?.namespace?.projectId === "aide"
   );
-  assert.ok(atlasL2WriteV1);
+  assert.ok(aideL2WriteV1);
 
-  const atlasL3Next = parseTool(await client.callTool({
+  const aideL3Next = parseTool(await client.callTool({
     name: "memhub_distill",
-    arguments: { action: "next", kind: "l3", scope: "project", project: "atlas", source_harness: harnessA }
+    arguments: { action: "next", kind: "l3", scope: "project", project: "aide", source_harness: harnessA }
   }));
-  const atlasL3V1 = parseTool(await client.callTool({
+  const aideL3V1 = parseTool(await client.callTool({
     name: "memhub_distill",
     arguments: {
       action: "submit",
-      job_id: atlasL3Next.job.job_id,
-      content: "Within atlas, validate current state before changing deployment or routing configuration.",
+      job_id: aideL3Next.job.job_id,
+      content: "Within AIDE, validate current state before changing deployment or routing configuration.",
       source_harness: harnessA
     }
   }));
-  assert.equal(atlasL3V1.kind, "l3");
-  const atlasL3Id = atlasL3V1.memory.id;
+  assert.equal(aideL3V1.kind, "l3");
+  const aideL3Id = aideL3V1.memory.id;
 
   const betaProject = `beta-${conversationId}`;
   const createBetaPlan = parseTool(await client.callTool({
@@ -3422,7 +3789,7 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
       conversation_id: betaConversation,
       continuity_id: betaConversation,
       turn_id: `source-${betaConversation}`,
-      user_text: "Keep the second project evidence isolated from ATLAS."
+      user_text: "Keep the second project evidence isolated from AIDE."
     }
   }));
   const betaCommit = parseTool(await client.callTool({
@@ -3513,79 +3880,79 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
   );
   assert.ok(l4WriteV1);
 
-  const atlasOpenV2 = parseTool(await client.callTool({
+  const aideOpenV2 = parseTool(await client.callTool({
     name: "memmy_turn",
     arguments: {
       action: "open",
       conversation_id: conversationId,
       continuity_id: conversationId,
       turn_id: `source-${conversationId}-v2`,
-      user_text: "Update atlas with a second durable decision."
+      user_text: "Update AIDE with a second durable decision."
     }
   }));
   await client.callTool({
     name: "memmy_turn",
     arguments: {
       action: "commit",
-      event_id: atlasOpenV2.turn.event_id,
+      event_id: aideOpenV2.turn.event_id,
       conversation_id: conversationId,
       continuity_id: conversationId,
       turn_id: `source-${conversationId}-v2`,
-      assistant_text: "The second decision is now part of atlas current truth."
+      assistant_text: "The second decision is now part of AIDE current truth."
     }
   });
-  const atlasCaptureV2 = (await listCaptureEvents(stateRoot, "acct-test")).find((item) => item.event_id === atlasOpenV2.turn.event_id);
-  assert.ok(atlasCaptureV2);
-  const atlasQueuedV2 = await enqueueDistillationJob({
+  const aideCaptureV2 = (await listCaptureEvents(stateRoot, "acct-test")).find((item) => item.event_id === aideOpenV2.turn.event_id);
+  assert.ok(aideCaptureV2);
+  const aideQueuedV2 = await enqueueDistillationJob({
     stateRoot,
     accountId: "acct-test",
-    projectId: "atlas",
+    projectId: "aide",
     conversationId,
-    captures: [atlasCaptureV2],
+    captures: [aideCaptureV2],
     reason: "manual"
   });
-  const atlasL2NextV2 = parseTool(await client.callTool({
+  const aideL2NextV2 = parseTool(await client.callTool({
     name: "memhub_distill",
-    arguments: { action: "next", kind: "l2", scope: "project", project: "atlas", source_harness: harnessA }
+    arguments: { action: "next", kind: "l2", scope: "project", project: "aide", source_harness: harnessA }
   }));
-  assert.equal(atlasL2NextV2.job.job_id, atlasQueuedV2.job.job_id);
-  const atlasL2V2 = parseTool(await client.callTool({
+  assert.equal(aideL2NextV2.job.job_id, aideQueuedV2.job.job_id);
+  const aideL2V2 = parseTool(await client.callTool({
     name: "memhub_distill",
     arguments: {
       action: "submit",
-      job_id: atlasL2NextV2.job.job_id,
-      content: "atlas timeline v2: preserve the original validation decision and append the second durable decision as current truth.",
-      project_description: "atlas coordinates project-aware AI development work while preserving explicit workspace ownership, routing boundaries, and durable current state.",
+      job_id: aideL2NextV2.job.job_id,
+      content: "AIDE timeline v2: preserve the original validation decision and append the second durable decision as current truth.",
+      project_description: "AIDE coordinates project-aware AI development work while preserving explicit workspace ownership, routing boundaries, and durable current state.",
       source_harness: harnessA
     }
   }));
-  assert.equal(atlasL2V2.memory.id, atlasL2Id);
-  const atlasL2Writes = requests.filter((entry) =>
-    entry.url === "/api/v1/memory/add" && entry.body?.layer === "L2" && entry.body?.namespace?.projectId === "atlas"
+  assert.equal(aideL2V2.memory.id, aideL2Id);
+  const aideL2Writes = requests.filter((entry) =>
+    entry.url === "/api/v1/memory/add" && entry.body?.layer === "L2" && entry.body?.namespace?.projectId === "aide"
   );
-  const atlasL2WriteV2 = atlasL2Writes.at(-1);
-  assert.notEqual(atlasL2WriteV1.body.requestId, atlasL2WriteV2.body.requestId);
+  const aideL2WriteV2 = aideL2Writes.at(-1);
+  assert.notEqual(aideL2WriteV1.body.requestId, aideL2WriteV2.body.requestId);
 
-  const atlasL3NextV2 = parseTool(await client.callTool({
+  const aideL3NextV2 = parseTool(await client.callTool({
     name: "memhub_distill",
-    arguments: { action: "next", kind: "l3", scope: "project", project: "atlas", source_harness: harnessA }
+    arguments: { action: "next", kind: "l3", scope: "project", project: "aide", source_harness: harnessA }
   }));
-  const atlasL3V2 = parseTool(await client.callTool({
+  const aideL3V2 = parseTool(await client.callTool({
     name: "memhub_distill",
     arguments: {
       action: "submit",
-      job_id: atlasL3NextV2.job.job_id,
-      content: "Within atlas, validate current state first and preserve durable decisions as the project evolves.",
+      job_id: aideL3NextV2.job.job_id,
+      content: "Within AIDE, validate current state first and preserve durable decisions as the project evolves.",
       source_harness: harnessA
     }
   }));
-  assert.equal(atlasL3V2.memory.id, atlasL3Id);
-  assert.equal(atlasL3V2.next_layer_job.job.target, "l4");
+  assert.equal(aideL3V2.memory.id, aideL3Id);
+  assert.equal(aideL3V2.next_layer_job.job.target, "l4");
   const staleL4Repair = await client.callTool({
     name: "memhub_distill",
     arguments: {
       action: "reconcile_l4",
-      job_id: atlasL3Next.job.job_id,
+      job_id: aideL3Next.job.job_id,
       dry_run: false
     }
   });
@@ -3613,12 +3980,14 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
   assert.equal(memoryById.get(l4IdV1).version >= 2, true);
 
   return {
-    atlasL2Id,
-    atlasL2Ref: atlasL2V2.result_evidence_ref,
-    atlasL3Id,
-    atlasL3Ref: atlasL3V2.result_evidence_ref,
+    aideL2Id,
+    aideL2Ref: aideL2V2.result_evidence_ref,
+    aideL3Id,
+    aideL3Ref: aideL3V2.result_evidence_ref,
     betaL3Id,
-    betaL3Ref: betaL3.result_evidence_ref
+    betaL3Ref: betaL3.result_evidence_ref,
+    l4Id: l4V2.memory.id,
+    l4Ref: l4V2.result_evidence_ref
   };
 }
 

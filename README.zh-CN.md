@@ -35,6 +35,7 @@ Memhub 不只回答“该记住什么”，还明确回答：
 - **哪个项目可以使用？** 先确定项目边界，再做检索；其他项目的业务记忆不会因为“很相似”就混进来。
 - **这条记忆从哪里来？** 长期记忆保留回到 L1 原始对话的 evidence / provenance。
 - **模型到底应该拿多少上下文？** Retrieval 只在合法候选集里排序，再输出有预算的 Context Capsule。
+- **这个项目是怎么一路演化到现在的？** Project State 以 canonical L2 为唯一主轴，把当前 head、并行 workstream、版本和历史状态整理成每个项目自己的状态视图，而不是再建立一套状态真源。
 - **哪些内容应该是可执行能力？** 可复用流程进入 Skill，而不是伪装成第五层记忆。
 
 ## 记忆模型
@@ -151,6 +152,8 @@ Server Edition 使用部署时配置的认证 MCP 地址。仓库内置的 [Agen
 “把‘完成 Windows 安装测试’加入这个项目的 Todo。”
 “过去一周这个项目改了什么？”
 “给我看这条项目规则来自哪些证据。”
+“用这份完整正文替换项目 Architecture；写入前把全文给我确认。”
+“把这条长期规则加入 L3；先把合并后的完整 L3 给我看，确认后再写。”
 “在另一台机器继续使用同一个 Memhub 账号。”
 ```
 
@@ -158,7 +161,8 @@ Server Edition 使用部署时配置的认证 MCP 地址。仓库内置的 [Agen
 
 - `memmy_context`：受预算约束的账号/项目召回与 Skill candidate；
 - `memmy_turn`：L1 对话生命周期；
-- `memmy_project` / `memmy_project_list` / `memmy_project_manage`：项目解析与生命周期；
+- `memhub_memory`：按 exact evidenceRef 读取 L1/L2/L3/L4，并承载用户明确授权的 L3/L4 完整替换；
+- `memmy_project` / `memmy_project_list` / `memmy_project_manage`：项目解析、生命周期和受控 Project Architecture；
 - `memhub_todo`：项目 Todo；
 - `memhub_branch`：项目内部工作流上下文；
 - `memhub_skill`：Skill 加载、telemetry、修订与退役；
@@ -171,9 +175,20 @@ Server Edition 使用部署时配置的认证 MCP 地址。仓库内置的 [Agen
 
 - **Overview / Projects**：项目范围、Current Truth、Todo；
 - **L1 / L2 / L3 / L4**：原始证据、时间线、项目长期知识、跨项目画像；
+- **Project State**：L2-first 的项目演进视图。横向是时间，纵向是并行 workstream，并明确显示 canonical L2 head；exact revision、evidence 和 pending Todo 只做下钻，不形成第二套状态存储；
 - **Skills**：可复用流程与执行状态；
 - **Processing**：蒸馏与运行状态；
 - **Admin**：账号/项目治理与高影响操作。
+
+Project State 由 canonical L2 与其 exact revision ledger 派生。浏览器保留完整项目视图；可选的 Archify lifecycle export 只是一份更精简、可丢弃的沟通快照，不拥有项目状态，也不会写回 Memory Core。
+
+### 受控 Project Architecture 与用户直接规则
+
+Project Architecture 与长期记忆分开管理，只承载稳定系统结构、ownership、source of truth、接口和硬约束。项目发生过什么归 L2，项目长期工作规则归 L3，跨项目稳定规则/画像归 L4，尚未完成的事项归 Project Todo。
+
+Architecture 替换采用 fail-closed 流程：`memmy_project architecture_plan` 返回完整的最终 canonical 正文，模型必须把全文展示给用户；只有用户明确批准这份精确计划后，才能调用 `architecture_execute`。Memhub 的可写 canonical Architecture 存在自己的私有状态目录中；项目仓库里的 Architecture 文件与旧 `normify-*` 只作为只读 discovery / migration source。修改历史可审计；回滚也必须作为一次新的完整 replacement 重新展示、确认、执行，而不是静默倒退文件。
+
+用户明确提出新增或修改 L3/L4 规则时，使用同样的全文确认原则。`memhub_memory plan` 先生成合并后的完整 L3/L4 正文，模型必须逐字完整展示，再等待用户在新的对话回合明确确认；这个确认回合会先作为 L1 证据保存，然后 `memhub_memory execute` 才能提交。已有 L3/L4 会用 exact revision 做并发 fencing，因此旧授权不能覆盖后来发生的新修改。这条用户直接 authority 路径也不会自动把 L3 推升为 L4。
 
 [公开产品官网](https://service-1.example.com/)与
 [GitHub Pages 静态镜像](https://phsanqi.github.io/Memhub/)提供产品介绍和文档，
@@ -188,6 +203,7 @@ Server Edition 使用部署时配置的认证 MCP 地址。仓库内置的 [Agen
 - Project Router 先做范围治理，再进入 Retrieval；相关性不能扩大权限边界。
 - L4 只接受跨项目稳定证据，不用于推断敏感属性。
 - 破坏性项目操作和 Skill 修订/退役使用显式授权流程。
+- Project Architecture 与用户直接声明的 L3/L4 替换必须先完整展示最终正文，再由用户明确授权；过期或并发变更后的计划会 fail-closed。
 
 进一步阅读：[隐私边界](docs/architecture/privacy-boundary.md)、[身份与设备](docs/architecture/identity-and-devices.md)、[远程认证](docs/operations/remote-auth.md)。
 

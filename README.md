@@ -36,6 +36,7 @@ Most AI memory systems answer “what should I remember?” Memhub also answers:
 - **Which project may use it?** Project boundaries are resolved before retrieval. Unrelated project memory is not mixed into the current task.
 - **Where did it come from?** Durable memory keeps evidence and provenance back to original L1 turns.
 - **How much context should the model receive?** Retrieval ranks only legal candidates and emits a bounded Context Capsule.
+- **How did this project evolve?** Project State turns canonical L2 chronology into a per-project view of the current head, parallel workstreams, versions, and historical state without creating a second source of truth.
 - **What should remain executable instead of becoming prose memory?** Reusable procedures live as Skills, separate from the L1–L4 memory depth.
 
 ## Memory model
@@ -153,6 +154,8 @@ Server Edition exposes the authenticated MCP endpoint configured for your deploy
 “Add ‘finish the Windows installer test’ to this project's Todo.”
 “What changed in this project over the last week?”
 “Show the evidence behind this project rule.”
+“Replace this project's Architecture with this complete version; show me the full text before writing it.”
+“Add this durable project rule to L3; show me the complete resulting L3 and wait for my confirmation.”
 “Use the same Memhub account on my other machine.”
 ```
 
@@ -160,7 +163,8 @@ The model-facing MCP surface includes:
 
 - `memmy_context` — bounded account/project recall and Skill candidates;
 - `memmy_turn` — L1 turn lifecycle;
-- `memmy_project`, `memmy_project_list`, `memmy_project_manage` — project resolution and lifecycle;
+- `memhub_memory` — exact L1/L2/L3/L4 hydration plus explicitly authorized L3/L4 replacement;
+- `memmy_project`, `memmy_project_list`, `memmy_project_manage` — project resolution, lifecycle, and governed Project Architecture;
 - `memhub_todo` — first-class project Todos;
 - `memhub_branch` — project-local workstream context;
 - `memhub_skill` — Skill load, telemetry, revision and retirement;
@@ -173,9 +177,20 @@ The Web Workspace provides:
 
 - **Overview / Projects** — scope, Current Truth and Todos;
 - **L1 / L2 / L3 / L4** — evidence, timeline, durable project knowledge and cross-project profile;
+- **Project State** — an L2-first project evolution view: time runs horizontally, parallel workstreams run vertically, and the canonical L2 head remains explicit. Exact revisions, evidence, and pending Todos stay in drill-down rather than becoming a second state store;
 - **Skills** — reusable procedures and execution state;
 - **Processing** — distillation and runtime state;
 - **Admin** — account/project governance and high-impact operations.
+
+Project State is derived from canonical L2 plus its exact revision ledger. The browser keeps the complete project view. Optional Archify lifecycle export is a disposable communication artifact with a smaller representative snapshot; it never owns or writes project state.
+
+### Governed Project Architecture and direct user rules
+
+Project Architecture is separate from project memory. It is reserved for stable structure, ownership, source-of-truth declarations, interfaces, and hard constraints. Project history stays in L2, durable project working rules stay in L3, cross-project user rules/profile stay in L4, and unfinished work stays in Project Todo.
+
+Architecture replacement is deliberately fail-closed: `memmy_project architecture_plan` returns the complete proposed canonical document, the model must show that full text to the user, and `architecture_execute` is allowed only after explicit approval of that exact plan. Memhub stores the writable canonical copy inside its private state root; repository Architecture files and legacy `normify-*` documents remain read-only discovery/migration sources. Architecture history is auditable and rollback is performed as a new reviewed replacement rather than an invisible rewind.
+
+Explicit user-authored L3/L4 changes use the same review principle. `memhub_memory plan` prepares the complete resulting L3 or L4 body. The model must show it in full, then wait for a new explicit confirmation turn. That confirmation is captured as L1 evidence before `memhub_memory execute` can commit the replacement. Existing L3/L4 state is fenced by an exact revision reference, so a stale approval cannot overwrite a newer concurrent update. This direct-authority path does not auto-promote L3 into L4.
 
 The [public product website](https://service-1.example.com/) and
 [GitHub Pages mirror](https://phsanqi.github.io/Memhub/) document the
@@ -191,6 +206,7 @@ authentication boundary.
 - Project routing is enforced before retrieval; relevance cannot broaden scope.
 - L4 requires cross-project evidence and must not be used to infer sensitive traits.
 - Destructive project and Skill lifecycle changes use explicit authorization contracts.
+- Project Architecture and direct user-authored L3/L4 replacements require full-text review before explicit authorization; stale plans fail closed.
 
 Read [Privacy boundary](docs/architecture/privacy-boundary.md), [Identity and devices](docs/architecture/identity-and-devices.md), and [Remote authentication](docs/operations/remote-auth.md).
 

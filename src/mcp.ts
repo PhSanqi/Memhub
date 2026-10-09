@@ -36,6 +36,7 @@ import {
 } from "./capture.js";
 import { captureSessionId } from "./capture-ingest.js";
 import { handleCaptureHttpRequest } from "./capture-http.js";
+import { hydrateMemoryEvidence, recordMemoryHydration } from "./memory-hydration.js";
 import { reconcileFrozenCaptureIngests } from "./capture-recovery.js";
 import {
   auditDistillationControl,
@@ -85,6 +86,16 @@ import {
   reconcileCompletedL2DerivedJob,
   reconcileCurrentL4DerivedJob
 } from "./distillation-derived-recovery.js";
+import { planDistillationConsolidation } from "./distillation-consolidation.js";
+import {
+  commitArchitectureRevision,
+  listArchitectureRevisions,
+  prepareArchitectureRevision
+} from "./architecture-history.js";
+import {
+  executeUserAuthorizedMemory,
+  planUserAuthorizedMemory
+} from "./user-authorized-memory.js";
 
 const VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 const projectMutationAuthorizations = new Map<string, {
@@ -105,6 +116,14 @@ const skillMutationAuthorizations = new Map<string, {
   note: string;
   expiresAt: number;
 }>();
+const architectureMutationAuthorizations = new Map<string, {
+  accountId: string;
+  projectId: string;
+  expectedPath: string;
+  expectedFingerprint: string;
+  content: string;
+  expiresAt: number;
+}>();
 
 export interface MemhubMcpOptions extends MemhubRuntimeOptions {}
 
@@ -117,7 +136,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   const server = new McpServer({
     name: "memhub",
     version: VERSION,
-    description: "Private account/project-scoped long-term memory and project routing. Whenever Memhub is explicitly mentioned or invoked, first call memmy_context with the current request and the current workspace_project/project evidence; include a stable conversation_id when the Harness exposes one. Project-scoped tools should carry workspace_project or project from the current turn. A conversation binding is only a fallback when current-turn workspace/project evidence is unavailable. If explicit project and workspace_project disagree after canonical resolution, Memhub rejects the operation instead of guessing. If the transport does not expose a stable conversation_id, do not invent one. If a project name is unknown, case-variant, or merely similar, call memmy_project_list and compare canonical slug, aliases, and description before creating/binding. Project mutations use memmy_project_manage plan -> explicit user authorization -> execute. Project todos are first-class state. Before the final answer, persist only genuinely durable new facts/decisions/preferences/corrections rather than raw chat noise."
+    description: "Private account/project-scoped long-term memory and project routing. Whenever Memhub is explicitly mentioned or invoked, first call memmy_context with the current request and the current workspace_project/project evidence; include a stable conversation_id when the Harness exposes one. Project-scoped tools should carry workspace_project or project from the current turn. A conversation binding is only a fallback when current-turn workspace/project evidence is unavailable. If explicit project and workspace_project disagree after canonical resolution, Memhub rejects the operation instead of guessing. If the transport does not expose a stable conversation_id, do not invent one. If a project name is unknown, case-variant, or merely similar, call memmy_project_list and compare canonical slug, aliases, and description before creating/binding. Project Registry mutations use memmy_project_manage plan -> explicit user authorization -> execute. Project Architecture replacements use memmy_project architecture_plan -> full-text user review -> architecture_execute. Explicit user-authored L3/L4 changes use memhub_memory plan -> full-text user review -> capture the confirmation as L1 -> execute. Project todos are first-class state. Before the final answer, persist only genuinely durable new facts/decisions/preferences/corrections rather than raw chat noise."
   });
   const resultTransport = new JsonResultTransport(stateRoot, runtime.accountId);
   const jsonResult = (value: unknown) => inlineJsonResult(resultTransport.wrap(value));
@@ -330,6 +349,18 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       limit: optionalInteger(args.limit)
     });
     await attachExactEvidenceRefsToContext(stateRoot, runtime, capsule);
+    for (const item of [...capsule.globalMemory, ...capsule.projectMemory]) {
+      if (!item.evidenceRef) continue;
+      item.provenance = {
+        ...(item.provenance ?? {}),
+        hydration: {
+          contract: "progressive-disclosure-v1",
+          tool: "memhub_memory",
+          action: "load",
+          evidence_ref: item.evidenceRef
+        }
+      };
+    }
     if (capsule.reusableSkills.length > 0) {
       capsule.reusableSkills = await Promise.all(capsule.reusableSkills.map(async (item) => {
         const summary = await skillTelemetrySummary(stateRoot, runtime.accountId, item.id);
@@ -396,6 +427,13 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     return jsonResult({
       ...capsule,
       recentSession,
+      progressiveDisclosure: {
+        version: "progressive-disclosure-v1",
+        discover: "memmy_context",
+        contextualize: "memhub_memory action=load evidence_ref=<exact-ref>",
+        hydrateSkill: "memhub_skill action=load skill_id=<skill-id>",
+        rule: "Load full content only for the selected exact revision or Skill; do not eagerly hydrate all recalled items."
+      },
       projectCandidates: projectCandidates.map((project) => ({
         project: project.projectId,
         name: project.name,
@@ -409,6 +447,77 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
           : {})
       }))
     });
+  });
+
+  server.registerTool("memhub_memory", {
+    description: "Progressive-disclosure Memory read + explicit-user-authorized L3/L4 governance. action=load hydrates one exact evidenceRef (L1/L2/L3/L4) returned by memmy_context. action=plan prepares a full canonical L3 or L4 replacement; the model MUST show proposed_content to the user in full and ask for explicit confirmation. After the user confirms, capture that confirmation as L1 and call action=execute with the one-time authorization_id plus confirmation_evidence_ref. L3 is project-scoped; L4 is account-scoped. This direct-authority path never auto-promotes between layers and never replaces Todo/Project Architecture/Skill state.",
+    inputSchema: fromJsonSchema<Record<string, unknown>>({
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["load", "plan", "execute"] },
+        evidence_ref: { type: "string", description: "load: exact evidenceRef returned by memmy_context; do not reconstruct it." },
+        kind: { type: "string", enum: ["l3", "l4"], description: "plan only. L3=project durable rules/experience; L4=account-wide durable profile/rules." },
+        content: { type: "string", description: "plan only. The complete final canonical L3/L4 body, not a patch or append fragment." },
+        base_evidence_ref: { type: "string", description: "plan only. Exact current L3/L4 evidenceRef from memmy_context. Required whenever that layer already has active memory." },
+        project: { type: "string", description: "L3 plan only: explicit project slug/name/alias." },
+        workspace_project: { type: "string", description: "L3 plan only: current workspace project; disagreement with project is rejected." },
+        note: { type: "string", description: "plan only: short reason for the user-authorized change." },
+        authorization_id: { type: "string", description: "execute only: one-time id returned by the exact plan the user approved." },
+        confirmation_evidence_ref: { type: "string", description: "execute only: exact l1:<event-id> for the user's explicit confirmation turn." }
+      },
+      required: ["action"],
+      additionalProperties: false
+    } as JsonSchemaType)
+  }, async (args) => {
+    const action = requiredString(args.action, "action");
+    if (action === "load") {
+      const item = await hydrateMemoryEvidence({
+        stateRoot,
+        accountId: runtime.accountId,
+        evidenceRef: requiredString(args.evidence_ref, "evidence_ref")
+      });
+      const telemetry = await recordMemoryHydration({ stateRoot, accountId: runtime.accountId, item });
+      return jsonResult({
+        item,
+        telemetry,
+        progressive_disclosure: {
+          hydrated: true,
+          estimated_tokens: item.estimated_tokens,
+          source_of_truth: item.revision_id ? "distillation-revision-ledger" : "durable-l1-capture"
+        }
+      });
+    }
+    if (action === "plan") {
+      const kind = requiredString(args.kind, "kind");
+      if (kind !== "l3" && kind !== "l4") throw new TypeError("kind must be l3 or l4");
+      let projectId: string | null = null;
+      if (kind === "l3") {
+        projectId = (await resolveToolScope(runtime, {
+          scope: "project",
+          project: optionalString(args.project),
+          workspaceProject: optionalString(args.workspace_project)
+        })).projectId;
+        if (!projectId) throw new Error("L3 plan requires a resolved project");
+      }
+      return jsonResult(await planUserAuthorizedMemory({
+        stateRoot,
+        runtime,
+        kind,
+        projectId,
+        content: requiredString(args.content, "content"),
+        baseEvidenceRef: optionalString(args.base_evidence_ref),
+        note: optionalString(args.note)
+      }));
+    }
+    if (action === "execute") {
+      return jsonResult(await executeUserAuthorizedMemory({
+        stateRoot,
+        runtime,
+        authorizationId: requiredString(args.authorization_id, "authorization_id"),
+        confirmationEvidenceRef: requiredString(args.confirmation_evidence_ref, "confirmation_evidence_ref")
+      }));
+    }
+    throw new TypeError("action must be load, plan, or execute");
   });
 
   server.registerTool("memhub_branch", {
@@ -659,7 +768,8 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         skillId,
         executionId: optionalString(args.execution_id),
         executor: optionalString(args.executor) ?? runtime.source.platform,
-        projectId: skill.projectId
+        projectId: skill.projectId,
+        estimatedTokens: Math.max(1, Math.ceil(Buffer.byteLength(skill.body, "utf8") / 4))
       });
       return jsonResult({
         skill_id: skillId,
@@ -667,6 +777,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         metadata: skillSelectionMetadataFromBody(skill.body, {
           projectId: skill.projectId,
           tags: skill.tags,
+          title: skill.title,
           ...(before.executions > 0 ? { telemetryReliability: before.reliability } : {})
         }),
         content: skill.body,
@@ -697,11 +808,11 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   });
 
   server.registerTool("memhub_distill", {
-    description: "统一的 L2/L3/L4/Skill 蒸馏入口。L2=项目发展时间线，并可同时产出 evidence-backed project_description；L3=项目内用户长期规则/经验/偏好，L4=跨项目用户画像，Skill=正交的可执行流程。语义整理由当前 Harness 模型完成；Memhub 负责证据边界、scope、版本、provenance 与提交。人工项目描述优先于蒸馏描述。recover_ingest 仅显式恢复指定 event_id 的完整未摄取 Capture；reconcile_derived 仅以已完成 L2 精确补建缺失 L3 队列；reconcile_l4 仅以当前各项目最新已完成 L3 精确补建缺失 L4 队列；两者默认 dry_run。",
+    description: "统一的 L2/L3/L4/Skill 蒸馏入口。L2=项目发展时间线，并可同时产出 evidence-backed project_description；L3=项目内用户长期规则/经验/偏好，L4=跨项目用户画像，Skill=正交的可执行流程。语义整理由当前 Harness 模型完成；Memhub 负责证据边界、scope、版本、provenance 与提交。consolidate 是 EverOS-style reflection 的只读计划：选择历史 revision → merge/re-extract → 用现有 canonical artifact 提交 replacement，不新增记忆层。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
-        action: { type: "string", enum: ["audit", "discover", "recover_ingest", "reconcile_derived", "reconcile_l4", "next", "renew", "submit", "skip"], description: "audit 只读审计 durable capture/Core/job/Bridge 缺口；discover 扫描已摄取完整 L1；recover_ingest 按 event_id 显式修复未摄取 Capture；reconcile_derived 按已完成 L2 job_id+明确项目补建 L3 队列；reconcile_l4 按当前最新 L3 集合补建账户级 L4 队列；两者默认只读；next 领取；renew 续租；submit 提交；skip 证据不足。" },
+        action: { type: "string", enum: ["audit", "discover", "consolidate", "recover_ingest", "reconcile_derived", "reconcile_l4", "next", "renew", "submit", "skip"], description: "audit 只读审计；discover 扫描 L1；consolidate 为 L2/L3 生成 select→merge→re-extract→supersede 只读计划；recover/reconcile 处理缺口；next/renew/submit/skip 处理正式蒸馏。" },
         event_id: { type: "string", description: "recover_ingest 必填的完整稳定 Capture event_id，仅恢复此事件" },
         kind: { type: "string", enum: ["l2", "l3", "l4", "skill"], description: "目标层。next 可省略以领取任意待办；submit 必须与 job target 一致。" },
         content: { type: "string", description: "完整目标层内容" },
@@ -740,6 +851,21 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         stateRoot,
         runtime,
         bridgeRoot: process.env.MEMHUB_BRIDGE_HOME ?? null
+      }));
+    }
+    if (action === "consolidate") {
+      const kind = requiredString(args.kind, "kind");
+      if (kind !== "l2" && kind !== "l3") throw new TypeError("consolidate kind must be l2 or l3");
+      const { projectId } = await resolveToolScope(runtime, {
+        scope: "project",
+        project: requiredString(args.project, "project"),
+        workspaceProject: optionalString(args.workspace_project)
+      });
+      return jsonResult(await planDistillationConsolidation({
+        stateRoot,
+        runtime,
+        kind,
+        projectId: projectId!
       }));
     }
     if (action === "recover_ingest") {
@@ -818,7 +944,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         sourceHarness, leaseToken
       }));
     }
-    if (action !== undefined && action !== "submit") throw new TypeError("action must be audit, discover, recover_ingest, reconcile_derived, reconcile_l4, next, renew, submit, or skip");
+    if (action !== undefined && action !== "submit") throw new TypeError("action must be audit, discover, consolidate, recover_ingest, reconcile_derived, reconcile_l4, next, renew, submit, or skip");
     return jsonResult(await submitDistillationControl({
       args, stateRoot, runtime, sourceHarness, leaseToken,
       resolveToolScope, validateDistillationEvidenceChain
@@ -1160,15 +1286,18 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   });
 
   server.registerTool("memmy_project", {
-    description: "兼容项目上下文工具：列出、查看、绑定或解除当前会话项目，也可只读现有项目架构文件。新的项目发现/消歧优先使用 memmy_project_list；项目修改使用 memmy_project_manage。action=current 在有稳定 conversation_id 时读取持久 binding；没有 conversation_id 时不会报错，也不会伪造会话身份，可用显式 project 做一次 canonical resolve，否则返回 binding_available=false。Memhub 被提及或调用时应先完成 memmy_context；若本轮有明确项目/workspace 证据，以本轮证据或 memmy_context.resolvedProjectId 为准，不要凭旧绑定或模型猜测项目。",
+    description: "项目上下文 + Project Architecture。action=current 在没有 conversation_id 时不会报错或伪造会话身份；本轮明确 project/workspace 优先。list/current/bind/unbind 管项目解析；architecture 只读当前架构；architecture_plan 准备完整 canonical Architecture replacement，必须把 proposed_content 全文展示给用户并取得明确授权后才能 architecture_execute；architecture_history 读取本地审计/回滚历史。Architecture 只承载稳定结构、ownership、SOT、接口与硬约束；动态进度放 L2，Todo 放 memhub_todo，项目 metadata 用 memmy_project_manage。Legacy normify-* 永远只读。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
-        action: { type: "string", enum: ["list", "current", "bind", "unbind", "architecture"] },
+        action: { type: "string", enum: ["list", "current", "bind", "unbind", "architecture", "architecture_plan", "architecture_execute", "architecture_history"] },
         conversation_id: { type: "string" },
         project: { type: "string" },
         workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 不一致时拒绝操作" },
-        query: { type: "string", description: "architecture 时用于选择最相关的架构模块" }
+        query: { type: "string", description: "architecture 时用于选择最相关的架构模块" },
+        content: { type: "string", description: "architecture_plan：完整最终 canonical Architecture 正文，不是 patch/append 片段。" },
+        authorization_id: { type: "string", description: "architecture_execute：用户明确批准对应 plan 后使用的一次性 authorization id。" },
+        limit: { type: "integer", minimum: 1, maximum: 100, description: "architecture_history 返回条数，默认 20。" }
       },
       required: ["action"],
       additionalProperties: false
@@ -1239,6 +1368,121 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       return jsonResult({
         project: canonical,
         architecture: await runtime.router.projectArchitecture(runtime.accountId, canonical, query)
+      });
+    }
+    if (action === "architecture_history") {
+      const explicitEvidence = await resolveExplicitProjectEvidence(runtime, {
+        project: optionalString(args.project),
+        workspaceProject: optionalString(args.workspace_project)
+      });
+      if (!explicitEvidence.projectId) throw new TypeError("architecture_history requires project or workspace_project");
+      return jsonResult({
+        project: explicitEvidence.projectId,
+        revisions: await listArchitectureRevisions({
+          stateRoot,
+          accountId: runtime.accountId,
+          projectId: explicitEvidence.projectId,
+          limit: optionalInteger(args.limit) ?? 20
+        }),
+        rollback: "To roll back, take the desired revision's before_content/proposed_content, create a fresh architecture_plan with that complete text, show it to the user, then execute only after approval."
+      });
+    }
+    if (action === "architecture_plan") {
+      const explicitEvidence = await resolveExplicitProjectEvidence(runtime, {
+        project: optionalString(args.project),
+        workspaceProject: optionalString(args.workspace_project)
+      });
+      if (!explicitEvidence.projectId) throw new TypeError("architecture_plan requires project or workspace_project");
+      const canonical = explicitEvidence.projectId;
+      const current = await runtime.architecture.inspectProjectArchitecture({
+        accountId: runtime.accountId,
+        projectId: canonical
+      });
+      if (!current) {
+        throw new Error(`no canonical local workspace found for Project Architecture: ${canonical}`);
+      }
+      const content = normalizeArchitecturePlanContent(requiredString(args.content, "content"));
+      if (normalizeArchitecturePlanContent(current.content || "# empty") === content && current.exists) {
+        throw new TypeError("Project Architecture plan has no effective content change");
+      }
+      const authorizationId = randomUUID();
+      const expiresAt = Date.now() + 24 * 60 * 60_000;
+      architectureMutationAuthorizations.set(authorizationId, {
+        accountId: runtime.accountId,
+        projectId: canonical,
+        expectedPath: current.path,
+        expectedFingerprint: current.fingerprint,
+        content,
+        expiresAt
+      });
+      return jsonResult({
+        status: "awaiting_user_authorization",
+        operation: "replace_project_architecture",
+        project: canonical,
+        path: current.path,
+        existing: current.exists,
+        current_fingerprint: current.fingerprint,
+        proposed_content: content,
+        proposed_sha256: createHash("sha256").update(content, "utf8").digest("hex"),
+        impact: "Replace the canonical Project Architecture document only. This does not modify L1/L2/L3/L4, Todo, Project Registry metadata, or legacy normify-* files.",
+        authorization_id: authorizationId,
+        expires_at: new Date(expiresAt).toISOString(),
+        instructions: "Show proposed_content to the user in full and call architecture_execute only after explicit approval of this exact replacement."
+      });
+    }
+    if (action === "architecture_execute") {
+      const authorizationId = requiredString(args.authorization_id, "authorization_id");
+      const plan = architectureMutationAuthorizations.get(authorizationId);
+      if (!plan || plan.accountId !== runtime.accountId) throw new Error("invalid or already-used Project Architecture authorization");
+      architectureMutationAuthorizations.delete(authorizationId);
+      if (plan.expiresAt < Date.now()) throw new Error("Project Architecture authorization expired; create a fresh plan");
+      const explicitEvidence = await resolveExplicitProjectEvidence(runtime, {
+        project: optionalString(args.project) ?? plan.projectId,
+        workspaceProject: optionalString(args.workspace_project)
+      });
+      if (explicitEvidence.projectId !== plan.projectId) throw new Error("Project Architecture authorization scope changed; create a fresh plan");
+      const current = await runtime.architecture.inspectProjectArchitecture({ accountId: runtime.accountId, projectId: plan.projectId });
+      if (!current || current.path !== plan.expectedPath || current.fingerprint !== plan.expectedFingerprint) {
+        throw new Error("Project Architecture changed after plan; create a fresh plan and ask for approval again");
+      }
+      const revision = await prepareArchitectureRevision({
+        stateRoot,
+        accountId: runtime.accountId,
+        projectId: plan.projectId,
+        path: current.path,
+        beforeExists: current.exists,
+        beforeFingerprint: current.fingerprint,
+        beforeContent: current.content,
+        proposedContent: plan.content
+      });
+      const written = await runtime.architecture.writeProjectArchitecture({
+        accountId: runtime.accountId,
+        projectId: plan.projectId,
+        expectedPath: plan.expectedPath,
+        expectedFingerprint: plan.expectedFingerprint,
+        content: plan.content
+      });
+      let audit;
+      try {
+        audit = await commitArchitectureRevision({
+          stateRoot,
+          accountId: runtime.accountId,
+          projectId: plan.projectId,
+          revisionId: revision.revision_id,
+          afterFingerprint: written.after.fingerprint
+        });
+      } catch (error) {
+        throw new Error(`Project Architecture was written but audit commit failed; revision ${revision.revision_id} remains prepared for reconciliation: ${String(error)}`);
+      }
+      return jsonResult({
+        ok: true,
+        operation: "replace_project_architecture",
+        project: plan.projectId,
+        path: written.after.path,
+        fingerprint: written.after.fingerprint,
+        revision_id: audit.revision_id,
+        history_preserved: true,
+        rollback_available: true
       });
     }
     throw new TypeError(`unsupported memmy_project action: ${action}`);
@@ -2523,6 +2767,12 @@ function stringArray(value: unknown): string[] | undefined {
 function uniqueStrings(values: string[]): string[] | undefined {
   const normalized = values.map((value) => value.trim()).filter(Boolean);
   return normalized.length ? [...new Set(normalized)] : undefined;
+}
+
+function normalizeArchitecturePlanContent(value: string): string {
+  const normalized = value.replace(/\r\n/g, "\n").trim();
+  if (!normalized) throw new TypeError("Project Architecture content must be non-empty");
+  return `${normalized}\n`;
 }
 
 function canonicalLayerTitle(kind: "l2" | "l3", projectId: string): string {

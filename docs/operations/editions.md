@@ -9,7 +9,7 @@ Both editions use the same:
 - Memory Core and schema;
 - Context Router;
 - project/global isolation rules;
-- Architecture Reader for existing authoritative project Markdown;
+- Project Architecture reader plus explicit full-document plan/approval/execute for Memhub-managed private canonical documents; repository Markdown and legacy `normify-*` remain read-only;
 - MCP tool contract;
 - capture event schema;
 - distillation pipeline;
@@ -27,7 +27,7 @@ device A plugin ----\
 device B plugin -----+--> Cloudflare/Auth --> Memhub Server
 hosted MCP ----------/                         |- Memory Core
                                                |- Context Router
-                                               |- Architecture Reader
+                                               |- Project Architecture
                                                `- capture/distillation
 ```
 

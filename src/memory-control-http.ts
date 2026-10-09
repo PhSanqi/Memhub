@@ -37,7 +37,7 @@ export async function handleMemoryControlRead(input: {
     return;
   }
   const allowedKinds = new Set<MemoryControlKind>([
-    "overview", "projects", "l1", "l2", "l3", "l4", "skills", "processing"
+    "overview", "projects", "l1", "l2", "l3", "l4", "skills", "visualization", "processing"
   ]);
   if (!allowedKinds.has(kindRaw as MemoryControlKind)) {
     response.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" })

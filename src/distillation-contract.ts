@@ -13,6 +13,15 @@ export interface DistillationEvidence {
   confidence?: number;
 }
 
+export function validateDurableMemoryContent(content: string): string {
+  const normalized = content.trim();
+  if (!normalized) throw new TypeError("memory content must be non-empty");
+  if (PROMPT_CONTAMINATION.some((pattern) => pattern.test(normalized))) {
+    throw new Error("memory content rejected: host/system/developer prompt contamination");
+  }
+  return normalized;
+}
+
 /**
  * Memhub deliberately does not perform semantic distillation here. The
  * connected harness/model produces the candidate; Memhub only enforces the
@@ -23,11 +32,7 @@ export function validateDistillationCandidate(input: {
   content: string;
   evidence: DistillationEvidence;
 }): void {
-  const content = input.content.trim();
-  if (!content) throw new TypeError("distillation content must be non-empty");
-  if (PROMPT_CONTAMINATION.some((pattern) => pattern.test(content))) {
-    throw new Error("distillation rejected: host/system/developer prompt contamination");
-  }
+  validateDurableMemoryContent(input.content);
   if (input.evidence.confidence !== undefined &&
       (!Number.isFinite(input.evidence.confidence) || input.evidence.confidence < 0 || input.evidence.confidence > 1)) {
     throw new TypeError("confidence must be between 0 and 1");

@@ -25,6 +25,12 @@ export interface MemhubCaptureEvent {
   provenance?: Record<string, unknown>;
 }
 
+export interface CapturePrivacySummary {
+  excluded_sections: number;
+  fully_excluded: boolean;
+  markers: string[];
+}
+
 export interface StoredCaptureEvent extends MemhubCaptureEvent {
   account_id: string;
   device_id: string;
@@ -76,6 +82,28 @@ export interface IdleCaptureGroup {
 export function normalizeCaptureEvent(value: unknown): MemhubCaptureEvent {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("capture event must be an object");
   const input = value as Record<string, unknown>;
+  const privateUser = stripNoMemorySections(optionalText(input.user_text, 300_000));
+  const privateAssistant = stripNoMemorySections(optionalText(input.assistant_text, 300_000));
+  const privateReasoning = stripNoMemorySections(optionalText(input.reasoning_summary, 100_000));
+  const privateTool = stripNoMemorySections(optionalText(input.tool_summary, 100_000));
+  const excludedSections = privateUser.excludedSections + privateAssistant.excludedSections +
+    privateReasoning.excludedSections + privateTool.excludedSections;
+  const normalizedProvenance = normalizeProvenance(input.provenance);
+  const existingPrivacy = normalizedCapturePrivacy(normalizedProvenance?.memhub_privacy);
+  const remainingText = [privateUser.text, privateAssistant.text, privateReasoning.text, privateTool.text]
+    .filter((item): item is string => Boolean(item?.trim()));
+  const privacy: CapturePrivacySummary | undefined = excludedSections > 0
+    ? {
+        excluded_sections: Math.max(excludedSections, existingPrivacy?.excluded_sections ?? 0),
+        fully_excluded: remainingText.length === 0,
+        markers: ["private", "no-memory"]
+      }
+    : existingPrivacy
+      ? {
+          ...existingPrivacy,
+          fully_excluded: existingPrivacy.fully_excluded && remainingText.length === 0
+        }
+      : undefined;
   const event: MemhubCaptureEvent = {
     event_id: requiredId(input.event_id, "event_id", 200),
     host: requiredId(input.host, "host", 100),
@@ -88,17 +116,53 @@ export function normalizeCaptureEvent(value: unknown): MemhubCaptureEvent {
     ...(optionalText(input.workspace_id, 500) ? { workspace_id: optionalText(input.workspace_id, 500) } : {}),
     ...(optionalText(input.workspace_path, 4000) ? { workspace_path: optionalText(input.workspace_path, 4000) } : {}),
     ...(optionalText(input.project_hint, 500) ? { project_hint: optionalText(input.project_hint, 500) } : {}),
-    ...(optionalText(input.user_text, 300_000) ? { user_text: optionalText(input.user_text, 300_000) } : {}),
-    ...(optionalText(input.assistant_text, 300_000) ? { assistant_text: optionalText(input.assistant_text, 300_000) } : {}),
-    ...(optionalText(input.reasoning_summary, 100_000) ? { reasoning_summary: optionalText(input.reasoning_summary, 100_000) } : {}),
-    ...(optionalText(input.tool_summary, 100_000) ? { tool_summary: optionalText(input.tool_summary, 100_000) } : {}),
-    capture_status: normalizeCaptureStatus(input.capture_status, input.user_text, input.assistant_text),
-    ...(normalizeProvenance(input.provenance) ? { provenance: normalizeProvenance(input.provenance) } : {})
+    ...(privateUser.text ? { user_text: privateUser.text } : {}),
+    ...(privateAssistant.text ? { assistant_text: privateAssistant.text } : {}),
+    ...(privateReasoning.text ? { reasoning_summary: privateReasoning.text } : {}),
+    ...(privateTool.text ? { tool_summary: privateTool.text } : {}),
+    capture_status: normalizeCaptureStatus(input.capture_status, privateUser.text, privateAssistant.text),
+    ...(normalizedProvenance || privacy
+      ? { provenance: { ...(normalizedProvenance ?? {}), ...(privacy ? { memhub_privacy: privacy } : {}) } }
+      : {})
   };
-  if (!event.user_text && !event.assistant_text && !event.reasoning_summary && !event.tool_summary) {
+  if (!event.user_text && !event.assistant_text && !event.reasoning_summary && !event.tool_summary && !privacy?.fully_excluded) {
     throw new TypeError("capture event requires user_text, assistant_text, reasoning_summary, or tool_summary");
   }
   return event;
+}
+
+/**
+ * Removes explicit user-authored no-memory spans before any capture payload is
+ * written to disk or sent to Memory Core. An opening marker without a closing
+ * marker is treated as private through end-of-field (fail closed).
+ */
+export function stripNoMemorySections(value: string | undefined): {
+  text?: string;
+  excludedSections: number;
+} {
+  if (!value) return { excludedSections: 0 };
+  let text = value;
+  let excludedSections = 0;
+  for (const marker of ["private", "no-memory"]) {
+    const closed = new RegExp(`<${marker}\\b[^>]*>[\\s\\S]*?<\\/${marker}\\s*>`, "gi");
+    text = text.replace(closed, () => {
+      excludedSections += 1;
+      return "";
+    });
+    const open = new RegExp(`<${marker}\\b[^>]*>[\\s\\S]*$`, "gi");
+    text = text.replace(open, () => {
+      excludedSections += 1;
+      return "";
+    });
+  }
+  const normalized = text.replace(/\n{3,}/g, "\n\n").trim();
+  return { ...(normalized ? { text: normalized } : {}), excludedSections };
+}
+
+export function captureIsFullyExcludedFromMemory(event: Pick<MemhubCaptureEvent, "provenance">): boolean {
+  const privacy = event.provenance?.memhub_privacy;
+  return Boolean(privacy && typeof privacy === "object" && !Array.isArray(privacy) &&
+    (privacy as Record<string, unknown>).fully_excluded === true);
 }
 
 export async function createDevice(
@@ -313,7 +377,8 @@ function capturePayloadHash(event: StoredCaptureEvent): string {
 }
 
 function assertCaptureCompleteness(event: MemhubCaptureEvent): void {
-  if (event.capture_status === "complete" && (!event.user_text || !event.assistant_text)) {
+  if (event.capture_status === "complete" && (!event.user_text || !event.assistant_text) &&
+      !captureIsFullyExcludedFromMemory(event)) {
     throw new TypeError("complete capture requires both user_text and assistant_text");
   }
 }
@@ -1034,4 +1099,23 @@ function normalizeProvenance(value: unknown): Record<string, unknown> | undefine
   const serialized = JSON.stringify(value);
   if (serialized.length > 100_000) throw new TypeError("provenance exceeds maximum size");
   return JSON.parse(serialized) as Record<string, unknown>;
+}
+
+function normalizedCapturePrivacy(value: unknown): CapturePrivacySummary | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const candidate = value as Record<string, unknown>;
+  const excludedSections = candidate.excluded_sections;
+  const fullyExcluded = candidate.fully_excluded;
+  const markers = Array.isArray(candidate.markers)
+    ? candidate.markers.filter((item): item is string => typeof item === "string")
+    : [];
+  if (!Number.isSafeInteger(excludedSections) || Number(excludedSections) < 1 || typeof fullyExcluded !== "boolean") {
+    return undefined;
+  }
+  if (!markers.some((marker) => marker === "private" || marker === "no-memory")) return undefined;
+  return {
+    excluded_sections: Number(excludedSections),
+    fully_excluded: fullyExcluded,
+    markers: [...new Set(markers)]
+  };
 }

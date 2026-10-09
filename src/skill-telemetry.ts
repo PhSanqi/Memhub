@@ -13,7 +13,10 @@ export interface SkillTelemetryEvent {
   executor?: string;
   project_id?: string;
   note?: string;
+  estimated_tokens?: number;
 }
+
+export type SkillPromotionState = "insufficient_evidence" | "candidate" | "proven";
 
 export interface SkillTelemetrySummary {
   skill_id: string;
@@ -23,6 +26,11 @@ export interface SkillTelemetrySummary {
   failures: number;
   user_corrections: number;
   reliability: number;
+  successful_executions: number;
+  repeat_loads: number;
+  loaded_estimated_tokens: number;
+  promotion_state: SkillPromotionState;
+  promotion_score: number;
   last_stage: SkillExecutionStage | null;
   last_timestamp: string | null;
 }
@@ -34,6 +42,7 @@ export async function recordSkillLoad(input: {
   executionId?: string;
   executor?: string;
   projectId?: string;
+  estimatedTokens?: number;
 }): Promise<{ executionId: string; events: SkillTelemetryEvent[] }> {
   const executionId = normalizeOptional(input.executionId) ?? randomUUID();
   const existing = await readSkillTelemetry(input.stateRoot, input.accountId);
@@ -43,7 +52,7 @@ export async function recordSkillLoad(input: {
   }
   const appended: SkillTelemetryEvent[] = [];
   if (!executionEvents.some((event) => event.stage === "selected")) {
-    appended.push(await appendSkillEvent({ ...input, executionId, stage: "selected" }));
+    appended.push(await appendSkillEvent({ ...input, executionId, stage: "selected", estimatedTokens: undefined }));
   }
   if (!executionEvents.some((event) => event.stage === "loaded")) {
     appended.push(await appendSkillEvent({ ...input, executionId, stage: "loaded" }));
@@ -91,6 +100,17 @@ export async function skillTelemetrySummary(
   const userCorrections = events.filter((event) => event.stage === "user_correction").length;
   const weightedFailures = failures + userCorrections * 0.5;
   const reliability = (successes + 1) / (successes + weightedFailures + 2);
+  const successfulExecutionIds = new Set(events.filter((event) => event.stage === "success").map((event) => event.execution_id));
+  const loadedEstimatedTokens = events
+    .filter((event) => event.stage === "loaded")
+    .reduce((sum, event) => sum + (event.estimated_tokens ?? 0), 0);
+  const promotionScore = Math.min(1, successfulExecutionIds.size / 5) * reliability;
+  const promotionState: SkillPromotionState =
+    successfulExecutionIds.size >= 3 && reliability >= 0.7 && failures === 0 && userCorrections === 0
+      ? "proven"
+      : successfulExecutionIds.size >= 2 && reliability >= 0.6
+        ? "candidate"
+        : "insufficient_evidence";
   const last = events.at(-1);
   return {
     skill_id: skillId,
@@ -100,6 +120,11 @@ export async function skillTelemetrySummary(
     failures,
     user_corrections: userCorrections,
     reliability: round(reliability),
+    successful_executions: successfulExecutionIds.size,
+    repeat_loads: Math.max(0, executionIds.size - 1),
+    loaded_estimated_tokens: loadedEstimatedTokens,
+    promotion_state: promotionState,
+    promotion_score: round(promotionScore),
     last_stage: last?.stage ?? null,
     last_timestamp: last?.timestamp ?? null
   };
@@ -123,6 +148,7 @@ async function appendSkillEvent(input: {
   executor?: string;
   projectId?: string;
   note?: string;
+  estimatedTokens?: number;
 }): Promise<SkillTelemetryEvent> {
   const event: SkillTelemetryEvent = {
     event_id: randomUUID(),
@@ -132,7 +158,10 @@ async function appendSkillEvent(input: {
     timestamp: new Date().toISOString(),
     ...(normalizeOptional(input.executor) ? { executor: normalizeOptional(input.executor) } : {}),
     ...(normalizeOptional(input.projectId) ? { project_id: normalizeOptional(input.projectId) } : {}),
-    ...(normalizeOptional(input.note) ? { note: clip(normalizeOptional(input.note)!, 2_000) } : {})
+    ...(normalizeOptional(input.note) ? { note: clip(normalizeOptional(input.note)!, 2_000) } : {}),
+    ...(typeof input.estimatedTokens === "number" && Number.isFinite(input.estimatedTokens) && input.estimatedTokens >= 0
+      ? { estimated_tokens: Math.trunc(input.estimatedTokens) }
+      : {})
   };
   const path = telemetryPath(input.stateRoot, input.accountId);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });

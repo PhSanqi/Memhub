@@ -86,10 +86,10 @@ export function enrichSkillCandidateReliability(item: ContextItem, reliability: 
 
 export function skillSelectionMetadataFromBody(
   body: string,
-  input: { projectId?: string; tags?: readonly string[]; telemetryReliability?: number } = {}
+  input: { projectId?: string; tags?: readonly string[]; telemetryReliability?: number; title?: string } = {}
 ): SkillSelectionMetadata {
   const frontmatter = skillFrontmatter(body);
-  const title = skillTitle(body, frontmatter);
+  const title = input.title?.trim() ? clip(input.title.trim(), 160) : skillTitle(body, frontmatter);
   const summary = skillSummary(body, title, frontmatter);
   const whenToUse = skillWhenToUse(body, summary, frontmatter);
   const tags = input.tags ?? [];

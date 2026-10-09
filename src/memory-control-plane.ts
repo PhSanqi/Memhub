@@ -5,6 +5,7 @@ import { captureIndexStats } from "./capture.js";
 import { listL1Turns } from "./turn-log.js";
 import type { MemhubRuntime } from "./runtime.js";
 import { normalizeProjectKey, type ProjectDescriptor } from "./project-registry.js";
+import { buildMemoryVisualization } from "./memory-visualization.js";
 
 export type MemoryControlKind =
   | "overview"
@@ -14,6 +15,7 @@ export type MemoryControlKind =
   | "l3"
   | "l4"
   | "skills"
+  | "visualization"
   | "processing";
 
 export interface MemoryControlRequest {
@@ -50,12 +52,53 @@ export async function readMemoryControlData(input: MemoryControlRequest): Promis
       return coreLayerPayload(input, "l4");
     case "skills":
       return coreLayerPayload(input, "skills");
+    case "visualization":
+      return visualizationPayload(input);
     case "processing":
       return processingPayload(input);
     case "overview":
     default:
       return overviewPayload(input);
   }
+}
+
+async function visualizationPayload(input: MemoryControlRequest): Promise<unknown> {
+  if (!input.projectId) {
+    const visual = buildMemoryVisualization({ l2: [] });
+    return { ...visual, items: visual.state.events, total: visual.state.events.length };
+  }
+  const [l2Payload, allJobs, storageIdsList] = await Promise.all([
+    coreLayerPayload(input, "l2"),
+    listDistillationJobs(input.stateRoot, input.runtime.accountId),
+    input.runtime.projects.storageIds(input.runtime.accountId, input.projectId)
+  ]);
+  const storageIds = new Set(storageIdsList);
+  const revisions = allJobs
+    .filter((job) =>
+      job.status === "completed" &&
+      job.target === "l2" &&
+      job.result_kind === "l2" &&
+      Boolean(job.result_id) &&
+      Boolean(job.result_content?.trim()) &&
+      Boolean(job.project_id && storageIds.has(job.project_id))
+    )
+    .map((job) => ({
+      ref: `l2:${job.result_id}:${job.job_id}`,
+      layer: "L2" as const,
+      memory_id: job.result_id!,
+      project_id: job.project_id,
+      committed_at: job.result_committed_at ?? job.completed_at ?? job.updated_at,
+      content: job.result_content!.trim(),
+      evidence_refs: job.evidence_refs.slice()
+    }));
+  const selectedProject = input.projects.find((project) => normalizeProjectKey(project.projectId) === normalizeProjectKey(input.projectId!));
+  const visual = buildMemoryVisualization({
+    projectId: input.projectId,
+    l2: itemsValue(l2Payload).map(objectRecord),
+    revisions,
+    todos: selectedProject?.todos ?? []
+  });
+  return { ...visual, items: visual.state.events, total: visual.state.events.length };
 }
 
 async function overviewPayload(input: MemoryControlRequest): Promise<unknown> {

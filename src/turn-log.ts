@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  captureIsFullyExcludedFromMemory,
   isCaptureIngested,
   listCaptureEvents,
   markCaptureIngested,
@@ -114,7 +115,12 @@ export async function upsertL1Turn(input: {
   }
 
   let ingestion: unknown;
+  if (stored.event.capture_status === "complete" && captureIsFullyExcludedFromMemory(stored.event)) {
+    await markCaptureIngested(input.stateRoot, input.runtime.accountId, stored.event.event_id);
+    ingestion = { ingested: false, excluded: true, project_id: projectId };
+  }
   if (
+    ingestion === undefined &&
     stored.event.capture_status === "complete" &&
     !(await isCaptureIngested(input.stateRoot, input.runtime.accountId, stored.event.event_id))
   ) {

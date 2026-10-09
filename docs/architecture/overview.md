@@ -38,7 +38,7 @@ Skill ------------------------------ orthogonal reusable capability
 - L1 Turn Log: stores original conversation turns and continuity metadata.
 - Distillation Jobs: evidence-bounded L2/L3/L4/Skill work queue.
 - Memory Core: durable memory storage, search and read models.
-- Architecture Reader: read-only compatibility access to existing project architecture Markdown.
+- Project Architecture: reads project architecture context and supports a controlled full-document replacement flow (`architecture_plan` → explicit user approval → `architecture_execute`). The writable canonical copy is Memhub-managed private state; repository Markdown and legacy `normify-*` sources remain read-only discovery/migration inputs.
 - Control Plane: inspection and governance. Raw Capture and Episode are not product navigation layers.
 
 Current-turn explicit project/workspace evidence has priority over an older conversation binding. Reusable Skills can cross project boundaries only through the separate capability channel.
@@ -102,15 +102,21 @@ Canonical artifacts are:
 - `project-profile:<project>` for L3;
 - `user-profile:<account>` for L4.
 
+Automatic distillation and explicit user authority are intentionally different paths. Automatic L3 still requires exact L2 revision evidence, and automatic L4 still requires exact L3 evidence from multiple projects. When the user explicitly asks to add/change a durable L3 or L4 rule, `memhub_memory action=plan` instead prepares the **complete final canonical body**. The model must show that body to the user in full. Only after the user explicitly approves that exact text may the Harness capture the approval turn as L1 and call `memhub_memory action=execute` with the one-time authorization plus the exact `l1:<event-id>` confirmation reference. The write is revision-ledgered and provenance-tagged as explicit user authority; it does not automatically enqueue another layer. A stale base revision invalidates the authorization and forces a new full-text review.
+
 L2 completion can enqueue L3. L3 completion only enqueues L4 after completed L3 evidence exists for at least two projects.
 
-## Project architecture compatibility
+## Project architecture governance and compatibility
 
 The old Normify runtime is retired. Memhub no longer vendors or executes that engine.
 
-`FileProjectArchitectureSource` only reads existing authoritative Markdown from account-scoped legacy `.normify/accounts/<account-hash>/normify-<project>` trees and bounded repo-local `normify-<project>` fallback trees.
+`FileProjectArchitectureSource` reads the Memhub-managed canonical document first. When no managed document exists yet, it can discover read-only repository Markdown from current project containers (including `<architecture-root>/codex-workspace/<project>`) and legacy `.normify` sources as migration/context inputs. The controlled writer never mutates repository files or legacy `normify-*` trees; it writes only the account-scoped private managed document under the Memhub state root (`project-architecture/<account-hash>/<project>/ARCHITECTURE.md`).
 
 The current configuration is `architecture-root` / `MEMHUB_ARCHITECTURE_ROOT`. `--normify-root`, `--no-normify` and `MEMHUB_NORMIFY_ROOT` remain compatibility aliases for existing deployments. `memmy_project action=architecture` is read-only.
+
+Architecture mutation uses `memmy_project action=architecture_plan` → explicit user approval → `architecture_execute`. Plans are one-shot, fingerprint-bound and expire; if the managed document or its read-only migration seed changes after plan, execution fails closed. Before mutation, Memhub stores the previous and proposed full text under private architecture history, then marks the revision committed after the managed-state write. `architecture_history` exposes that audit record so rollback is performed as a new reviewed plan rather than an invisible file rewind. This keeps the Gateway sandboxed to Memhub private state instead of granting it write access to project source trees.
+
+Layer ownership remains strict: Project Architecture is for stable system structure, ownership, source-of-truth declarations, interfaces and hard constraints. Project progress/history stays in L2, durable project working rules/experience stay in L3, cross-project user rules/profile stay in L4, and actionable pending work stays in Project Todo.
 
 ## Storage migration
 

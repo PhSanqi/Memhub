@@ -67,7 +67,7 @@ Memhub MCP Gateway (identity + account scope)
      v
 Memory Core ---- local SQLite / local embedding
      |
-     +---- Architecture Reader -> local/account-scoped architecture Markdown
+     +---- Project Architecture -> private managed canonical document; repo/legacy sources read-only
 ```
 
 Memory Core itself should remain bound to loopback. The gateway is the only intended public ingress. Cloudflare receives authentication traffic; it is not the storage or model-processing destination for memory contents.
@@ -81,6 +81,6 @@ An authorization should record at least: account, data class/capability, destina
 ## Current ownership
 
 - Memhub owns the vendored Memory Core runtime and AgentSourceCore helper.
-- Memhub owns the lightweight Architecture Reader compatibility layer.
+- Memhub owns the lightweight Project Architecture compatibility layer. Its private account/project canonical document can be replaced only through an explicit full-text plan/approval/execute flow; repository Markdown and legacy `normify-*` sources remain read-only.
 - The production Memory Core remains loopback-only.
 - Legacy standalone Memory/AgentSourceCore/Normify source trees are retired.
