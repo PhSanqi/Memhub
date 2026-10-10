@@ -125,4 +125,26 @@ const singleEvent = buildMemoryVisualization({
 assert.equal(singleEvent.state.events.length, 1);
 assert.equal(singleEvent.archify.exportable, false);
 
+// A superseded/archived L2 Memory Core row may disappear from the active L2
+// list, but its exact revision ledger must continue to preserve unique history.
+const staleLedgerEvent = buildMemoryVisualization({
+  projectId: "alpha",
+  l2: [{
+    id: "timeline-current",
+    body: "# Timeline\n\n## 2026-10-10：Current head\nCurrent canonical state.",
+    updatedAt: "2026-10-10T10:05:16.750Z"
+  }],
+  revisions: [{
+    ref: "l2:timeline-stale:revision-1",
+    layer: "L2",
+    memory_id: "timeline-stale",
+    project_id: "alpha",
+    committed_at: "2026-10-07T07:25:29.733Z",
+    content: "# Timeline\n\n## 2026-09-26：Historical unique event\nPreserved only by the exact revision ledger.",
+    evidence_refs: ["l1:historical-evidence"]
+  }]
+});
+assert.ok(staleLedgerEvent.state.events.some((event) => event.memory_id === "timeline-stale" && /Historical unique event/.test(event.title)));
+assert.equal(staleLedgerEvent.state.latest_l2_revision_at, "2026-10-10T10:05:16.750Z");
+
 console.log("memory-visualization-e2e: ok");

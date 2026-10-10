@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Improve memory-console readability: separate actionable processing failures from superseded migration history, stack project Current Truth and Next Work vertically on wide screens, bound long overview todo lists, and show L2 events newest-first.
+- Fix L2 management freshness semantics: identify the ledger-backed canonical/current L2 per project, sort it ahead of stale activated duplicates, distinguish historical event dates from canonical L2 update/revision time, and preserve superseded L2 history through the exact revision ledger.
 - Add a permanent multi-account isolation regression covering ordinary-user role defaults, pre-provisioned Cloudflare identity binding, and account-scoped Project/Todo, L1, Skill and distillation state.
 - Clarify that each `account_id` is a strict tenant boundary and remove retired Device Token/device-identity guidance from current documentation.
 - Repair documentation links left behind by the v1 architecture cleanup.

@@ -1083,7 +1083,7 @@ async function testLocalAdmin(memoryPort) {
     ));
     assert.ok(Array.isArray(userOverviewPayload.processing?.items));
     assert.ok(userOverviewPayload.processing.items.every((item) =>
-      Object.keys(item).every((key) => key === "project_id" || key === "status") &&
+      Object.keys(item).every((key) => key === "project_id" || key === "status" || key === "failure_kind") &&
       ["failed", "pending", "leased"].includes(item.status)
     ));
 

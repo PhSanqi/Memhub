@@ -124,7 +124,8 @@ async function overviewPayload(input: MemoryControlRequest): Promise<unknown> {
   const processing = {
     pending: relevantJobs.filter((job) => job.status === "pending").length,
     leased: relevantJobs.filter((job) => job.status === "leased").length,
-    failed: relevantJobs.filter((job) => job.status === "failed").length
+    failed: relevantJobs.filter((job) => job.status === "failed" && job.failure_kind !== "invalid_legacy_evidence").length,
+    historical_failed: relevantJobs.filter((job) => job.status === "failed" && job.failure_kind === "invalid_legacy_evidence").length
   };
   return {
     counts: {
@@ -149,7 +150,7 @@ async function overviewPayload(input: MemoryControlRequest): Promise<unknown> {
       ...processing,
       items: relevantJobs
         .filter((job) => job.status === "failed" || job.status === "pending" || job.status === "leased")
-        .map((job) => ({ project_id: job.project_id, status: job.status }))
+        .map((job) => ({ project_id: job.project_id, status: job.status, failure_kind: job.failure_kind }))
     } : processing,
     ...(input.includeOverviewItems ? {
       projects: overviewProjectItems(scopedProjects),
@@ -534,7 +535,7 @@ async function coreLayerPayload(
       userId: input.runtime.userId
     });
     if (input.projectId && kind !== "l4") params.set("projectId", input.projectId);
-    if (kind === "skills") params.set("status", "activated");
+    params.set("status", "activated");
     if (hydrateBody && kind !== "skills") params.set("includeBody", "1");
     const pagePayload = objectRecord(await input.runtime.memoryClient.viewerGet(`/api/v1/${kind}?${params.toString()}`));
     if (page === 1) payload = pagePayload;
@@ -543,11 +544,29 @@ async function coreLayerPayload(
     if (pagePayload.hasNext !== true || pageItems.length === 0 || !hydrateBody) break;
   }
   items = items.slice(0, 100);
+  if (kind === "l2") {
+    const jobs = await listControlPlaneJobs(input.stateRoot, input.runtime.accountId);
+    const canonicalByProject = latestCanonicalL2ByProject(jobs);
+    items = items
+      .map((item) => {
+        const projectId = projectFromCoreItem(item);
+        const projectKey = projectId ? canonicalProjectKey(projectId, input.projects) : undefined;
+        const canonical = projectKey ? canonicalByProject.get(projectKey) : undefined;
+        if (!canonical) return item;
+        const current = stringValue(item.id) === canonical.resultId;
+        return {
+          ...item,
+          canonical_current: current,
+          ...(current ? { canonical_revision_committed_at: canonical.committedAt } : {})
+        };
+      })
+      .sort(compareL2ControlItems);
+  }
   let visibleTotal = totalValue(payload);
   if (archivedStorageIds.length > 0) {
     const archivedTotals = await Promise.all(archivedStorageIds.map(async (projectId) => {
       const params = new URLSearchParams({ limit: "1", page: "1", userId: input.runtime.userId, projectId });
-      if (kind === "skills") params.set("status", "activated");
+      params.set("status", "activated");
       return totalValue(await input.runtime.memoryClient.viewerGet(`/api/v1/${kind}?${params.toString()}`));
     }));
     visibleTotal = Math.max(0, visibleTotal - archivedTotals.reduce((sum, total) => sum + total, 0));
@@ -569,7 +588,8 @@ async function processingPayload(input: MemoryControlRequest): Promise<unknown> 
       pending: items.filter((job) => job.status === "pending").length,
       leased: items.filter((job) => job.status === "leased").length,
       completed: items.filter((job) => job.status === "completed").length,
-      failed: items.filter((job) => job.status === "failed").length
+      failed: items.filter((job) => job.status === "failed" && job.failure_kind !== "invalid_legacy_evidence").length,
+      historical_failed: items.filter((job) => job.status === "failed" && job.failure_kind === "invalid_legacy_evidence").length
     }
   };
 }
@@ -628,9 +648,45 @@ function overviewLayerItems(items: Record<string, unknown>[]): Record<string, un
       ...(typeof item.summary === "string" ? { summary: item.summary } : {}),
       ...(typeof item.updatedAt === "string" ? { updatedAt: item.updatedAt } : {}),
       ...(typeof item.updated_at === "string" ? { updated_at: item.updated_at } : {}),
-      ...(typeof item.createdAt === "string" ? { createdAt: item.createdAt } : {})
+      ...(typeof item.createdAt === "string" ? { createdAt: item.createdAt } : {}),
+      ...(typeof item.canonical_current === "boolean" ? { canonical_current: item.canonical_current } : {}),
+      ...(typeof item.canonical_revision_committed_at === "string" ? { canonical_revision_committed_at: item.canonical_revision_committed_at } : {})
     };
   });
+}
+
+function latestCanonicalL2ByProject(jobs: ControlPlaneJob[]): Map<string, { resultId: string; committedAt: string }> {
+  const latest = new Map<string, { resultId: string; committedAt: string }>();
+  for (const job of jobs) {
+    if (job.target !== "l2" || job.status !== "completed" || !job.project_id || !job.result_id) continue;
+    const committedAt = job.result_committed_at ?? job.completed_at ?? job.updated_at;
+    const key = normalizeProjectKey(job.project_id);
+    const existing = latest.get(key);
+    if (!existing || committedAt.localeCompare(existing.committedAt) > 0) {
+      latest.set(key, { resultId: job.result_id, committedAt });
+    }
+  }
+  return latest;
+}
+
+function canonicalProjectKey(projectRef: string, projects: ProjectDescriptor[]): string {
+  const key = normalizeProjectKey(projectRef);
+  for (const project of projects) {
+    const refs = [project.projectId, project.name, ...project.aliases].filter(Boolean).map(normalizeProjectKey);
+    if (refs.includes(key)) return normalizeProjectKey(project.projectId);
+  }
+  return key;
+}
+
+function compareL2ControlItems(left: Record<string, unknown>, right: Record<string, unknown>): number {
+  const leftCurrent = left.canonical_current === true ? 1 : 0;
+  const rightCurrent = right.canonical_current === true ? 1 : 0;
+  if (leftCurrent !== rightCurrent) return rightCurrent - leftCurrent;
+  return layerUpdatedAt(right).localeCompare(layerUpdatedAt(left)) || String(left.id ?? "").localeCompare(String(right.id ?? ""));
+}
+
+function layerUpdatedAt(item: Record<string, unknown>): string {
+  return stringValue(item.updatedAt) ?? stringValue(item.updated_at) ?? stringValue(item.createdAt) ?? stringValue(item.created_at) ?? "";
 }
 
 function projectPayload(projects: ProjectDescriptor[]): { items: Record<string, unknown>[]; total: number } {
