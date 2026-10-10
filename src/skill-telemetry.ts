@@ -25,6 +25,8 @@ export interface SkillTelemetrySummary {
   successes: number;
   failures: number;
   user_corrections: number;
+  failure_rate: number;
+  correction_rate: number;
   reliability: number;
   successful_executions: number;
   repeat_loads: number;
@@ -101,12 +103,15 @@ export async function skillTelemetrySummary(
   const weightedFailures = failures + userCorrections * 0.5;
   const reliability = (successes + 1) / (successes + weightedFailures + 2);
   const successfulExecutionIds = new Set(events.filter((event) => event.stage === "success").map((event) => event.execution_id));
+  const completedExecutionCount = successfulExecutionIds.size + failures;
+  const failureRate = completedExecutionCount > 0 ? failures / completedExecutionCount : 0;
+  const correctionRate = executionIds.size > 0 ? userCorrections / executionIds.size : 0;
   const loadedEstimatedTokens = events
     .filter((event) => event.stage === "loaded")
     .reduce((sum, event) => sum + (event.estimated_tokens ?? 0), 0);
   const promotionScore = Math.min(1, successfulExecutionIds.size / 5) * reliability;
   const promotionState: SkillPromotionState =
-    successfulExecutionIds.size >= 3 && reliability >= 0.7 && failures === 0 && userCorrections === 0
+    successfulExecutionIds.size >= 5 && reliability >= 0.8 && failureRate <= 0.05 && correctionRate <= 0.1
       ? "proven"
       : successfulExecutionIds.size >= 2 && reliability >= 0.6
         ? "candidate"
@@ -119,6 +124,8 @@ export async function skillTelemetrySummary(
     successes,
     failures,
     user_corrections: userCorrections,
+    failure_rate: round(failureRate),
+    correction_rate: round(correctionRate),
     reliability: round(reliability),
     successful_executions: successfulExecutionIds.size,
     repeat_loads: Math.max(0, executionIds.size - 1),

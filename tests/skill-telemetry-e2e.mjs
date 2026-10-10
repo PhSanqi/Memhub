@@ -21,6 +21,8 @@ try {
   assert.equal(summary.executions, 1);
   assert.equal(summary.successes, 1);
   assert.equal(summary.failures, 0);
+  assert.equal(summary.failure_rate, 0);
+  assert.equal(summary.correction_rate, 0);
   assert.ok(summary.reliability > 0.5);
   assert.equal(summary.successful_executions, 1);
   assert.equal(summary.loaded_estimated_tokens, 120);
@@ -39,20 +41,51 @@ try {
   const mixed = await skillTelemetrySummary(root, "acct", "skill-1");
   assert.equal(mixed.failures, 1);
   assert.equal(mixed.user_corrections, 1);
+  assert.ok(mixed.failure_rate > 0);
+  assert.ok(mixed.correction_rate > 0);
   assert.ok(mixed.reliability < summary.reliability);
 
   const promotedSkill = "skill-promoted";
-  for (let index = 0; index < 3; index += 1) {
+  for (let index = 0; index < 5; index += 1) {
     const run = await recordSkillLoad({ stateRoot: root, accountId: "acct", skillId: promotedSkill, estimatedTokens: 80 });
     await recordSkillExecutionEvent({ stateRoot: root, accountId: "acct", skillId: promotedSkill, executionId: run.executionId, stage: "invoked" });
     await recordSkillExecutionEvent({ stateRoot: root, accountId: "acct", skillId: promotedSkill, executionId: run.executionId, stage: "success" });
   }
   const promoted = await skillTelemetrySummary(root, "acct", promotedSkill);
-  assert.equal(promoted.successful_executions, 3);
-  assert.equal(promoted.repeat_loads, 2);
-  assert.equal(promoted.loaded_estimated_tokens, 240);
+  assert.equal(promoted.successful_executions, 5);
+  assert.equal(promoted.repeat_loads, 4);
+  assert.equal(promoted.loaded_estimated_tokens, 400);
   assert.equal(promoted.promotion_state, "proven");
-  assert.ok(promoted.promotion_score > 0.4);
+  assert.ok(promoted.promotion_score > 0.8);
+
+  // A Skill can recover from a small amount of historical correction without
+  // being permanently barred from proven status, but correction-heavy Skills
+  // remain candidates even when their raw success count is high.
+  const correctedSkill = "skill-corrected";
+  for (let index = 0; index < 10; index += 1) {
+    const run = await recordSkillLoad({ stateRoot: root, accountId: "acct", skillId: correctedSkill });
+    await recordSkillExecutionEvent({ stateRoot: root, accountId: "acct", skillId: correctedSkill, executionId: run.executionId, stage: "invoked" });
+    await recordSkillExecutionEvent({ stateRoot: root, accountId: "acct", skillId: correctedSkill, executionId: run.executionId, stage: "success" });
+    if (index === 0) {
+      await recordSkillExecutionEvent({ stateRoot: root, accountId: "acct", skillId: correctedSkill, executionId: run.executionId, stage: "user_correction", note: "minor early correction" });
+    }
+  }
+  const recovered = await skillTelemetrySummary(root, "acct", correctedSkill);
+  assert.equal(recovered.correction_rate, 0.1);
+  assert.equal(recovered.promotion_state, "proven");
+
+  const correctionHeavySkill = "skill-correction-heavy";
+  for (let index = 0; index < 10; index += 1) {
+    const run = await recordSkillLoad({ stateRoot: root, accountId: "acct", skillId: correctionHeavySkill });
+    await recordSkillExecutionEvent({ stateRoot: root, accountId: "acct", skillId: correctionHeavySkill, executionId: run.executionId, stage: "invoked" });
+    await recordSkillExecutionEvent({ stateRoot: root, accountId: "acct", skillId: correctionHeavySkill, executionId: run.executionId, stage: "success" });
+    if (index < 2) {
+      await recordSkillExecutionEvent({ stateRoot: root, accountId: "acct", skillId: correctionHeavySkill, executionId: run.executionId, stage: "user_correction", note: "material correction" });
+    }
+  }
+  const correctionHeavy = await skillTelemetrySummary(root, "acct", correctionHeavySkill);
+  assert.equal(correctionHeavy.correction_rate, 0.2);
+  assert.equal(correctionHeavy.promotion_state, "candidate");
 } finally {
   await rm(root, { recursive: true, force: true });
 }

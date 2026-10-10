@@ -1,6 +1,8 @@
 import { distillationResultTimestamp, listDistillationJobs } from "./distillation-jobs.js";
 import type { MemhubRuntime } from "./runtime.js";
 
+const MIN_CONSOLIDATION_REVISIONS = 8;
+
 export interface DistillationConsolidationPlan {
   version: "consolidation-v1";
   strategy: "select_merge_reextract_supersede";
@@ -8,6 +10,7 @@ export interface DistillationConsolidationPlan {
   project_id: string;
   canonical_artifact_id: string;
   historical_revision_count: number;
+  minimum_revision_count: number;
   source_revision_refs: string[];
   submit_evidence_refs: string[];
   current_revision_ref: string | null;
@@ -51,7 +54,7 @@ export async function planDistillationConsolidation(input: {
           a.job_id.localeCompare(b.job_id)
         )
         .map((job) => `l2:${job.result_id}:${job.job_id}`));
-  const eligible = targetJobs.length >= 2 && submitEvidenceRefs.length > 0;
+  const eligible = targetJobs.length >= MIN_CONSOLIDATION_REVISIONS && submitEvidenceRefs.length > 0;
   return {
     version: "consolidation-v1",
     strategy: "select_merge_reextract_supersede",
@@ -61,14 +64,15 @@ export async function planDistillationConsolidation(input: {
       ? `project-timeline:${canonicalProject}`
       : `project-profile:${canonicalProject}`,
     historical_revision_count: targetJobs.length,
+    minimum_revision_count: MIN_CONSOLIDATION_REVISIONS,
     source_revision_refs: sourceRevisionRefs,
     submit_evidence_refs: submitEvidenceRefs,
     current_revision_ref: currentRevisionRef,
     eligible,
     reason: eligible
-      ? "Multiple historical revisions can be consolidated into one new canonical revision while preserving old revisions as evidence history."
-      : targetJobs.length < 2
-        ? "At least two completed historical revisions are required before consolidation is useful."
+      ? "The revision history is large enough to justify a manual consolidation review while preserving old revisions as evidence history."
+      : targetJobs.length < MIN_CONSOLIDATION_REVISIONS
+        ? `At least ${MIN_CONSOLIDATION_REVISIONS} completed historical revisions are required before consolidation is recommended.`
         : "No valid upstream evidence refs are available for a governed replacement revision.",
     write_contract: "Use the connected model to merge/re-extract a compact replacement, then call memhub_distill action=submit with the returned submit_evidence_refs. The stable canonical artifact id is reused; do not create a new layer or parallel truth."
   };
