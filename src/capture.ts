@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -33,23 +33,13 @@ export interface CapturePrivacySummary {
 
 export interface StoredCaptureEvent extends MemhubCaptureEvent {
   account_id: string;
-  device_id: string;
+  actor_id: string;
   received_at: string;
 }
 
-export interface DeviceRecord {
-  device_id: string;
+export interface CaptureActor {
+  actor_id: string;
   account_id: string;
-  name: string;
-  token_hash: string;
-  created_at: string;
-  last_seen_at?: string;
-  revoked_at?: string;
-}
-
-interface DeviceStore {
-  version: 1;
-  devices: DeviceRecord[];
 }
 
 export interface CaptureIndexEntry {
@@ -165,93 +155,29 @@ export function captureIsFullyExcludedFromMemory(event: Pick<MemhubCaptureEvent,
     (privacy as Record<string, unknown>).fully_excluded === true);
 }
 
-export async function createDevice(
-  stateRoot: string,
-  accountIdRaw: string,
-  nameRaw: string
-): Promise<{ device: Omit<DeviceRecord, "token_hash">; token: string }> {
-  const accountId = requiredId(accountIdRaw, "accountId", 500);
-  const name = requiredId(nameRaw, "name", 200);
-  const token = `mhdev_${randomBytes(32).toString("base64url")}`;
-  const device: DeviceRecord = {
-    device_id: randomUUID(),
-    account_id: accountId,
-    name,
-    token_hash: tokenHash(token),
-    created_at: new Date().toISOString()
-  };
-  await withDeviceMutation(stateRoot, async () => {
-    const store = await loadDevices(stateRoot);
-    store.devices.push(device);
-    await saveDevices(stateRoot, store);
-  });
-  const { token_hash: _tokenHash, ...publicDevice } = device;
-  return { device: publicDevice, token };
-}
-
-export async function listDevices(stateRoot: string, accountIdRaw?: string): Promise<Array<Omit<DeviceRecord, "token_hash">>> {
-  const accountId = accountIdRaw?.trim();
-  const store = await loadDevices(stateRoot);
-  return store.devices
-    .filter((device) => !accountId || device.account_id === accountId)
-    .map(({ token_hash: _tokenHash, ...device }) => device)
-    .sort((left, right) => left.created_at.localeCompare(right.created_at));
-}
-
-export async function revokeDevice(stateRoot: string, deviceIdRaw: string): Promise<boolean> {
-  const deviceId = requiredId(deviceIdRaw, "deviceId", 200);
-  return withDeviceMutation(stateRoot, async () => {
-    const store = await loadDevices(stateRoot);
-    const device = store.devices.find((item) => item.device_id === deviceId);
-    if (!device || device.revoked_at) return false;
-    device.revoked_at = new Date().toISOString();
-    await saveDevices(stateRoot, store);
-    return true;
-  });
-}
-
-export async function authenticateDevice(stateRoot: string, tokenRaw: string): Promise<DeviceRecord | null> {
-  const token = tokenRaw.trim();
-  if (!token) return null;
-  const hash = tokenHash(token);
-  return withDeviceMutation(stateRoot, async () => {
-    const store = await loadDevices(stateRoot);
-    const expected = Buffer.from(hash, "hex");
-    const device = store.devices.find((item) => {
-      if (item.revoked_at || item.token_hash.length !== hash.length) return false;
-      const actual = Buffer.from(item.token_hash, "hex");
-      return actual.length === expected.length && timingSafeEqual(actual, expected);
-    });
-    if (!device) return null;
-    device.last_seen_at = new Date().toISOString();
-    await saveDevices(stateRoot, store);
-    return { ...device };
-  });
-}
-
 export async function storeCaptureEvent(
   stateRoot: string,
-  device: Pick<DeviceRecord, "device_id" | "account_id">,
+  actor: Pick<CaptureActor, "actor_id" | "account_id">,
   rawEvent: unknown
 ): Promise<{ created: boolean; updated: boolean; event: StoredCaptureEvent }> {
   return withCaptureIndexMutation(stateRoot, async () => {
     const event = normalizeCaptureEvent(rawEvent);
     const stored: StoredCaptureEvent = {
       ...event,
-      account_id: device.account_id,
-      device_id: device.device_id,
+      account_id: actor.account_id,
+      actor_id: actor.actor_id,
       received_at: new Date().toISOString()
     };
-    const path = captureEventPath(stateRoot, device.account_id, event.event_id);
-    await ensureCaptureIndexUnlocked(stateRoot, device.account_id);
+    const path = captureEventPath(stateRoot, actor.account_id, event.event_id);
+    await ensureCaptureIndexUnlocked(stateRoot, actor.account_id);
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     try {
       const existing = normalizeStoredCapture(JSON.parse(await readFile(path, "utf8")) as unknown);
       if (existing.event_id !== event.event_id) throw new Error("capture event hash collision");
-      if (existing.account_id !== device.account_id) throw new Error("capture event account mismatch");
-      if (existing.device_id !== device.device_id) throw new Error("capture event device mismatch");
+      if (existing.account_id !== actor.account_id) throw new Error("capture event account mismatch");
+      if (existing.actor_id !== actor.actor_id) throw new Error("capture event actor mismatch");
       const merged = mergeCaptureEvent(existing, event);
-      const alreadyIngested = await isCaptureIngested(stateRoot, device.account_id, existing.event_id);
+      const alreadyIngested = await isCaptureIngested(stateRoot, actor.account_id, existing.event_id);
       if (!merged.updated) {
         await assertCaptureIngestIntent(path, existing);
         await upsertCaptureIndexUnlocked(stateRoot, existing, alreadyIngested);
@@ -266,27 +192,27 @@ export async function storeCaptureEvent(
       const updated: StoredCaptureEvent = { ...existing, ...merged.event };
       assertCaptureCompleteness(updated);
       await assertCaptureIngestIntent(path, updated);
-      await markCaptureIndexDirty(stateRoot, device.account_id, event.event_id);
+      await markCaptureIndexDirty(stateRoot, actor.account_id, event.event_id);
       await writeStoredCapture(path, updated);
       await upsertCaptureIndexUnlocked(stateRoot, updated);
-      await clearCaptureIndexDirty(stateRoot, device.account_id, event.event_id);
+      await clearCaptureIndexDirty(stateRoot, actor.account_id, event.event_id);
       return { created: false, updated: true, event: updated };
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
     }
     assertCaptureCompleteness(stored);
-    await markCaptureIndexDirty(stateRoot, device.account_id, event.event_id);
+    await markCaptureIndexDirty(stateRoot, actor.account_id, event.event_id);
     await writeStoredCapture(path, stored, true);
     await upsertCaptureIndexUnlocked(stateRoot, stored, false);
-    await clearCaptureIndexDirty(stateRoot, device.account_id, event.event_id);
+    await clearCaptureIndexDirty(stateRoot, actor.account_id, event.event_id);
     return { created: true, updated: false, event: stored };
   });
 }
 
 /**
  * Serialize same-event Core attempts and freeze the complete payload before
- * the first upstream write. Both the HTTP capture and explicit recovery
- * paths must use this entry point; a crash leaves a durable intent to fence
+ * the first upstream write. Both the normal L1 turn path and explicit recovery
+ * must use this entry point; a crash leaves a durable intent to fence
  * later enrichment against the original deterministic Core request ID.
  */
 export async function withCaptureIngestAttempt<T extends { ingested: boolean }>(input: {
@@ -662,16 +588,14 @@ export async function listCaptureIndexEntries(
 function normalizeStoredCapture(value: unknown): StoredCaptureEvent {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("stored capture is invalid");
   const record = value as Record<string, unknown>;
+  const actorId = optionalText(record.actor_id, 200) ?? optionalText(record.device_id, 200);
+  if (!actorId) throw new Error("stored capture actor_id is invalid");
   return {
     ...normalizeCaptureEvent(record),
     account_id: requiredId(record.account_id, "account_id", 500),
-    device_id: requiredId(record.device_id, "device_id", 200),
+    actor_id: requiredId(actorId, "actor_id", 200),
     received_at: normalizeTimestamp(record.received_at)
   };
-}
-
-function devicesPath(stateRoot: string): string {
-  return join(resolve(stateRoot), "devices.json");
 }
 
 function captureEventPath(stateRoot: string, accountId: string, eventId: string): string {
@@ -1016,54 +940,6 @@ async function writeStoredCapture(path: string, event: StoredCaptureEvent, exclu
   }
 }
 
-async function loadDevices(stateRoot: string): Promise<DeviceStore> {
-  try {
-    const raw = JSON.parse(await readFile(devicesPath(stateRoot), "utf8")) as unknown;
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("devices store invalid");
-    const record = raw as { version?: unknown; devices?: unknown };
-    if (record.version !== 1 || !Array.isArray(record.devices)) throw new Error("devices store invalid");
-    return { version: 1, devices: record.devices.map(normalizeDeviceRecord) };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { version: 1, devices: [] };
-    throw error;
-  }
-}
-
-async function saveDevices(stateRoot: string, store: DeviceStore): Promise<void> {
-  const path = devicesPath(stateRoot);
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
-  try {
-    await writeFile(temporary, JSON.stringify(store, null, 2) + "\n", { mode: 0o600 });
-    await rename(temporary, path);
-  } catch (error) {
-    await rm(temporary, { force: true }).catch(() => undefined);
-    throw error;
-  }
-}
-
-function normalizeDeviceRecord(value: unknown): DeviceRecord {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("device record invalid");
-  const record = value as Record<string, unknown>;
-  return {
-    device_id: requiredId(record.device_id, "device_id", 200),
-    account_id: requiredId(record.account_id, "account_id", 500),
-    name: requiredId(record.name, "name", 200),
-    token_hash: requiredHex(record.token_hash, "token_hash"),
-    created_at: normalizeTimestamp(record.created_at),
-    ...(optionalText(record.last_seen_at, 100) ? { last_seen_at: normalizeTimestamp(record.last_seen_at) } : {}),
-    ...(optionalText(record.revoked_at, 100) ? { revoked_at: normalizeTimestamp(record.revoked_at) } : {})
-  };
-}
-
-async function withDeviceMutation<T>(stateRoot: string, run: () => Promise<T>): Promise<T> {
-  return withFileMutationLock(devicesPath(stateRoot), run);
-}
-
-function tokenHash(token: string): string {
-  return createHash("sha256").update(token, "utf8").digest("hex");
-}
-
 function requiredId(value: unknown, field: string, max: number): string {
   if (typeof value !== "string") throw new TypeError(`${field} must be a string`);
   const normalized = value.trim();
@@ -1071,11 +947,6 @@ function requiredId(value: unknown, field: string, max: number): string {
     throw new TypeError(`${field} is invalid`);
   }
   return normalized;
-}
-
-function requiredHex(value: unknown, field: string): string {
-  if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) throw new TypeError(`${field} is invalid`);
-  return value;
 }
 
 function optionalText(value: unknown, max: number): string | undefined {

@@ -6,7 +6,7 @@ Memhub should reduce the amount of background you need to repeat. The normal flo
 
 ## Confirm scope before work
 
-Account is the stable human boundary. Devices and harnesses are provenance. Project is the primary business-memory boundary. Explicit current workspace/project evidence overrides stale conversation binding. Ambiguous evidence should not be guessed into a project.
+Account is the stable human boundary. Devices, models, transports, and harnesses are provenance. Project is the primary business-memory boundary. Current workspace/project evidence determines project scope; host conversation identity does not. Ambiguous evidence should not be guessed into a project.
 
 “All projects” is a portfolio view, not a giant combined project. Select one project to expand Current Truth, TODOs, chronology, and provenance.
 
@@ -30,13 +30,15 @@ L1 is source evidence. L2 is project chronology. L3 is stable project rules and 
 
 Skill is orthogonal: it is a reusable procedure, not L5. It can travel across projects without importing source-project business facts.
 
+Skill telemetry records selected/loaded/invoked/success/failure/user-correction stages. Repeated successful executions are stronger evidence than a procedure that merely looks reusable in text. Promotion state therefore moves from insufficient evidence to candidate/proven as successful execution evidence accumulates; it remains a governance signal and never bypasses revision/retire authorization.
+
 ## Trace a conclusion
 
 Start at the durable conclusion, inspect project/time/provenance, trace through L2 chronology, then open L1 when original evidence is required. Do not start routine work by scanning thousands of raw turns.
 
 ## Continue across chats and devices
 
-In a new chat, provide current project/workspace evidence and let the harness recall context. On Server Edition, multiple devices can share one stable account while retaining project isolation. Revoking one device token should not erase account memory.
+In a new chat, provide current project/workspace evidence and let the harness recall context. On Server Edition, multiple clients can share one stable account while retaining project isolation. Revoking one client/OAuth credential should not erase account memory.
 
 ## Processing workflow
 
@@ -45,6 +47,28 @@ User sees processing status; Admin can configure automatic policy. Prioritize fa
 ## Portfolio workflow
 
 Use All Projects to decide where attention belongs: pending work first, then recency, then processing exceptions and L2/L3 readiness. The portfolio should stay compact. Open one project before reading full Current Truth or provenance.
+
+## Progressive disclosure
+
+Long-memory retrieval follows `discover → contextualize/hydrate` instead of eagerly injecting every matched body. `memmy_context` discovers compact L2/L3/L4 candidates and, when the current revision can be proven, returns an exact `evidenceRef`. Load only the selected full revision with `memhub_memory action=load`; load Skill bodies separately with `memhub_skill action=load`.
+
+`memhub_memory` accepts the exact immutable revision ref returned by context, such as `l2:<memory-id>:<revision-id>`. Do not reconstruct “latest” from a stable Memory ID. Hydration records estimated token cost and reuse count so usefulness can be measured by actual reuse rather than stored volume.
+
+## Visual chronology, revision history, and evidence
+
+The User/Admin **Visual map** is a read-only projection of Memory Core plus the distillation revision ledger, not another memory database. It places current L2/L3/L4, historical revisions, L2 timeline events, Skills, and evidence references in one map. Historical revisions are visually distinct; revision edges show supersession and evidence edges preserve exact provenance. Selecting a node exposes its project, time, exact revision ref, and evidence before routing management back to the canonical source layer.
+
+The console ships a lightweight SVG renderer and can export either a standalone HTML snapshot or an Archify-compatible lifecycle IR. The IR is intended for Archify's richer viewer/rendering workflow; exported diagrams remain disposable communication artifacts and never become Current Truth.
+
+When an all-project or otherwise broad scope matches many nodes, the in-browser graph is intentionally bounded rather than laying out hundreds of nodes and relations at once. Once the display budget is exceeded, the UI samples across L2/L3/L4, Skill, Event, and Evidence lanes while prioritizing current memory/current revisions before timeline events, historical revisions, and evidence nodes; relation edges are balanced across evidence, revision, and chronology. The console must show matching and displayed counts for both nodes and relations; truncation must never be silent. Select a concrete project or narrow the search when a complete in-browser graph is required. This sampling affects only the projection UI and does not modify the API payload, Memory Core, revision ledger, or any canonical artifact.
+
+The two export actions therefore have different semantics. The Archify IR export serializes the complete lifecycle IR from the current API payload. The standalone HTML export serializes only the graph actually rendered in the browser and records its coverage. If the browser view is bounded, the HTML must state the displayed-versus-matching counts for both nodes and relations rather than implying that a partial snapshot is complete.
+
+## Consolidation / reflection
+
+When a project accumulates multiple L2 or L3 revisions, `memhub_distill action=consolidate` can produce a read-only consolidation plan. The workflow borrows the useful part of EverOS Reflection without adding another layer: select historical revisions, recover their canonical upstream evidence, let the connected harness merge/re-extract a compact replacement, then submit it through the existing governed writer to the same canonical project timeline/profile artifact.
+
+Old revisions remain traceable history. The plan does not invent the replacement content and does not bypass scope/evidence validation. With insufficient evidence or only one revision, it remains ineligible.
 
 ## Ending or pausing projects
 
@@ -58,6 +82,8 @@ Clean up stale TODOs, preserve final chronology and stable rules, and avoid logi
 - Project A rules do not leak into B.
 - Skills reuse process, not business facts.
 - Failed processing is visible and actionable.
+- Full bodies are hydrated only for selected exact revisions rather than every recall hit.
+- Visual map distinguishes current from historical revisions and traces evidence back to source.
 
 ## FAQ
 

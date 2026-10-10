@@ -10,11 +10,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import Database from "better-sqlite3";
-import { MemhubBridgeQueue, bridgeRetryDelayMs, saveBridgeConfig } from "../dist/bridge.js";
 import { FileProjectArchitectureSource } from "../dist/architecture-source.js";
 import { JsonProjectRegistry } from "../dist/project-registry.js";
 import { addAccount, ensureLocalAdminToken, setAccountRole } from "../dist/auth.js";
-import { createDevice, countCaptureEvents, isCaptureIngested, listCaptureEvents, revokeDevice, storeCaptureEvent } from "../dist/capture.js";
+import { listCaptureEvents } from "../dist/capture.js";
 import { defaultMemoryUserId } from "../dist/memory-source.js";
 import {
   completeDistillationJob,
@@ -31,7 +30,6 @@ import {
 
 const here = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const mcpEntry = resolve(here, "../dist/mcp.js");
-const bridgeEntry = resolve(here, "../dist/bridge.js");
 const root = await mkdtemp(join(tmpdir(), "memhub-mcp-"));
 const historyDbPath = join(root, "history.sqlite");
 const historyDb = new Database(historyDbPath);
@@ -308,7 +306,7 @@ const insertMemory = historyDb.prepare(`
 `);
 insertMemory.run(
   "history-project-memory-1", historyUserId, "legacy-project-chat", "Project architecture decision from earlier history",
-  "L1", JSON.stringify(["project:aide"]), JSON.stringify({ project_id: "aide" }), "{}",
+  "L1", JSON.stringify(["project:alpha"]), JSON.stringify({ project_id: "alpha" }), "{}",
   "2026-09-17T08:00:00.000Z", "2026-09-17T08:00:00.000Z"
 );
 insertMemory.run(
@@ -549,118 +547,10 @@ try {
   await testHttp(memoryPort);
   await testLocalAdmin(memoryPort);
   await testRootBasePath(memoryPort);
-  await testBridgeMcpProxy();
   console.log("memhub-mcp-e2e: ok");
 } finally {
   await new Promise((resolveClose) => memory.close(resolveClose));
   await rm(root, { recursive: true, force: true });
-}
-
-async function testBridgeMcpProxy() {
-  const upstreamPort = await freePort();
-  const bridgePort = await freePort();
-  const bridgeRoot = join(root, "bridge-proxy");
-  const deviceToken = `mhdev_${"x".repeat(48)}`;
-  const observed = [];
-  const upstream = createServer(async (request, response) => {
-    let raw = "";
-    for await (const chunk of request) raw += chunk;
-    observed.push({ headers: request.headers, body: raw, method: request.method, url: request.url });
-    if (request.url === "/context") {
-      const parsed = raw ? JSON.parse(raw) : {};
-      if (parsed.query === "__timeout__") {
-        await new Promise((resolveDelay) => setTimeout(resolveDelay, 300));
-        response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ late: true }));
-        return;
-      }
-      response.writeHead(200, { "content-type": "application/json" });
-      response.write('{"content":"');
-      for (let index = 0; index < 12; index += 1) response.write("界".repeat(50_000));
-      response.end('"}');
-      return;
-    }
-    response.writeHead(200, { "content-type": "application/json", "mcp-session-id": "bridge-proxy-session" });
-    response.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } }));
-  });
-  await new Promise((ready, reject) => {
-    upstream.once("error", reject);
-    upstream.listen(upstreamPort, "127.0.0.1", ready);
-  });
-  await saveBridgeConfig(bridgeRoot, {
-    mcpEndpoint: `http://127.0.0.1:${upstreamPort}/mcp`,
-    captureEndpoint: `http://127.0.0.1:${upstreamPort}/capture`,
-    deviceToken,
-    cloudflareAccessClientId: "test-service-id",
-    cloudflareAccessClientSecret: "test-service-secret"
-  });
-  const child = spawn(process.execPath, [resolve(here, "../dist/bridge.js"), "serve", "--port", String(bridgePort)], {
-    env: { ...process.env, MEMHUB_BRIDGE_HOME: bridgeRoot, MEMHUB_BRIDGE_UPSTREAM_TIMEOUT_MS: "100" },
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  let stderr = "";
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (data) => { stderr += data; });
-  try {
-    const deadline = Date.now() + 5_000;
-    while (!stderr.includes("[memhub-bridge] listening") && Date.now() < deadline) {
-      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
-    }
-    assert.match(stderr, /\[memhub-bridge\] listening/);
-    const response = await fetch(`http://127.0.0.1:${bridgePort}/mcp`, {
-      method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" })
-    });
-    assert.equal(response.status, 200);
-    assert.equal(response.headers.get("mcp-session-id"), "bridge-proxy-session");
-    assert.equal(observed.length, 1);
-    assert.equal(observed[0].headers["x-memhub-device-token"], deviceToken);
-    assert.equal(observed[0].headers["cf-access-client-id"], "test-service-id");
-    assert.equal(observed[0].headers["cf-access-client-secret"], "test-service-secret");
-
-    const longContext = await fetch(`http://127.0.0.1:${bridgePort}/context`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ query: "long context passthrough" })
-    });
-    assert.equal(longContext.status, 200);
-    const longContextPayload = await longContext.json();
-    assert.equal(longContextPayload.content.length, 600_000);
-    assert.equal(observed.at(-1).url, "/context");
-
-    const oversizedMcp = await fetch(`http://127.0.0.1:${bridgePort}/mcp`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: "x".repeat(4_000_001)
-    });
-    assert.equal(oversizedMcp.status, 413);
-    assert.equal((await oversizedMcp.json()).error, "request_body_too_large");
-
-    const timedOutContext = await fetch(`http://127.0.0.1:${bridgePort}/context`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ query: "__timeout__" })
-    });
-    assert.equal(timedOutContext.status, 504);
-    assert.equal((await timedOutContext.json()).error, "upstream_timeout");
-
-    await new Promise((resolveClose, rejectClose) => upstream.close((error) => error ? rejectClose(error) : resolveClose()));
-    const unavailableContext = await fetch(`http://127.0.0.1:${bridgePort}/context`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ query: "upstream unavailable classification" })
-    });
-    assert.equal(unavailableContext.status, 502);
-    assert.equal((await unavailableContext.json()).error, "upstream_unavailable");
-  } finally {
-    child.kill("SIGTERM");
-    await new Promise((resolveExit) => {
-      child.once("exit", resolveExit);
-      setTimeout(resolveExit, 500);
-    });
-    if (upstream.listening) await new Promise((resolveClose) => upstream.close(resolveClose));
-  }
 }
 
 async function testLocalAdmin(memoryPort) {
@@ -668,7 +558,6 @@ async function testLocalAdmin(memoryPort) {
   const stateRoot = join(root, "local-admin");
   const account = await addAccount(stateRoot, "admin-test", "admin@example.com");
   await setAccountRole(stateRoot, account.account_id, "admin");
-  const device = await createDevice(stateRoot, account.account_id, "control-plane-l1-test");
   const controlUserId = defaultMemoryUserId(account.account_id);
   memoryById.set("legacy-control-l1", {
     id: "legacy-control-l1",
@@ -743,7 +632,6 @@ async function testLocalAdmin(memoryPort) {
     "--account", account.account_id,
     "--memory-url", `http://127.0.0.1:${memoryPort}`,
     "--state-root", stateRoot,
-    "--bindings", join(root, "local-admin-bindings.json"),
     "--public-host", "memhub.example.test",
   ], { env: { ...process.env, MEMHUB_MEMORY_DB: historyDbPath }, stdio: ["ignore", "pipe", "pipe"] });
   let stderr = "";
@@ -760,19 +648,21 @@ async function testLocalAdmin(memoryPort) {
     });
     assert.equal(forwardedHttp.status, 308);
     assert.equal(forwardedHttp.headers.location, "https://memhub.example.test/memhub?source=http");
-    const partialCapture = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-memhub-device-token": device.token },
-      body: JSON.stringify({
-        event_id: "control-plane-live-turn",
-        host: "chatgpt",
-        conversation_id: "control-plane-live-chat",
-        timestamp: "2026-09-20T12:44:13.827Z",
-        user_text: "This live conversation has not reached assistant final yet.",
-        capture_status: "partial"
-      })
-    });
-    assert.equal(partialCapture.status, 201);
+    const loopbackClient = new Client({ name: "memhub-local-public-host-test", version: "1.0.0" });
+    await loopbackClient.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
+    try {
+      const partialTurn = JSON.parse((await loopbackClient.callTool({
+        name: "memmy_turn",
+        arguments: {
+          action: "open",
+          event_id: "control-plane-live-turn",
+          user_text: "This live conversation has not reached assistant final yet."
+        }
+      })).content[0].text);
+      assert.equal(partialTurn.turn.status, "open");
+    } finally {
+      await loopbackClient.close();
+    }
     const anonymous = await fetch(`http://127.0.0.1:${port}/memhub/admin`);
     assert.equal(anonymous.status, 401);
     assert.match(anonymous.headers.get("www-authenticate") ?? "", /Memhub local admin/);
@@ -1009,23 +899,6 @@ async function testLocalAdmin(memoryPort) {
     assert.equal((await reopenBetaTodo.json()).result.todos.find((todo) => todo.id === betaTodo.id)?.completedAt, undefined);
     const recompleteBetaTodo = await adminAction({ action: "set-project-todo-status", project: "ui-beta", todo_id: betaTodo.id, status: "done" });
     assert.equal(recompleteBetaTodo.status, 200);
-    const rebuildBeta = await adminAction({ action: "queue-legacy-rebuild", project: "ui-beta" });
-    assert.equal(rebuildBeta.status, 200);
-    const rebuildPayload = await rebuildBeta.json();
-    assert.equal(rebuildPayload.rebuild.queued_jobs, 1);
-    assert.equal(rebuildPayload.rebuild.projects[0].project_id, "ui-beta");
-    assert.equal(rebuildPayload.rebuild.projects[0].evidence_count, 2);
-    assert.equal(rebuildPayload.rebuild.projects[0].raw_turn_count, 1);
-    assert.equal(rebuildPayload.rebuild.projects[0].memory_count, 1);
-    assert.equal(rebuildPayload.rebuild.projects[0].deduped_memory_count, 1);
-    assert.equal(rebuildPayload.rebuild.projects[0].excluded_capture_count, 1);
-    const migrationJob = (await listDistillationJobs(stateRoot, account.account_id))
-      .find((job) => job.reason === "migration" && job.project_id === "ui-beta");
-    assert.ok(migrationJob);
-    assert.equal(migrationJob.target, "l2");
-    assert.deepEqual(migrationJob.evidence_refs, ["raw-turn:raw_legacy_ui_beta", "l1-memory:legacy-control-l1"]);
-    assert.equal(migrationJob.evidence.some((item) => item.kind === "turn" && item.ref === "raw-turn:raw_legacy_ui_beta"), true);
-    assert.equal(migrationJob.evidence.some((item) => item.kind === "memory" && item.ref === "l1-memory:legacy-control-l1"), true);
     const scopedL1 = await fetch(`http://127.0.0.1:${port}/memhub/admin/api?kind=l1&project=ui-beta`, { headers: { authorization } });
     assert.equal(scopedL1.status, 200);
     const scopedL1Payload = await scopedL1.json();
@@ -1281,11 +1154,9 @@ async function testRootBasePath(memoryPort) {
     mcpEntry,
     "--http", String(port),
     "--http-path", "/mcp",
-    "--capture-path", "/capture",
     "--account", account.account_id,
     "--memory-url", `http://127.0.0.1:${memoryPort}`,
     "--state-root", stateRoot,
-    "--bindings", join(root, "root-base-path-bindings.json"),
   ], {
     env: { ...process.env, MEMHUB_BASE_PATH: "/", MEMHUB_MEMORY_DB: historyDbPath },
     stdio: ["ignore", "pipe", "pipe"]
@@ -1343,45 +1214,45 @@ function rawHttp(port, path, headers = {}) {
 
 async function testStdio(memoryPort) {
   const stateRoot = join(root, "stdio-state");
-  const architectureDir = join(root, "normify-aide", "modules", "aide");
+  const architectureDir = join(root, "normify-alpha", "modules", "alpha");
   const currentArchitectureDir = join(root, "Memhub", "docs");
-  const nestedSelfmediaDir = join(root, "codex-workspace", "selfmedia");
+  const nestedBetaDir = join(root, "agent-workspace", "beta");
   await mkdir(architectureDir, { recursive: true });
   await mkdir(currentArchitectureDir, { recursive: true });
-  await mkdir(nestedSelfmediaDir, { recursive: true });
+  await mkdir(nestedBetaDir, { recursive: true });
   await writeFile(join(root, "Memhub", "package.json"), JSON.stringify({ name: "memhub-test-project" }) + "\n");
   await writeFile(
     join(architectureDir, "core.md"),
-    "# AIDE Core Architecture\n\nBroker routes work to the harness router. Current constraint: preserve explicit workspace ownership.\n"
+    "# ALPHA Core Architecture\n\nBroker routes work to the harness router. Current constraint: preserve explicit workspace ownership.\n"
   );
   await writeFile(
     join(currentArchitectureDir, "ARCHITECTURE.md"),
     "# Memhub Current Architecture\n\nL1 is authoritative source evidence. L2 and L3 are project-scoped, L4 is account-scoped.\n"
   );
-  const selfmediaRepoArchitecture = join(nestedSelfmediaDir, "ARCHITECTURE.md");
-  const selfmediaRepoBody = "# Selfmedia Repository Architecture\n\nRepository architecture is a read-only migration seed.\n";
-  await writeFile(selfmediaRepoArchitecture, selfmediaRepoBody);
+  const betaRepoArchitecture = join(nestedBetaDir, "ARCHITECTURE.md");
+  const betaRepoBody = "# Beta Repository Architecture\n\nRepository architecture is a read-only migration seed.\n";
+  await writeFile(betaRepoArchitecture, betaRepoBody);
   const architectureReader = new FileProjectArchitectureSource({ rootDir: root });
-  const selfmediaTarget = await architectureReader.inspectProjectArchitecture({ accountId: "acct-test", projectId: "selfmedia" });
-  assert.ok(selfmediaTarget);
-  assert.equal(selfmediaTarget.exists, false);
-  assert.match(selfmediaTarget.path, /\.memhub-project-architecture\/[^/]+\/selfmedia\/ARCHITECTURE\.md$/);
-  assert.match(selfmediaTarget.content, /Repository architecture is a read-only migration seed/);
-  const selfmediaWritten = await architectureReader.writeProjectArchitecture({
+  const betaTarget = await architectureReader.inspectProjectArchitecture({ accountId: "acct-test", projectId: "beta" });
+  assert.ok(betaTarget);
+  assert.equal(betaTarget.exists, false);
+  assert.match(betaTarget.path, /\.memhub-project-architecture\/[^/]+\/beta\/ARCHITECTURE\.md$/);
+  assert.match(betaTarget.content, /Repository architecture is a read-only migration seed/);
+  const betaWritten = await architectureReader.writeProjectArchitecture({
     accountId: "acct-test",
-    projectId: "selfmedia",
-    expectedPath: selfmediaTarget.path,
-    expectedFingerprint: selfmediaTarget.fingerprint,
-    content: "# Selfmedia Managed Architecture\n\nMemhub-managed architecture is canonical after explicit migration.\n"
+    projectId: "beta",
+    expectedPath: betaTarget.path,
+    expectedFingerprint: betaTarget.fingerprint,
+    content: "# Beta Managed Architecture\n\nMemhub-managed architecture is canonical after explicit migration.\n"
   });
-  assert.equal(selfmediaWritten.after.exists, true);
-  assert.match(selfmediaWritten.after.content, /Memhub-managed architecture is canonical/);
-  assert.equal(await readFile(selfmediaRepoArchitecture, "utf8"), selfmediaRepoBody,
+  assert.equal(betaWritten.after.exists, true);
+  assert.match(betaWritten.after.content, /Memhub-managed architecture is canonical/);
+  assert.equal(await readFile(betaRepoArchitecture, "utf8"), betaRepoBody,
     "Architecture writer must never mutate the repository source document");
   const discoveredArchitectureProjects = await architectureReader.listProjects("acct-test");
-  assert.ok(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "aide"));
+  assert.ok(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "alpha"));
   assert.ok(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "memhub"));
-  assert.ok(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "selfmedia"));
+  assert.ok(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "beta"));
   assert.equal(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "docs"), false);
   const currentDocs = await architectureReader.getProjectArchitecture({
     accountId: "acct-test",
@@ -1390,16 +1261,16 @@ async function testStdio(memoryPort) {
   });
   assert.ok(currentDocs.some((item) => /Memhub Current Architecture/.test(item.content)));
   assert.ok(currentDocs.some((item) => item.provenance?.format === "project-docs"));
-  const selfmediaDocs = await architectureReader.getProjectArchitecture({
+  const betaDocs = await architectureReader.getProjectArchitecture({
     accountId: "acct-test",
-    projectId: "selfmedia",
+    projectId: "beta",
     query: "canonical managed architecture"
   });
-  assert.ok(selfmediaDocs.some((item) => /Memhub-managed architecture is canonical/.test(item.content)));
-  assert.ok(selfmediaDocs.every((item) => item.provenance?.format === "managed-project-doc"));
+  assert.ok(betaDocs.some((item) => /Memhub-managed architecture is canonical/.test(item.content)));
+  assert.ok(betaDocs.every((item) => item.provenance?.format === "managed-project-doc"));
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [mcpEntry, "--account", "acct-test", "--memory-url", `http://127.0.0.1:${memoryPort}`, "--state-root", stateRoot, "--bindings", join(root, "stdio-bindings.json"), "--normify-root", root],
+    args: [mcpEntry, "--account", "acct-test", "--memory-url", `http://127.0.0.1:${memoryPort}`, "--state-root", stateRoot, "--normify-root", root],
     env: { ...process.env },
     stderr: "pipe"
   });
@@ -1420,7 +1291,10 @@ async function exerciseArchitectureGovernance(client, stateRoot) {
   })).content[0].text);
   assert.ok(before.architecture.some((item) => /Memhub Current Architecture/.test(item.content)));
 
-  const replacement = "# Memhub Current Architecture\n\nL1 is evidence. L2 is project chronology. L3 is project durable rules. L4 is account-wide durable profile.\n";
+  const replacementA = "# Memhub Current Architecture\n\nL1 is evidence. L2 is project chronology. L3 is project durable rules. L4 is account-wide durable profile.\n";
+  const replacementB = "# Memhub Current Architecture\n\nL1 preserves evidence. L2 preserves chronology. L3 preserves project rules. L4 preserves account-wide durable profile.\n";
+  const currentBody = before.architecture.map((item) => item.content).join("\n");
+  const replacement = currentBody.includes("L2 is project chronology") ? replacementB : replacementA;
   const plan = JSON.parse((await client.callTool({
     name: "memmy_project",
     arguments: {
@@ -1450,13 +1324,15 @@ async function exerciseArchitectureGovernance(client, stateRoot) {
     name: "memmy_project",
     arguments: { action: "architecture", project: "memhub", workspace_project: "memhub", query: "chronology durable rules" }
   })).content[0].text);
-  assert.ok(after.architecture.some((item) => /L2 is project chronology/.test(item.content)));
+  assert.ok(after.architecture.some((item) => item.content.includes(replacement.split("\n\n", 2)[1].trim())));
   const history = JSON.parse((await client.callTool({
     name: "memmy_project",
     arguments: { action: "architecture_history", project: "memhub", workspace_project: "memhub" }
   })).content[0].text);
-  assert.ok(history.revisions.some((item) => item.revision_id === executed.revision_id && item.status === "committed"));
-  assert.ok(history.revisions.some((item) => /L1 is authoritative source evidence/.test(item.before_content)));
+  const committedRevision = history.revisions.find((item) => item.revision_id === executed.revision_id);
+  assert.equal(committedRevision?.status, "committed");
+  assert.ok(committedRevision?.before_content?.trim());
+  assert.notEqual(committedRevision.before_content.trim(), replacement.trim());
 
   const stalePlan = JSON.parse((await client.callTool({
     name: "memmy_project",
@@ -1521,15 +1397,14 @@ async function listArchitectureAuditFiles(stateRoot) {
 async function testHttp(memoryPort) {
   const port = await freePort();
   const stateRoot = join(root, "state");
-  const createdDevice = await createDevice(stateRoot, "acct-test", "test-device");
+  const httpEnv = { ...process.env, MEMHUB_MEMORY_DB: historyDbPath, MEMHUB_OWNER_ACCOUNT_ID: "acct-test" };
+  delete httpEnv.MEMHUB_ACCOUNT_ID;
   const child = spawn(process.execPath, [
     mcpEntry,
     "--http", String(port),
-    "--account", "acct-test",
     "--memory-url", `http://127.0.0.1:${memoryPort}`,
     "--state-root", stateRoot,
-    "--bindings", join(root, "http-bindings.json"),
-  ], { env: { ...process.env, MEMHUB_MEMORY_DB: historyDbPath }, stdio: ["ignore", "pipe", "pipe"] });
+  ], { env: httpEnv, stdio: ["ignore", "pipe", "pipe"] });
   let stderr = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (data) => { stderr += data; });
@@ -1551,12 +1426,12 @@ async function testHttp(memoryPort) {
       await client.connect(transport);
       await exerciseClient(client, "http-chat", stateRoot);
       const projects = JSON.parse((await client.callTool({ name: "memmy_project", arguments: { action: "list" } })).content[0].text);
-      assert.ok(projects.projects.includes("aide"));
+      assert.ok(projects.projects.includes("alpha"));
       assert.ok(!projects.projects.some((project) => /^ws_[a-f0-9]{32,}$/i.test(project)));
 
       const longContext = JSON.parse((await client.callTool({
         name: "memmy_context",
-        arguments: { query: "__long_context_probe__", project: "aide", limit: 1 }
+        arguments: { query: "__long_context_probe__", project: "alpha", limit: 1 }
       })).content[0].text);
       const longContextItem = longContext.globalMemory.find((item) => item.id === "long-context-probe");
       assert.ok(longContextItem);
@@ -1567,7 +1442,7 @@ async function testHttp(memoryPort) {
       assert.ok(longContext.contextBudget.emittedContentBytes <= longContext.contextBudget.maxContentBytes);
 
       const longEvidenceProject = "long-evidence-http";
-      const registry = new JsonProjectRegistry(join(root, "project-registry.json"));
+      const registry = new JsonProjectRegistry(join(stateRoot, "project-registry.json"));
       if (!(await registry.resolve("acct-test", longEvidenceProject))) {
         await registry.create("acct-test", {
           projectId: longEvidenceProject,
@@ -1628,850 +1503,35 @@ async function testHttp(memoryPort) {
       await client.close();
     }
 
-    const captureCountBaseline = await countCaptureEvents(stateRoot);
-    const distillationCountBaseline = (await listDistillationJobs(stateRoot, "acct-test")).length;
-
-    const captureEvent = {
-      event_id: "capture-http-1",
-      host: "coworker",
-      host_version: "test",
-      conversation_id: "capture-conversation",
-      turn_id: "turn-1",
-      timestamp: "2026-09-18T08:00:00.000Z",
-      project_hint: "aide",
-      user_text: "continue implementation",
-      assistant_text: "implemented capture protocol"
-    };
-    const missingDeviceAuth = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(captureEvent)
-    });
-    assert.equal(missingDeviceAuth.status, 401);
-    assert.equal((await missingDeviceAuth.json()).error, "missing_device_token");
-    assert.match(missingDeviceAuth.headers.get("x-memhub-request-id") ?? "", /^[0-9a-f-]{36}$/);
-    const invalidDeviceAuth = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: "Bearer mhdev_invalid-test-token" },
-      body: JSON.stringify(captureEvent)
-    });
-    assert.equal(invalidDeviceAuth.status, 403);
-    assert.equal((await invalidDeviceAuth.json()).error, "invalid_or_revoked_device");
-    assert.match(invalidDeviceAuth.headers.get("x-memhub-request-id") ?? "", /^[0-9a-f-]{36}$/);
-    const direct = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${createdDevice.token}`
-      },
-      body: JSON.stringify(captureEvent)
-    });
-    assert.equal(direct.status, 201);
-    assert.match(direct.headers.get("x-memhub-request-id") ?? "", /^[0-9a-f-]{36}$/);
-    const duplicate = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${createdDevice.token}`
-      },
-      body: JSON.stringify(captureEvent)
-    });
-    assert.equal(duplicate.status, 200);
-    assert.equal((await duplicate.json()).duplicate, true);
-    assert.equal(await countCaptureEvents(stateRoot), captureCountBaseline + 1);
-    assert.ok(requests.some((entry) => entry.url === "/api/v1/sessions/open"));
-    assert.ok(requests.some((entry) => entry.url?.startsWith("/api/v1/turns/") && entry.url.endsWith("/complete")));
-
-    const completeBeforePartial = requests.filter((entry) => entry.url?.startsWith("/api/v1/turns/") && entry.url.endsWith("/complete")).length;
-    const partial = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${createdDevice.token}`
-      },
-      body: JSON.stringify({
-        event_id: "capture-partial-1",
-        host: "codex",
-        conversation_id: "partial-conversation",
-        turn_id: "partial-turn",
-        timestamp: "2026-09-18T08:01:00.000Z",
-        user_text: "user side only"
-      })
-    });
-    assert.equal(partial.status, 201);
-    const partialBody = await partial.json();
-    assert.equal(partialBody.ingestion.ingested, false);
-    assert.equal(partialBody.ingestion.reason, "turn_not_complete:open");
-    assert.equal(await countCaptureEvents(stateRoot), captureCountBaseline + 2);
-    assert.equal(
-      requests.filter((entry) => entry.url?.startsWith("/api/v1/turns/") && entry.url.endsWith("/complete")).length,
-      completeBeforePartial
-    );
-
-    const completedPartial = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${createdDevice.token}`
-      },
-      body: JSON.stringify({
-        event_id: "capture-partial-1",
-        host: "codex",
-        conversation_id: "partial-conversation",
-        turn_id: "partial-turn",
-        timestamp: "2026-09-18T08:01:05.000Z",
-        project_hint: "aide",
-        assistant_text: "assistant side later"
-      })
-    });
-    assert.equal(completedPartial.status, 200);
-    const completedPartialBody = await completedPartial.json();
-    assert.equal(completedPartialBody.updated, true);
-    assert.equal(completedPartialBody.ingestion.ingested, true);
-    assert.equal(completedPartialBody.ingestion.project_id, "aide");
-    assert.equal(await countCaptureEvents(stateRoot), captureCountBaseline + 2);
-    assert.equal(
-      requests.filter((entry) => entry.url?.startsWith("/api/v1/turns/") && entry.url.endsWith("/complete")).length,
-      completeBeforePartial + 1
-    );
-
-    const sessionRequestsBefore = requests.filter((entry) => entry.url === "/api/v1/sessions/open").length;
-    for (const [index, workspacePath] of ["/workspace/first", "/workspace/second"].entries()) {
-      const response = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${createdDevice.token}` },
-        body: JSON.stringify({
-          event_id: `capture-workspace-${index + 1}`, host: "codex",
-          conversation_id: "workspace-changing-conversation", continuity_id: "workspace-changing-continuity",
-          timestamp: `2026-09-18T08:02:0${index}.000Z`, project_hint: "aide",
-          workspace_path: workspacePath, user_text: `workspace user ${index}`, assistant_text: `workspace answer ${index}`,
-          capture_status: "complete"
-        })
-      });
-      assert.equal(response.status, 201, "workspace changes must not collide on session.open idempotency");
-    }
-    const sessionRequests = requests.filter((entry) => entry.url === "/api/v1/sessions/open").slice(sessionRequestsBefore);
-    assert.equal(sessionRequests.length, 2);
-    assert.equal(sessionRequests[0].body.sessionId, sessionRequests[1].body.sessionId);
-    assert.notEqual(sessionRequests[0].body.requestId, sessionRequests[1].body.requestId);
-
-    assert.equal((await listDistillationJobs(stateRoot, "acct-test")).length, distillationCountBaseline);
-    const capturesForDistillation = await listCaptureEvents(stateRoot, "acct-test");
-    const queued = await enqueueDistillationJob({
-      stateRoot,
-      accountId: "acct-test",
-      projectId: "aide",
-      conversationId: "partial-conversation",
-      captures: capturesForDistillation.filter((item) => item.conversation_id === "partial-conversation" && item.ingested),
-      reason: "manual"
-    });
-    assert.equal(queued.created, true);
-    const distillClient = new Client({ name: "memhub-distill-job-test", version: "1.0.0" });
-    const distillTransport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`));
-    try {
-      await distillClient.connect(distillTransport);
-      const next = await distillClient.callTool({
-        name: "memhub_distill",
-        arguments: { action: "next", scope: "project", project: "aide", source_harness: "test-harness" }
-      });
-      const nextPayload = JSON.parse(next.content[0].text);
-      assert.equal(nextPayload.job.job_id, queued.job.job_id);
-      assert.equal(nextPayload.job.evidence.length, 1);
-      assert.equal(nextPayload.job.evidence[0].user_text, "user side only");
-      const skipped = await distillClient.callTool({
-        name: "memhub_distill",
-        arguments: { action: "skip", job_id: queued.job.job_id, source_harness: "test-harness" }
-      });
-      assert.equal(JSON.parse(skipped.content[0].text).skipped, true);
-    } finally {
-      await distillClient.close();
-    }
-    const completedJob = (await listDistillationJobs(stateRoot, "acct-test")).find((item) => item.job_id === queued.job.job_id);
-    assert.equal(completedJob.status, "completed");
-    assert.equal(completedJob.result_kind, "noop");
-
-    const retrySource = capturesForDistillation.filter((item) => item.conversation_id === "capture-conversation" && item.ingested);
-    const retryQueued = await enqueueDistillationJob({
-      stateRoot,
-      accountId: "acct-test",
-      projectId: "aide",
-      conversationId: "capture-conversation",
-      captures: retrySource,
-      reason: "manual"
-    });
-    const retryLeased = await leaseDistillationJob(stateRoot, "acct-test", { projectId: "aide", harness: "retry-test" });
-    assert.equal(retryLeased.job_id, retryQueued.job.job_id);
-    assert.equal(retryLeased.attempts, 1);
-    await failDistillationJob(stateRoot, "acct-test", retryLeased.job_id, "simulated commit failure", "retry-test");
-    const failedJob = (await listDistillationJobs(stateRoot, "acct-test")).find((item) => item.job_id === retryLeased.job_id);
-    assert.equal(failedJob.status, "failed");
-    assert.match(failedJob.failure, /simulated commit failure/);
-    const duplicateAfterFailure = await enqueueDistillationJob({
-      stateRoot,
-      accountId: "acct-test",
-      projectId: "aide",
-      conversationId: "capture-conversation",
-      captures: retrySource,
-      reason: "manual"
-    });
-    assert.equal(duplicateAfterFailure.created, false);
-    assert.equal(duplicateAfterFailure.job.job_id, retryLeased.job_id);
-    const retried = await retryDistillationJob(stateRoot, "acct-test", retryLeased.job_id);
-    assert.equal(retried.status, "pending");
-    assert.equal(retried.evidence_hash, retryLeased.evidence_hash);
-    assert.equal(retried.failure, undefined);
-
-    const bridgeRoot = join(root, "bridge");
-    assert.equal(bridgeRetryDelayMs(0, 1), 5_000);
-    assert.equal(bridgeRetryDelayMs(1, 1), 5_000);
-    assert.equal(bridgeRetryDelayMs(2, 1), 10_000);
-    assert.equal(bridgeRetryDelayMs(3, 1), 20_000);
-    assert.equal(bridgeRetryDelayMs(4, 1), 40_000);
-    assert.equal(bridgeRetryDelayMs(5, 1), 60_000);
-    assert.equal(bridgeRetryDelayMs(10, 0.8), 48_000);
-    assert.equal(bridgeRetryDelayMs(10, 1.2), 72_000);
-    const queue = new MemhubBridgeQueue(bridgeRoot);
-    await saveBridgeConfig(bridgeRoot, {
-      captureEndpoint: "http://127.0.0.1:9/memhub/capture",
-      deviceToken: createdDevice.token
-    });
-    await queue.enqueue({ ...captureEvent, event_id: "capture-queued-1", turn_id: "turn-2" });
-    const offline = await queue.flush(await (await import("../dist/bridge.js")).loadBridgeConfig(bridgeRoot));
-    assert.equal(offline.sent, 0);
-    assert.equal(offline.pending, 1);
-    assert.ok(offline.stopped_on_error);
-    await saveBridgeConfig(bridgeRoot, {
-      captureEndpoint: `http://127.0.0.1:${port}/memhub/capture`,
-      deviceToken: createdDevice.token
-    });
-    const replay = await queue.flush(await (await import("../dist/bridge.js")).loadBridgeConfig(bridgeRoot));
-    assert.equal(replay.sent, 1);
-    assert.equal(replay.pending, 0);
-    assert.equal(await countCaptureEvents(stateRoot), captureCountBaseline + 5);
-
-    const conflictCapture = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${createdDevice.token}` },
-      body: JSON.stringify({
-        event_id: "capture-core-conflict", host: "codex", conversation_id: "capture-core-conflict",
-        continuity_id: "capture-core-conflict", timestamp: "2026-09-18T08:10:00.000Z",
-        project_hint: "aide", user_text: "inject core idempotency conflict",
-        assistant_text: "Core returns an explicit 409", capture_status: "complete"
-      })
-    });
-    assert.equal(conflictCapture.status, 409);
-    assert.match(conflictCapture.headers.get("x-memhub-request-id") ?? "", /^[0-9a-f-]{36}$/);
-    const conflictBody = await conflictCapture.json();
-    assert.equal(conflictBody.error, "capture_ingest_conflict");
-    assert.equal(conflictBody.event_id, "capture-core-conflict");
-    assert.equal((await listCaptureEvents(stateRoot, "acct-test"))
-      .find((item) => item.event_id === "capture-core-conflict")?.ingested, false,
-      "a failed Core write must leave the durable capture un-ingested");
-    const transientCapture = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${createdDevice.token}` },
-      body: JSON.stringify({
-        event_id: "capture-core-transient", host: "codex", conversation_id: "capture-core-transient",
-        continuity_id: "capture-core-transient", timestamp: "2026-09-18T08:11:00.000Z",
-        project_hint: "aide", user_text: "inject core transient failure",
-        assistant_text: "Core returns an explicit 500", capture_status: "complete"
-      })
-    });
-    assert.equal(transientCapture.status, 202);
-    assert.match(transientCapture.headers.get("x-memhub-request-id") ?? "", /^[0-9a-f-]{36}$/);
-    const transientBody = await transientCapture.json();
-    assert.equal(transientBody.accepted, true);
-    assert.equal(transientBody.durable, true);
-    assert.equal(transientBody.retryable, true);
-    assert.equal(transientBody.ingestion.pending, true);
-    assert.equal(transientBody.warning, "memory_core_temporarily_unavailable");
-    assert.equal((await listCaptureEvents(stateRoot, "acct-test"))
-      .find((item) => item.event_id === "capture-core-transient")?.ingested, false);
-    assert.equal(stderr.includes(createdDevice.token), false, "Gateway logs must not leak device tokens");
-    const recoveryClient = new Client({ name: "memhub-capture-recovery-test", version: "1.0.0" });
-    await recoveryClient.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
-    const recoveryCapture = {
-      event_id: "capture-recover-target", host: "codex", conversation_id: "capture-recover-chat",
-      continuity_id: "capture-recover-chat", timestamp: "2026-09-18T08:20:00.000Z",
-      project_hint: "aide", user_text: "recovered user", assistant_text: "recovered assistant",
-      capture_status: "complete"
-    };
-    await storeCaptureEvent(stateRoot, createdDevice.device, recoveryCapture);
-    const completedBeforeDryRun = requests.filter((item) =>
-      item.url?.startsWith("/api/v1/turns/") && item.url.endsWith("/complete")).length;
-    const recoveryArgs = { action: "recover_ingest", event_id: recoveryCapture.event_id, project: "aide" };
-    const dryRecovery = JSON.parse((await recoveryClient.callTool({
-      name: "memhub_distill", arguments: { ...recoveryArgs, dry_run: true }
-    })).content[0].text);
-    assert.equal(dryRecovery.dry_run, true);
-    assert.equal(dryRecovery.already_ingested, false);
-    assert.equal(await isCaptureIngested(stateRoot, "acct-test", recoveryCapture.event_id), false);
-    assert.equal(requests.filter((item) =>
-      item.url?.startsWith("/api/v1/turns/") && item.url.endsWith("/complete")).length,
-      completedBeforeDryRun, "dry-run must not call Core");
-    await storeCaptureEvent(stateRoot, createdDevice.device, {
-      ...recoveryCapture, event_id: "capture-recover-partial", assistant_text: undefined,
-      capture_status: "partial"
-    });
-    const revoked = await createDevice(stateRoot, "acct-test", "revoked recovery device");
-    await storeCaptureEvent(stateRoot, revoked.device, {
-      ...recoveryCapture, event_id: "capture-recover-revoked"
-    });
-    await revokeDevice(stateRoot, revoked.device.device_id);
-    for (const invalidArgs of [
-      { ...recoveryArgs, project: "memhub" },
-      { ...recoveryArgs, workspace_project: "memhub" },
-      { ...recoveryArgs, event_id: "missing-event" },
-      { ...recoveryArgs, event_id: "capture-recover-partial" },
-      { ...recoveryArgs, event_id: "capture-recover-revoked" }
-    ]) {
-      const rejected = await recoveryClient.callTool({ name: "memhub_distill", arguments: invalidArgs });
-      assert.equal(rejected.isError, true, "unknown or mismatched capture must fail closed");
-    }
-    const completedBeforeRecovery = requests.filter((item) =>
-      item.url?.startsWith("/api/v1/turns/") && item.url.endsWith("/complete")).length;
-    const recoveredCapture = JSON.parse((await recoveryClient.callTool({
-      name: "memhub_distill", arguments: recoveryArgs
-    })).content[0].text);
-    assert.equal(recoveredCapture.ok, true);
-    assert.equal(recoveredCapture.ingested, true);
-    assert.equal(recoveredCapture.already_ingested, false);
-    assert.equal(await isCaptureIngested(stateRoot, "acct-test", recoveryCapture.event_id), true);
-    assert.equal(requests.filter((item) =>
-      item.url?.startsWith("/api/v1/turns/") && item.url.endsWith("/complete")).length,
-      completedBeforeRecovery + 1);
-    const recoveredAgain = JSON.parse((await recoveryClient.callTool({
-      name: "memhub_distill", arguments: recoveryArgs
-    })).content[0].text);
-    assert.equal(recoveredAgain.already_ingested, true);
-    assert.equal(requests.filter((item) =>
-      item.url?.startsWith("/api/v1/turns/") && item.url.endsWith("/complete")).length,
-      completedBeforeRecovery + 1, "recovery of marked evidence must not rewrite Core");
-    const conflictingRecovery = await recoveryClient.callTool({
-      name: "memhub_distill", arguments: { ...recoveryArgs, event_id: "capture-core-conflict" }
-    });
-    assert.equal(conflictingRecovery.isError, true);
-    assert.equal(await isCaptureIngested(stateRoot, "acct-test", "capture-core-conflict"), false);
-
-    // One HTTP Capture and one MCP recover_ingest can enter from different
-    // transports while the first Core completeTurn response is held. They
-    // must share the same durable per-event attempt lock; the second path
-    // must observe the marker rather than issue another Core completeTurn.
-    const transportRaceEvent = {
-      event_id: "capture-http-versus-recover", host: "codex",
-      conversation_id: "capture-http-versus-recover",
-      continuity_id: "capture-http-versus-recover",
-      timestamp: "2026-09-18T08:25:00.000Z",
-      project_hint: "aide",
-      user_text: "http and recover racing on same event",
-      assistant_text: "only one Core completion",
-      capture_status: "complete"
-    };
-    const raceCompletionBefore = requests.filter((entry) =>
-      entry.url?.startsWith("/api/v1/turns/") &&
-      entry.url.endsWith("/complete") &&
-      entry.body?.query === transportRaceEvent.user_text).length;
-    const httpRace = fetch(`http://127.0.0.1:${port}/memhub/capture`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${createdDevice.token}` },
-      body: JSON.stringify(transportRaceEvent)
-    });
-    try {
-      await Promise.race([
-        captureVsRecoveryCoreStarted,
-        new Promise((_, reject) => setTimeout(() => reject(new Error("HTTP Core race gate not entered")), 5_000))
-      ]);
-      const recoverRace = recoveryClient.callTool({
-        name: "memhub_distill",
-        arguments: {
-          action: "recover_ingest",
-          event_id: transportRaceEvent.event_id,
-          project: "aide"
-        }
-      });
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      assert.equal(requests.filter((entry) =>
-        entry.url?.startsWith("/api/v1/turns/") &&
-        entry.url.endsWith("/complete") &&
-        entry.body?.query === transportRaceEvent.user_text).length, raceCompletionBefore + 1,
-      "MCP recovery must not send a second Core completion while HTTP holds the same event attempt");
-      releaseCaptureVsRecoveryCore();
-      const httpResult = await httpRace;
-      assert.equal(httpResult.status, 201, await httpResult.text());
-      const recoveredRace = JSON.parse((await recoverRace).content[0].text);
-      assert.equal(recoveredRace.already_ingested, true);
-      assert.equal(await isCaptureIngested(stateRoot, "acct-test", transportRaceEvent.event_id), true);
-      assert.equal(requests.filter((entry) =>
-        entry.url?.startsWith("/api/v1/turns/") &&
-        entry.url.endsWith("/complete") &&
-        entry.body?.query === transportRaceEvent.user_text).length, raceCompletionBefore + 1,
-      "HTTP/MCP concurrent replay must create exactly one Core completion");
-    } finally {
-      releaseCaptureVsRecoveryCore();
-    }
-    await recoveryClient.close();
-
-    const raceRoot = join(root, "bridge-race");
-    const raceQueue = new MemhubBridgeQueue(raceRoot);
-    const raceRequests = [];
-    let releaseFirstUpload;
-    let markFirstUploadStarted;
-    const firstUploadStarted = new Promise((resolveStarted) => { markFirstUploadStarted = resolveStarted; });
-    const firstUploadRelease = new Promise((resolveRelease) => { releaseFirstUpload = resolveRelease; });
-    const raceServer = createServer(async (request, response) => {
-      let raw = "";
-      for await (const chunk of request) raw += chunk;
-      raceRequests.push(JSON.parse(raw));
-      if (raceRequests.length === 1) {
-        markFirstUploadStarted();
-        await firstUploadRelease;
-      }
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end("{}");
-    });
-    const racePort = await freePort();
-    await new Promise((resolveListen) => raceServer.listen(racePort, "127.0.0.1", resolveListen));
-    try {
-      await saveBridgeConfig(raceRoot, {
-        captureEndpoint: `http://127.0.0.1:${racePort}/capture`,
-        deviceToken: createdDevice.token
-      });
-      const raceConfig = await (await import("../dist/bridge.js")).loadBridgeConfig(raceRoot);
-      const raceBase = {
-        event_id: "capture-queue-race",
-        host: "codex",
-        conversation_id: "capture-queue-race",
-        continuity_id: "capture-queue-race",
-        turn_id: "turn-race",
-        timestamp: "2026-09-18T08:00:00.000Z"
-      };
-      await raceQueue.enqueue({ ...raceBase, user_text: "user half", capture_status: "open" });
-      const firstFlush = raceQueue.flush(raceConfig);
-      await firstUploadStarted;
-      await raceQueue.enqueue({ ...raceBase, assistant_text: "assistant half", capture_status: "open" });
-      releaseFirstUpload();
-      assert.deepEqual(await firstFlush, { sent: 1, pending: 1 });
-      assert.deepEqual(await raceQueue.flush(raceConfig), { sent: 1, pending: 0 });
-      assert.equal(raceRequests.length, 2);
-      assert.equal(raceRequests[0].user_text, "user half");
-      assert.equal(raceRequests[1].assistant_text, "assistant half");
-    } finally {
-      await new Promise((resolveClose) => raceServer.close(resolveClose));
-    }
-
-    // Bridge cannot infer failure from a dropped acknowledgement: the
-    // upstream may have durably accepted the event before the connection
-    // disappeared. Preserve the same event ID and content for retry instead
-    // of deleting or altering the claimed queue item.
-    const ambiguousRoot = join(root, "bridge-ambiguous-core-ack");
-    const ambiguousQueue = new MemhubBridgeQueue(ambiguousRoot);
-    const committed = new Map();
-    const attempts = [];
-    const ambiguousUpstream = createServer(async (request, response) => {
-      let raw = "";
-      for await (const chunk of request) raw += chunk;
-      const event = JSON.parse(raw);
-      attempts.push(raw);
-      const prior = committed.get(event.event_id);
-      if (prior && prior !== raw) {
-        response.writeHead(409).end();
-        return;
-      }
-      committed.set(event.event_id, raw);
-      if (attempts.length === 1) {
-        // The logical Core commit happened, but the Bridge receives no ACK.
-        response.destroy();
-        return;
-      }
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ accepted: true, duplicate: Boolean(prior) }));
-    });
-    const ambiguousPort = await freePort();
-    await new Promise((resolveListen) => ambiguousUpstream.listen(
-      ambiguousPort, "127.0.0.1", resolveListen
-    ));
-    try {
-      await saveBridgeConfig(ambiguousRoot, {
-        captureEndpoint: `http://127.0.0.1:${ambiguousPort}/capture`,
-        deviceToken: createdDevice.token
-      });
-      await ambiguousQueue.enqueue({
-        event_id: "ambiguous-bridge-ack", host: "codex",
-        conversation_id: "ambiguous-bridge-ack", continuity_id: "ambiguous-bridge-ack",
-        timestamp: "2026-09-18T09:00:00.000Z",
-        project_hint: "aide", user_text: "bridge user", assistant_text: "bridge assistant",
-        capture_status: "complete"
-      });
-      const ambiguousConfig = await (await import("../dist/bridge.js"))
-        .loadBridgeConfig(ambiguousRoot);
-      const first = await ambiguousQueue.flush(ambiguousConfig);
-      assert.equal(first.sent, 0);
-      assert.equal(first.pending, 1, "lost ACK must preserve durable Bridge evidence");
-      assert.ok(first.stopped_on_error);
-      const replay = await ambiguousQueue.flush(ambiguousConfig);
-      assert.equal(replay.sent, 1);
-      assert.equal(replay.pending, 0);
-      assert.equal(attempts.length, 2);
-      assert.equal(attempts[0], attempts[1],
-        "replay after ambiguous Core commit must reuse identical payload");
-      assert.equal(committed.size, 1, "upstream idempotency must preserve one event");
-    } finally {
-      await new Promise((resolveClose) => ambiguousUpstream.close(resolveClose));
-    }
-
-    const backoffRoot = join(root, "bridge-backoff");
-    let backoffRequests = 0;
-    const backoffUpstream = createServer(async (request, response) => {
-      for await (const _chunk of request) { /* drain */ }
-      backoffRequests += 1;
-      response.writeHead(503, { "content-type": "application/json" });
-      response.end('{"error":"temporary"}');
-    });
-    const backoffUpstreamPort = await freePort();
-    await new Promise((resolveListen) => backoffUpstream.listen(backoffUpstreamPort, "127.0.0.1", resolveListen));
-    const backoffBridgePort = await freePort();
-    await saveBridgeConfig(backoffRoot, {
-      captureEndpoint: `http://127.0.0.1:${backoffUpstreamPort}/capture`,
-      deviceToken: createdDevice.token
-    });
-    const backoffChild = spawn(process.execPath, [bridgeEntry, "serve", "--port", String(backoffBridgePort)], {
-      env: { ...process.env, MEMHUB_BRIDGE_HOME: backoffRoot },
-      stdio: ["ignore", "ignore", "pipe"]
-    });
-    let backoffStderr = "";
-    backoffChild.stderr.setEncoding("utf8");
-    backoffChild.stderr.on("data", (data) => { backoffStderr += data; });
-    try {
-      const readyDeadline = Date.now() + 5_000;
-      while (!backoffStderr.includes("[memhub-bridge] listening") && Date.now() < readyDeadline) {
-        await new Promise((resolveWait) => setTimeout(resolveWait, 25));
-      }
-      assert.match(backoffStderr, /\[memhub-bridge\] listening/);
-      const postQueuedCapture = (eventId) => fetch(`http://127.0.0.1:${backoffBridgePort}/capture`, {
+    // Retired side-channel endpoints must stay absent. Durable turns now enter
+    // exclusively through the MCP memmy_turn contract.
+    for (const retiredPath of ["/memhub/capture", "/memhub/context", "/memhub/lifecycle"]) {
+      const retired = await fetch(`http://127.0.0.1:${port}${retiredPath}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          event_id: eventId,
-          host: "codex",
-          conversation_id: "bridge-backoff",
-          continuity_id: "bridge-backoff",
-          timestamp: "2026-09-22T06:00:00.000Z",
-          user_text: eventId,
-          capture_status: "complete"
-        })
+        body: "{}"
       });
-      assert.equal((await postQueuedCapture("bridge-backoff-1")).status, 202);
-      let backoffStatus;
-      const failureDeadline = Date.now() + 3_000;
-      while (Date.now() < failureDeadline) {
-        backoffStatus = await (await fetch(`http://127.0.0.1:${backoffBridgePort}/status`)).json();
-        if (backoffStatus.retry.failure_streak >= 1) break;
-        await new Promise((resolveWait) => setTimeout(resolveWait, 25));
-      }
-      assert.equal(backoffRequests, 1);
-      assert.equal(backoffStatus.retry.failure_streak, 1);
-      assert.ok(backoffStatus.retry.next_retry_at);
-      const requestsBeforeSecondCapture = backoffRequests;
-      assert.equal((await postQueuedCapture("bridge-backoff-2")).status, 202);
-      await new Promise((resolveWait) => setTimeout(resolveWait, 400));
-      assert.equal(backoffRequests, requestsBeforeSecondCapture);
-      const queuedDuringBackoff = await (await fetch(`http://127.0.0.1:${backoffBridgePort}/status`)).json();
-      assert.equal(queuedDuringBackoff.pending, 2);
-      assert.equal(queuedDuringBackoff.retry.failure_streak, 1);
-    } finally {
-      backoffChild.kill("SIGTERM");
-      await new Promise((resolveExit) => {
-        backoffChild.once("exit", resolveExit);
-        setTimeout(resolveExit, 500);
-      });
-      await new Promise((resolveClose) => backoffUpstream.close(resolveClose));
+      assert.equal(retired.status, 404, `${retiredPath} must remain retired`);
     }
 
-    await saveBridgeConfig(bridgeRoot, {
-      mcpEndpoint: `http://127.0.0.1:${port}/mcp`,
-      captureEndpoint: `http://127.0.0.1:${port}/memhub/capture`,
-      deviceToken: createdDevice.token
-    });
-    const bridgePort = await freePort();
-    const bridgeChild = spawn(process.execPath, [bridgeEntry, "serve", "--port", String(bridgePort)], {
-      env: { ...process.env, MEMHUB_BRIDGE_HOME: bridgeRoot },
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    let bridgeStderr = "";
-    bridgeChild.stderr.setEncoding("utf8");
-    bridgeChild.stderr.on("data", (data) => { bridgeStderr += data; });
+    const directClient = new Client({ name: "memhub-direct-turn-test", version: "1.0.0" });
+    await directClient.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
     try {
-      const bridgeDeadline = Date.now() + 5_000;
-      while (!bridgeStderr.includes("[memhub-bridge] listening") && Date.now() < bridgeDeadline) {
-        await new Promise((resolveWait) => setTimeout(resolveWait, 25));
-      }
-      assert.match(bridgeStderr, /\[memhub-bridge\] listening/);
-      const bridgeClient = new Client({ name: "memhub-bridge-mcp-test", version: "1.0.0" });
-      const bridgeTransport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${bridgePort}/mcp`));
-      try {
-        await bridgeClient.connect(bridgeTransport);
-        const bridgeTools = await bridgeClient.listTools();
-        assert.deepEqual(bridgeTools.tools.map((tool) => tool.name).sort(), ["memhub_branch", "memhub_distill", "memhub_memory", "memhub_result", "memhub_skill", "memhub_todo", "memmy_context", "memmy_project", "memmy_project_list", "memmy_project_manage", "memmy_turn"]);
-        const bridgeContext = await bridgeClient.callTool({
-          name: "memmy_context",
-          arguments: { query: "continue through local bridge", project: "aide", conversation_id: "bridge-proxy-chat" }
-        });
-        assert.equal(bridgeContext.isError, undefined);
-        assert.equal(JSON.parse(bridgeContext.content[0].text).resolvedProjectId, "aide");
-        const automaticContext = await fetch(`http://127.0.0.1:${bridgePort}/context`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ query: "continue aide", conversation_id: "bridge-proxy-chat", project: "aide", limit: 12 })
-        });
-        assert.equal(automaticContext.status, 200);
-      const automaticContextBody = await automaticContext.json();
-      assert.equal(automaticContextBody.resolvedProjectId, "aide");
-      assert.equal(automaticContextBody.recallScope, "global_and_project");
-
-      const fullyPrivateBridgeId = "bridge-fully-private-capture";
-      const fullyPrivateBridgeCapture = await fetch(`http://127.0.0.1:${bridgePort}/capture`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          event_id: fullyPrivateBridgeId,
-          host: "bridge-test",
-          conversation_id: "bridge-fully-private",
-          timestamp: "2026-10-09T00:00:00.000Z",
-          project_hint: "aide",
-          user_text: "<private>bridge private user text</private>",
-          assistant_text: "<no-memory>bridge private assistant text</no-memory>",
-          capture_status: "complete"
-        })
-      });
-      assert.equal(fullyPrivateBridgeCapture.status, 202);
-      const privateDeadline = Date.now() + 5_000;
-      let privateBridgeStatus;
-      while (Date.now() < privateDeadline) {
-        privateBridgeStatus = await (await fetch(`http://127.0.0.1:${bridgePort}/status`)).json();
-        if (privateBridgeStatus.pending === 0) break;
-        await new Promise((resolveWait) => setTimeout(resolveWait, 25));
-      }
-      assert.equal(privateBridgeStatus?.pending, 0, JSON.stringify(privateBridgeStatus));
-      const fullyPrivateStored = (await listCaptureEvents(stateRoot, "acct-test"))
-        .find((item) => item.event_id === fullyPrivateBridgeId);
-      assert.ok(fullyPrivateStored);
-      assert.equal(fullyPrivateStored.user_text, undefined);
-      assert.equal(fullyPrivateStored.assistant_text, undefined);
-      assert.equal(fullyPrivateStored.provenance?.memhub_privacy?.fully_excluded, true);
-      assert.equal(await isCaptureIngested(stateRoot, "acct-test", fullyPrivateBridgeId), true);
-      } finally {
-        await bridgeClient.close();
-      }
+      const opened = JSON.parse((await directClient.callTool({
+        name: "memmy_turn",
+        arguments: { action: "open", project: "alpha", user_text: "direct MCP turn without host session identity" }
+      })).content[0].text);
+      assert.equal(opened.transport_conversation_id, null);
+      assert.equal(opened.project_id, "alpha");
+      const committed = JSON.parse((await directClient.callTool({
+        name: "memmy_turn",
+        arguments: { action: "commit", event_id: opened.turn.event_id, project: "alpha", assistant_text: "direct turn committed" }
+      })).content[0].text);
+      assert.equal(committed.turn.ingested, true);
+      assert.equal(committed.project_id, "alpha");
     } finally {
-      bridgeChild.kill("SIGTERM");
-      await new Promise((resolveExit) => {
-        bridgeChild.once("exit", resolveExit);
-        setTimeout(resolveExit, 500);
-      });
+      await directClient.close();
     }
-
-    const capturesBeforeIndexRebuild = await listCaptureEvents(stateRoot, "acct-test");
-    await rm(join(stateRoot, "capture-index.sqlite"), { force: true });
-    const capturesAfterIndexRebuild = await listCaptureEvents(stateRoot, "acct-test");
-    assert.equal(capturesAfterIndexRebuild.length, capturesBeforeIndexRebuild.length);
-    assert.deepEqual(
-      capturesAfterIndexRebuild.map((item) => item.event_id).sort(),
-      capturesBeforeIndexRebuild.map((item) => item.event_id).sort()
-    );
-
-    const postCapture = (event) => fetch(`http://127.0.0.1:${port}/memhub/capture`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${createdDevice.token}`
-      },
-      body: JSON.stringify(event)
-    });
-    const dirtyRecoveryId = "capture-index-dirty-recovery";
-    const dirtyInitial = await postCapture({
-      event_id: dirtyRecoveryId,
-      host: "codex",
-      conversation_id: "dirty-recovery",
-      turn_id: "dirty-recovery-turn",
-      timestamp: "2026-09-18T08:01:30.000Z",
-      user_text: "Persist this partial turn before a simulated crash.",
-      capture_status: "open"
-    });
-    assert.equal(dirtyInitial.status, 201);
-    const accountKey = createHash("sha256").update("acct-test", "utf8").digest("hex");
-    const dirtyEventKey = createHash("sha256").update(dirtyRecoveryId, "utf8").digest("hex");
-    const dirtyRawPath = join(stateRoot, "captures", accountKey, `${dirtyEventKey}.json`);
-    const dirtyRaw = JSON.parse(await readFile(dirtyRawPath, "utf8"));
-    dirtyRaw.assistant_text = "Complete the turn in the authoritative raw file.";
-    dirtyRaw.capture_status = "complete";
-    dirtyRaw.project_hint = "aide";
-    await writeFile(dirtyRawPath, JSON.stringify(dirtyRaw, null, 2) + "\n");
-    const captureIndexDb = new Database(join(stateRoot, "capture-index.sqlite"));
-    captureIndexDb.prepare("INSERT OR REPLACE INTO capture_index_dirty(account_id,event_id) VALUES (?,?)")
-      .run("acct-test", dirtyRecoveryId);
-    captureIndexDb.close();
-    const dirtyRecovered = (await listCaptureEvents(stateRoot, "acct-test", { conversationId: "dirty-recovery" }))[0];
-    assert.equal(dirtyRecovered.capture_status, "complete");
-    assert.equal(dirtyRecovered.project_hint, "aide");
-
-    const boundCaptureId = "capture-bound-project-backfill";
-    const boundCapture = await postCapture({
-      event_id: boundCaptureId,
-      host: "codex",
-      conversation_id: "http-chat",
-      turn_id: "bound-project-turn",
-      timestamp: "2026-09-18T08:02:00.000Z",
-      user_text: "Use the conversation binding without sending project_hint.",
-      assistant_text: "The raw L1 event should persist the resolved project."
-    });
-    assert.equal(boundCapture.status, 201);
-    const storedBoundCapture = (await listCaptureEvents(stateRoot, "acct-test")).find((item) => item.event_id === boundCaptureId);
-    assert.equal(storedBoundCapture.project_hint, "aide");
-
-    await setDistillationConfig(stateRoot, { auto_enabled: true, turn_threshold: 2, idle_minutes: 30 });
-    for (let index = 1; index <= 2; index += 1) {
-      const response = await postCapture({
-        event_id: `capture-unscoped-auto-${index}`,
-        host: "codex",
-        conversation_id: "unscoped-auto",
-        turn_id: `unscoped-auto-${index}`,
-        timestamp: `2026-09-18T08:03:0${index}.000Z`,
-        user_text: `unscoped user ${index}`,
-        assistant_text: `unscoped assistant ${index}`
-      });
-      assert.equal(response.status, 201);
-    }
-    assert.equal(
-      (await listDistillationJobs(stateRoot, "acct-test")).filter((job) => job.conversation_id === "unscoped-auto").length,
-      0
-    );
-
-    for (let index = 1; index <= 4; index += 1) {
-      const response = await postCapture({
-        event_id: `capture-threshold-${index}`,
-        host: "codex",
-        conversation_id: "threshold-auto",
-        turn_id: `threshold-auto-${index}`,
-        timestamp: `2026-09-18T08:04:0${index}.000Z`,
-        project_hint: "aide",
-        user_text: `threshold user ${index}`,
-        assistant_text: `threshold assistant ${index}`
-      });
-      assert.equal(response.status, 201);
-    }
-    const thresholdJobs = (await listDistillationJobs(stateRoot, "acct-test"))
-      .filter((job) => job.conversation_id === "threshold-auto")
-      .sort((left, right) => left.created_at.localeCompare(right.created_at));
-    assert.equal(thresholdJobs.length, 2);
-    assert.deepEqual(thresholdJobs[0].evidence_refs.sort(), ["l1:capture-threshold-1", "l1:capture-threshold-2"]);
-    assert.deepEqual(thresholdJobs[1].evidence_refs.sort(), ["l1:capture-threshold-3", "l1:capture-threshold-4"]);
-    const discoveryClient = new Client({ name: "memhub-discovery-test", version: "1.0.0" });
-    const discoveryTransport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`));
-    try {
-      await discoveryClient.connect(discoveryTransport);
-      const discovered = await discoveryClient.callTool({ name: "memhub_distill", arguments: { action: "discover", dry_run: true } });
-      const report = JSON.parse(discovered.content[0].text);
-      assert.equal(report.source, "complete_ingested_capture_only");
-      assert.equal(report.auto_enabled, true);
-      assert.equal(report.queued, 0);
-      assert.ok(report.already_queued >= 4);
-      for (let index = 1; index <= 2; index += 1) {
-        const opened = await discoveryClient.callTool({ name: "memmy_turn", arguments: {
-          action: "open", conversation_id: "mcp-auto-conversation", project: "aide", user_text: `MCP user ${index}`
-        } });
-        const eventId = JSON.parse(opened.content[0].text).turn.event_id;
-        const committed = await discoveryClient.callTool({ name: "memmy_turn", arguments: {
-          action: "commit", event_id: eventId, conversation_id: "mcp-auto-conversation",
-          project: "aide", assistant_text: `MCP assistant ${index}`
-        } });
-        assert.equal(JSON.parse(committed.content[0].text).turn.ingested, true);
-      }
-      assert.equal((await listDistillationJobs(stateRoot, "acct-test"))
-        .filter((job) => job.conversation_id === "mcp-auto-conversation").length, 1);
-    } finally {
-      await discoveryClient.close();
-    }
-
-    const jobsPath = join(stateRoot, "distillation", "jobs.json");
-    const savedJobs = await readFile(jobsPath, "utf8");
-    let faultResponse;
-    try {
-      await writeFile(jobsPath, "{invalid-json");
-      faultResponse = await postCapture({
-        event_id: "capture-queue-fault-1", host: "codex", conversation_id: "queue-fault-conversation",
-        timestamp: "2026-09-18T08:04:10.000Z", project_hint: "aide",
-        user_text: "queue failure must not undo L1", assistant_text: "L1 was committed", capture_status: "complete"
-      });
-      assert.equal(faultResponse.status, 201);
-      const body = await faultResponse.json();
-      assert.equal(body.ingestion.ingested, true);
-      assert.ok(body.distillation_queue_error);
-    } finally {
-      await writeFile(jobsPath, savedJobs);
-    }
-    const recovered = await postCapture({
-      event_id: "capture-queue-fault-2", host: "codex", conversation_id: "queue-fault-conversation",
-      timestamp: "2026-09-18T08:04:11.000Z", project_hint: "aide",
-      user_text: "next complete L1", assistant_text: "queue recovered", capture_status: "complete"
-    });
-    assert.equal(recovered.status, 201);
-    assert.deepEqual((await listDistillationJobs(stateRoot, "acct-test"))
-      .filter((job) => job.conversation_id === "queue-fault-conversation")[0]?.evidence_refs.sort(),
-      ["l1:capture-queue-fault-1", "l1:capture-queue-fault-2"]);
-
-    const longCapturePayload = JSON.stringify({
-      event_id: "capture-long-utf8",
-      host: "codex",
-      conversation_id: "long-utf8",
-      timestamp: "2026-09-18T08:05:00.000Z",
-      project_hint: "aide",
-      user_text: "界".repeat(300_000),
-      reasoning_summary: "理".repeat(100_000),
-      capture_status: "partial"
-    });
-    assert.ok(Buffer.byteLength(longCapturePayload, "utf8") > 1_000_000);
-    assert.ok(Buffer.byteLength(longCapturePayload, "utf8") < 4_000_000);
-    const longCaptureResponse = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${createdDevice.token}`
-      },
-      body: longCapturePayload
-    });
-    assert.equal(longCaptureResponse.status, 201);
-    const longStored = (await listCaptureEvents(stateRoot, "acct-test", { conversationId: "long-utf8", limit: 2 }))[0];
-    assert.equal(longStored.user_text.length, 300_000);
-    assert.equal(longStored.reasoning_summary.length, 100_000);
-
-    const oversizedCapturePayload = JSON.stringify({
-      event_id: "capture-over-http-limit",
-      host: "codex",
-      conversation_id: "oversized-http",
-      timestamp: "2026-09-18T08:06:00.000Z",
-      user_text: "界".repeat(1_400_000)
-    });
-    assert.ok(Buffer.byteLength(oversizedCapturePayload, "utf8") > 4_000_000);
-    const oversizedCaptureResponse = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${createdDevice.token}`
-      },
-      body: oversizedCapturePayload
-    });
-    assert.equal(oversizedCaptureResponse.status, 413);
-    assert.equal((await oversizedCaptureResponse.json()).error, "request_body_too_large");
-
-    const invalidJsonResponse = await fetch(`http://127.0.0.1:${port}/memhub/capture`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${createdDevice.token}`
-      },
-      body: '{"event_id":'
-    });
-    assert.equal(invalidJsonResponse.status, 400);
-    assert.equal((await invalidJsonResponse.json()).error, "invalid_json_body");
-    await setDistillationConfig(stateRoot, { auto_enabled: false });
   } finally {
     child.kill("SIGTERM");
     await new Promise((resolveExit) => {
@@ -2500,11 +1560,13 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(client.getServerVersion()?.version, packageVersion);
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), ["memhub_branch", "memhub_distill", "memhub_memory", "memhub_result", "memhub_skill", "memhub_todo", "memmy_context", "memmy_project", "memmy_project_list", "memmy_project_manage", "memmy_turn"]);
-  assert.match(listed.tools.find((tool) => tool.name === "memmy_context")?.description ?? "", /conversation_id.*不要伪造|不要伪造.*conversation_id/);
-  assert.match(listed.tools.find((tool) => tool.name === "memhub_branch")?.description ?? "", /不新增 L1\/L2\/L3\/L4/);
+  assert.match(listed.tools.find((tool) => tool.name === "memmy_context")?.description ?? "", /conversation_id.*不参与项目选择|不参与项目选择.*conversation_id/);
+  assert.match(listed.tools.find((tool) => tool.name === "memhub_branch")?.description ?? "", /不绑定 host conversation/);
+  assert.equal(Object.hasOwn(listed.tools.find((tool) => tool.name === "memhub_distill")?.inputSchema?.properties ?? {}, "conversation_id"), false);
+  assert.equal(Object.hasOwn(listed.tools.find((tool) => tool.name === "memhub_todo")?.inputSchema?.properties ?? {}, "conversation_id"), false);
   assert.match(listed.tools.find((tool) => tool.name === "memhub_result")?.description ?? "", /result_id.*next_offset|next_offset.*result_id/);
   assert.match(listed.tools.find((tool) => tool.name === "memhub_memory")?.description ?? "", /Progressive-disclosure.*exact evidenceRef|exact evidenceRef.*Progressive-disclosure/);
-  assert.match(listed.tools.find((tool) => tool.name === "memmy_project")?.description ?? "", /action=current.*没有 conversation_id 时不会报错/);
+  assert.match(listed.tools.find((tool) => tool.name === "memmy_project")?.description ?? "", /不保存 host conversation binding/);
   assert.match(listed.tools.find((tool) => tool.name === "memmy_project_list")?.description ?? "", /description.*禁止盲目新建/);
   assert.match(listed.tools.find((tool) => tool.name === "memmy_project_manage")?.description ?? "", /action=plan.*明确授权.*action=execute/);
   assert.match(listed.tools.find((tool) => tool.name === "memhub_todo")?.description ?? "", /Project Registry.*唯一事实源|唯一事实源.*Project Registry/);
@@ -2515,7 +1577,8 @@ async function exerciseClient(client, conversationId, stateRoot) {
     ["memhub_skill", ["load", "record", "status"], ["action", "skill_id"]],
     ["memhub_distill", ["audit", "discover", "consolidate", "recover_ingest", "reconcile_derived", "reconcile_l4", "next", "renew", "submit", "skip"], []],
     ["memhub_memory", ["load", "plan", "execute"], ["action"]],
-    ["memmy_project", ["list", "current", "bind", "unbind", "architecture", "architecture_plan", "architecture_execute", "architecture_history"], ["action"]]
+    ["memhub_branch", ["list", "create", "close", "reopen"], ["action"]],
+    ["memmy_project", ["list", "current", "architecture", "architecture_plan", "architecture_execute", "architecture_history"], ["action"]]
   ]) {
     const schema = listed.tools.find((tool) => tool.name === name)?.inputSchema;
     assert.ok(schema, `${name} must expose its live input schema`);
@@ -2528,15 +1591,15 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(distillHelp.properties.lease_token.type, "string");
   assert.equal(distillHelp.properties.lease_token_supported.type, "boolean");
   assert.equal(distillHelp.properties.lease_seconds.minimum, 30);
-  let projectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "AIDE" } })).content[0].text);
-  if (!projectList.projects.some((project) => project.project === "aide")) {
+  let projectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "ALPHA" } })).content[0].text);
+  if (!projectList.projects.some((project) => project.project === "alpha")) {
     const createPlan = JSON.parse((await client.callTool({
       name: "memmy_project_manage",
       arguments: {
         action: "plan",
         operation: "create",
-        project: "aide",
-        description: "AIDE project used by MCP integration tests."
+        project: "alpha",
+        description: "ALPHA project used by MCP integration tests."
       }
     })).content[0].text);
     assert.equal(createPlan.status, "awaiting_user_authorization");
@@ -2545,17 +1608,15 @@ async function exerciseClient(client, conversationId, stateRoot) {
       arguments: { action: "execute", authorization_id: createPlan.authorization_id }
     })).content[0].text);
     assert.equal(createResult.ok, true);
-    projectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "AIDE" } })).content[0].text);
+    projectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "ALPHA" } })).content[0].text);
   }
-  assert.ok(projectList.projects.some((project) => project.project === "aide"));
+  assert.ok(projectList.projects.some((project) => project.project === "alpha"));
   const distillationAudit = JSON.parse((await client.callTool({
     name: "memhub_distill", arguments: { action: "audit" }
   })).content[0].text);
   assert.equal(distillationAudit.source, "read_only_durable_state");
   assert.equal(distillationAudit.account_scoped, true);
-  assert.equal(distillationAudit.bridge.inspected, false,
-    "Gateway must not inspect an unrelated default Bridge home without explicit service configuration");
-  assert.equal(projectList.matches[0]?.project, "aide");
+  assert.equal(projectList.matches[0]?.project, "alpha");
   let workspaceProjectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "memhub" } })).content[0].text);
   if (!workspaceProjectList.projects.some((project) => project.project === "memhub")) {
     const createWorkspacePlan = JSON.parse((await client.callTool({
@@ -2575,120 +1636,63 @@ async function exerciseClient(client, conversationId, stateRoot) {
     workspaceProjectList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "memhub" } })).content[0].text);
   }
   assert.ok(workspaceProjectList.projects.some((project) => project.project === "memhub"));
-  const branchConversation = `${conversationId}-branches`;
   const retrievalBranch = JSON.parse((await client.callTool({
     name: "memhub_branch",
-    arguments: { action: "create", project: "aide", name: "Retrieval", goal: "Improve semantic BM25 retrieval precision." }
+    arguments: { action: "create", project: "alpha", name: "Retrieval", goal: "Improve semantic BM25 retrieval precision." }
   })).content[0].text).branch;
   const webBranch = JSON.parse((await client.callTool({
     name: "memhub_branch",
-    arguments: { action: "create", project: "aide", name: "Web", goal: "Finish the Control Plane web interface." }
+    arguments: { action: "create", project: "alpha", name: "Web", goal: "Finish the Control Plane web interface." }
   })).content[0].text).branch;
   await client.callTool({
     name: "memhub_branch",
-    arguments: { action: "create", project: "aide", name: "Network", goal: "Diagnose Cloudflare transport stability." }
+    arguments: { action: "create", project: "alpha", name: "Network", goal: "Diagnose Cloudflare transport stability." }
   });
   const branchList = JSON.parse((await client.callTool({
     name: "memhub_branch",
-    arguments: { action: "list", project: "aide" }
+    arguments: { action: "list", project: "alpha" }
   })).content[0].text);
   assert.equal(branchList.branches.length, 3);
-  await client.callTool({
-    name: "memhub_branch",
-    arguments: { action: "switch", project: "aide", conversation_id: branchConversation, branch: retrievalBranch.branchId }
-  });
-  const retrievalTurn = JSON.parse((await client.callTool({
-    name: "memmy_turn",
-    arguments: {
-      action: "open",
-      conversation_id: branchConversation,
-      continuity_id: branchConversation,
-      project: "aide",
-      user_text: "Tune semantic BM25 retrieval precision for the Retrieval branch."
-    }
-  })).content[0].text);
-  await client.callTool({
-    name: "memmy_turn",
-    arguments: {
-      action: "commit",
-      event_id: retrievalTurn.turn.event_id,
-      conversation_id: branchConversation,
-      continuity_id: branchConversation,
-      assistant_text: "Retrieval ranking work completed for this branch checkpoint."
-    }
-  });
+  assert.ok(branchList.branches.some((branch) => branch.branchId === retrievalBranch.branchId));
+
   let branchContext = JSON.parse((await client.callTool({
     name: "memmy_context",
-    arguments: { query: "继续", project: "aide", conversation_id: branchConversation, continuity_id: branchConversation }
+    arguments: { query: "继续", project: "alpha" }
   })).content[0].text);
-  assert.equal(branchContext.branchContext.branchId, retrievalBranch.branchId);
-  assert.equal(branchContext.branchContext.source, "conversation_binding");
-  assert.ok(branchContext.recentSession.some((item) => /BM25 retrieval/.test(item.content)));
+  assert.equal(branchContext.branchContext, null);
   branchContext = JSON.parse((await client.callTool({
     name: "memmy_context",
-    arguments: { query: "继续", project: "aide", conversation_id: branchConversation, branch: webBranch.branchId }
+    arguments: { query: "继续", project: "alpha", branch: webBranch.branchId }
   })).content[0].text);
   assert.equal(branchContext.branchContext.branchId, webBranch.branchId);
   assert.equal(branchContext.branchContext.source, "explicit");
-  const webTurn = JSON.parse((await client.callTool({
-    name: "memmy_turn",
-    arguments: {
-      action: "open",
-      conversation_id: branchConversation,
-      continuity_id: branchConversation,
-      project: "aide",
-      user_text: "Finish the Control Plane web interface for the Web branch."
-    }
-  })).content[0].text);
-  await client.callTool({
-    name: "memmy_turn",
-    arguments: {
-      action: "commit",
-      event_id: webTurn.turn.event_id,
-      conversation_id: branchConversation,
-      continuity_id: branchConversation,
-      assistant_text: "Web interface work completed for this branch checkpoint."
-    }
-  });
-  const webScopedContext = JSON.parse((await client.callTool({
-    name: "memmy_context",
-    arguments: {
-      query: "继续",
-      project: "aide",
-      conversation_id: branchConversation,
-      continuity_id: branchConversation
-    }
-  })).content[0].text);
-  assert.equal(webScopedContext.branchContext.branchId, webBranch.branchId);
-  assert.ok(webScopedContext.recentSession.some((item) => /Control Plane web interface/.test(item.content)));
-  assert.ok(webScopedContext.recentSession.every((item) => !/BM25 retrieval/.test(item.content)));
-  const branchCurrent = JSON.parse((await client.callTool({
-    name: "memhub_branch",
-    arguments: { action: "current", project: "aide", conversation_id: branchConversation }
-  })).content[0].text);
-  assert.equal(branchCurrent.branch.branchId, webBranch.branchId);
+
   await client.callTool({
     name: "memhub_branch",
-    arguments: { action: "close", project: "aide", branch: webBranch.branchId }
+    arguments: { action: "close", project: "alpha", branch: webBranch.branchId }
   });
-  const branchAfterClose = JSON.parse((await client.callTool({
-    name: "memhub_branch",
-    arguments: { action: "current", project: "aide", conversation_id: branchConversation }
-  })).content[0].text);
-  assert.equal(branchAfterClose.branch, null);
   const branchListWithClosed = JSON.parse((await client.callTool({
     name: "memhub_branch",
-    arguments: { action: "list", project: "aide", include_closed: true }
+    arguments: { action: "list", project: "alpha", include_closed: true }
   })).content[0].text);
   assert.ok(branchListWithClosed.branches.length >= 3);
   assert.equal(branchListWithClosed.branches.find((branch) => branch.branchId === webBranch.branchId).status, "closed");
+  const closedBranchContext = await client.callTool({
+    name: "memmy_context",
+    arguments: { query: "继续", project: "alpha", branch: webBranch.branchId }
+  });
+  assert.equal(closedBranchContext.isError, true);
+  await client.callTool({
+    name: "memhub_branch",
+    arguments: { action: "reopen", project: "alpha", branch: webBranch.branchId }
+  });
   const baselineTodos = JSON.parse((await client.callTool({
     name: "memhub_todo",
-    arguments: { action: "list", project: "aide", status: "all" }
+    arguments: { action: "list", project: "alpha", status: "all" }
   })).content[0].text);
-  assert.equal(baselineTodos.project, "aide");
+  assert.equal(baselineTodos.project, "alpha");
   const blankTodo = await client.callTool({
-    name: "memhub_todo", arguments: { action: "add", project: "aide", text: "   " }
+    name: "memhub_todo", arguments: { action: "add", project: "alpha", text: "   " }
   });
   assert.equal(blankTodo.isError, true);
   assert.match(blankTodo.content[0].text, /text.*required|text.*non-empty/i);
@@ -2696,49 +1700,49 @@ async function exerciseClient(client, conversationId, stateRoot) {
   const baselineTotalCount = baselineTodos.total;
   const addedTodo = JSON.parse((await client.callTool({
     name: "memhub_todo",
-    arguments: { action: "add", project: "AIDE", text: "Verify the dedicated MCP todo lifecycle." }
+    arguments: { action: "add", project: "ALPHA", text: "Verify the dedicated MCP todo lifecycle." }
   })).content[0].text);
   assert.equal(addedTodo.ok, true);
-  assert.equal(addedTodo.project, "aide");
+  assert.equal(addedTodo.project, "alpha");
   assert.equal(addedTodo.todo.status, "pending");
   assert.equal(addedTodo.pending_count, baselinePendingCount + 1);
   const contextWithRelevantTodo = JSON.parse((await client.callTool({
     name: "memmy_context",
-    arguments: { query: "dedicated MCP todo lifecycle", project: "AIDE" }
+    arguments: { query: "dedicated MCP todo lifecycle", project: "ALPHA" }
   })).content[0].text);
-  const aideCandidateWithTodo = contextWithRelevantTodo.projectCandidates.find((project) => project.project === "aide");
-  assert.ok(aideCandidateWithTodo);
-  assert.equal(aideCandidateWithTodo.relevantTodos[0].id, addedTodo.todo.id);
-  assert.equal(aideCandidateWithTodo.relevantTodos.length, 1);
-  assert.deepEqual(aideCandidateWithTodo.relevantTodos[0].matchedTerms, ["dedicated", "mcp", "todo", "lifecycle"]);
+  const alphaCandidateWithTodo = contextWithRelevantTodo.projectCandidates.find((project) => project.project === "alpha");
+  assert.ok(alphaCandidateWithTodo);
+  assert.equal(alphaCandidateWithTodo.relevantTodos[0].id, addedTodo.todo.id);
+  assert.equal(alphaCandidateWithTodo.relevantTodos.length, 1);
+  assert.deepEqual(alphaCandidateWithTodo.relevantTodos[0].matchedTerms, ["dedicated", "mcp", "todo", "lifecycle"]);
   const pendingTodos = JSON.parse((await client.callTool({
     name: "memhub_todo",
-    arguments: { action: "list", project: "aide" }
+    arguments: { action: "list", project: "alpha" }
   })).content[0].text);
   assert.equal(pendingTodos.pending_count, baselinePendingCount + 1);
   assert.ok(pendingTodos.todos.some((todo) => todo.id === addedTodo.todo.id));
   const allTodosAfterAdd = JSON.parse((await client.callTool({
     name: "memhub_todo",
-    arguments: { action: "list", project: "aide", status: "all" }
+    arguments: { action: "list", project: "alpha", status: "all" }
   })).content[0].text);
   assert.equal(allTodosAfterAdd.total, baselineTotalCount + 1);
   const completedTodo = JSON.parse((await client.callTool({
     name: "memhub_todo",
-    arguments: { action: "complete", project: "aide", todo_id: addedTodo.todo.id }
+    arguments: { action: "complete", project: "alpha", todo_id: addedTodo.todo.id }
   })).content[0].text);
   assert.equal(completedTodo.todo.status, "done");
   assert.ok(completedTodo.todo.completedAt);
   assert.equal(completedTodo.pending_count, baselinePendingCount);
   const repeatedComplete = JSON.parse((await client.callTool({
     name: "memhub_todo",
-    arguments: { action: "complete", project: "aide", todo_id: addedTodo.todo.id }
+    arguments: { action: "complete", project: "alpha", todo_id: addedTodo.todo.id }
   })).content[0].text);
   assert.equal(repeatedComplete.todo.completedAt, completedTodo.todo.completedAt);
   assert.equal(repeatedComplete.todo.updatedAt, completedTodo.todo.updatedAt);
   assert.equal(repeatedComplete.pending_count, baselinePendingCount);
   const reopenedTodo = JSON.parse((await client.callTool({
     name: "memhub_todo",
-    arguments: { action: "reopen", project: "aide", todo_id: addedTodo.todo.id }
+    arguments: { action: "reopen", project: "alpha", todo_id: addedTodo.todo.id }
   })).content[0].text);
   assert.equal(reopenedTodo.todo.status, "pending");
   assert.equal(reopenedTodo.todo.completedAt, undefined);
@@ -2748,47 +1752,33 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: { action: "list" }
   })).content[0].text);
   assert.equal(accountTodos.scope, "account");
-  assert.ok(accountTodos.projects.some((project) => project.project === "aide" && project.todos.some((todo) => todo.id === addedTodo.todo.id)));
-  const projectListWithTodo = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "AIDE" } })).content[0].text);
-  assert.equal(projectListWithTodo.projects.find((project) => project.project === "aide")?.pendingTodoCount, baselinePendingCount + 1);
+  assert.ok(accountTodos.projects.some((project) => project.project === "alpha" && project.todos.some((todo) => todo.id === addedTodo.todo.id)));
+  const projectListWithTodo = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "ALPHA" } })).content[0].text);
+  assert.equal(projectListWithTodo.projects.find((project) => project.project === "alpha")?.pendingTodoCount, baselinePendingCount + 1);
   const currentWithoutConversation = JSON.parse((await client.callTool({
     name: "memmy_project",
     arguments: { action: "current" }
   })).content[0].text);
   assert.equal(currentWithoutConversation.project, null);
-  assert.equal(currentWithoutConversation.binding_available, false);
-  assert.equal(currentWithoutConversation.resolution_source, "conversation_id_unavailable");
+  assert.equal(currentWithoutConversation.resolution_source, "no_current_turn_project");
   const currentExplicitWithoutConversation = JSON.parse((await client.callTool({
     name: "memmy_project",
-    arguments: { action: "current", project: "AIDE" }
+    arguments: { action: "current", project: "ALPHA" }
   })).content[0].text);
-  assert.equal(currentExplicitWithoutConversation.project, "aide");
-  assert.equal(currentExplicitWithoutConversation.binding_available, false);
+  assert.equal(currentExplicitWithoutConversation.project, "alpha");
   assert.equal(currentExplicitWithoutConversation.resolution_source, "explicit_project");
   assert.equal(currentExplicitWithoutConversation.persisted, false);
   const currentWorkspaceWithoutConversation = JSON.parse((await client.callTool({
     name: "memmy_project",
-    arguments: { action: "current", workspace_project: "AIDE" }
+    arguments: { action: "current", workspace_project: "ALPHA" }
   })).content[0].text);
-  assert.equal(currentWorkspaceWithoutConversation.project, "aide");
+  assert.equal(currentWorkspaceWithoutConversation.project, "alpha");
   assert.equal(currentWorkspaceWithoutConversation.resolution_source, "workspace_project");
-  const workspacePriorityConversation = `${conversationId}-workspace-priority`;
-  await client.callTool({
-    name: "memmy_project",
-    arguments: { action: "bind", conversation_id: workspacePriorityConversation, project: "aide" }
-  });
-  const workspacePriority = JSON.parse((await client.callTool({
-    name: "memmy_project",
-    arguments: { action: "current", conversation_id: workspacePriorityConversation, workspace_project: "memhub" }
-  })).content[0].text);
-  assert.equal(workspacePriority.project, "memhub");
-  assert.equal(workspacePriority.resolution_source, "workspace_project");
-  assert.equal(workspacePriority.persisted, false);
   const conflictingTodoScope = await client.callTool({
     name: "memhub_todo",
     arguments: {
       action: "add",
-      project: "aide",
+      project: "alpha",
       workspace_project: "memhub",
       text: "This conflicting scope must never be written."
     }
@@ -2797,39 +1787,39 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.match(conflictingTodoScope.content[0].text, /project\/workspace conflict/);
   const unresolved = JSON.parse((await client.callTool({
     name: "memmy_context",
-    arguments: { query: "continue the AIDEE work", project: "aidee", conversation_id: conversationId + "-unknown" }
+    arguments: { query: "continue the ALPHAE work", project: "alphae", conversation_id: conversationId + "-unknown" }
   })).content[0].text);
   assert.equal(unresolved.resolvedProjectId, null);
   assert.equal(unresolved.recallScope, "global_only");
-  assert.ok(unresolved.projectCandidates.some((project) => project.project === "aide"));
+  assert.ok(unresolved.projectCandidates.some((project) => project.project === "alpha"));
   assert.ok(unresolved.projectCandidates.every((project) => project.relevantTodos === undefined));
   const unchangedUpdate = await client.callTool({
     name: "memmy_project_manage",
-    arguments: { action: "plan", operation: "update", project: "aide", name: projectList.projects.find((item) => item.project === "aide").name }
+    arguments: { action: "plan", operation: "update", project: "alpha", name: projectList.projects.find((item) => item.project === "alpha").name }
   });
   assert.equal(unchangedUpdate.isError, true);
   assert.match(unchangedUpdate.content[0].text, /no effective changes/);
   const invalidAliases = await client.callTool({
     name: "memmy_project_manage",
-    arguments: { action: "plan", operation: "update", project: "aide", aliases: ["valid", 42] }
+    arguments: { action: "plan", operation: "update", project: "alpha", aliases: ["valid", 42] }
   });
   assert.equal(invalidAliases.isError, true);
   const blankAlias = await client.callTool({
     name: "memmy_project_manage",
-    arguments: { action: "plan", operation: "update", project: "aide", aliases: ["valid", ""] }
+    arguments: { action: "plan", operation: "update", project: "alpha", aliases: ["valid", ""] }
   });
   assert.equal(blankAlias.isError, true);
   assert.match(blankAlias.content[0].text, /aliases must contain only non-empty strings/);
-  const updatedDescription = projectList.projects.find((item) => item.project === "aide").description ===
-    "AIDE project used by MCP integration tests (verified)."
-    ? "AIDE project used by MCP integration tests (reverified)."
-    : "AIDE project used by MCP integration tests (verified).";
+  const updatedDescription = projectList.projects.find((item) => item.project === "alpha").description ===
+    "ALPHA project used by MCP integration tests (verified)."
+    ? "ALPHA project used by MCP integration tests (reverified)."
+    : "ALPHA project used by MCP integration tests (verified).";
   const updatePlanResult = await client.callTool({
     name: "memmy_project_manage",
     arguments: {
       action: "plan",
       operation: "update",
-      project: "aide",
+      project: "alpha",
       description: updatedDescription
     }
   });
@@ -2845,142 +1835,26 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: { action: "execute", authorization_id: updatePlan.authorization_id }
   });
   assert.match(replayedAuthorization.content[0].text, /invalid or already-used project authorization/);
-  const updatedList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "aide" } })).content[0].text);
-  assert.match(updatedList.projects.find((project) => project.project === "aide")?.description ?? "", /integration tests/);
-  const mergeTarget = `merge-target-${conversationId}`;
-  const mergeSource = `merge-source-${conversationId}`;
-  const deleteProject = `delete-${conversationId}`;
-  for (const project of [mergeTarget, mergeSource, deleteProject]) {
-    const plan = JSON.parse((await client.callTool({
-      name: "memmy_project_manage",
-      arguments: {
-        action: "plan",
-        operation: "create",
-        project,
-        description: `Temporary MCP project-management test project ${project}.`
-      }
-    })).content[0].text);
-    assert.equal(JSON.parse((await client.callTool({
-      name: "memmy_project_manage",
-      arguments: { action: "execute", authorization_id: plan.authorization_id }
-    })).content[0].text).ok, true);
-  }
-  const mergeHarness = `merge-job-${conversationId}`;
-  const mergeJob = await enqueueDerivedDistillationJob({
-    stateRoot,
-    accountId: "acct-test",
-    target: "l3",
-    projectId: mergeSource,
-    evidence: [{
-      ref: `artifact:merge-source-${conversationId}`,
-      kind: "artifact",
-      timestamp: "2026-09-22T00:00:00.000Z",
-      project_id: mergeSource,
-      layer: "L2",
-      content: "Historical L2 evidence that must remain valid after project merge."
-    }]
-  });
-  const leasedMergeJob = await leaseDistillationJob(stateRoot, "acct-test", {
-    projectId: mergeSource,
-    target: "l3",
-    harness: mergeHarness
-  });
-  assert.equal(leasedMergeJob?.job_id, mergeJob.job.job_id);
-  const mergePlan = JSON.parse((await client.callTool({
-    name: "memmy_project_manage",
-    arguments: { action: "plan", operation: "merge", project: mergeSource, target: mergeTarget }
-  })).content[0].text);
-  assert.equal(JSON.parse((await client.callTool({
-    name: "memmy_project_manage",
-    arguments: { action: "execute", authorization_id: mergePlan.authorization_id }
-  })).content[0].text).ok, true);
-  const mergedJobDryRun = await client.callTool({
-    name: "memhub_distill",
-    arguments: {
-      action: "submit",
-      job_id: mergeJob.job.job_id,
-      source_harness: mergeHarness,
-      content: "Merged projects keep historical evidence valid under the target canonical project.",
-      dry_run: true
-    }
-  });
-  assert.equal(mergedJobDryRun.isError, undefined);
-  assert.equal(JSON.parse(mergedJobDryRun.content[0].text).project, mergeTarget);
-  assert.equal(JSON.parse((await client.callTool({
-    name: "memhub_distill",
-    arguments: { action: "skip", job_id: mergeJob.job.job_id, source_harness: mergeHarness }
-  })).content[0].text).ok, true);
-
-  const deleteJob = await enqueueDerivedDistillationJob({
-    stateRoot,
-    accountId: "acct-test",
-    target: "l3",
-    projectId: deleteProject,
-    evidence: [{
-      ref: `artifact:delete-blocker-${conversationId}`,
-      kind: "artifact",
-      timestamp: "2026-09-22T00:00:00.000Z",
-      project_id: deleteProject,
-      layer: "L2",
-      content: "Pending evidence blocks project deletion until the job is resolved."
-    }]
-  });
-  const deletePlan = JSON.parse((await client.callTool({
-    name: "memmy_project_manage",
-    arguments: { action: "plan", operation: "delete", project: deleteProject }
-  })).content[0].text);
-  assert.ok(deletePlan.impact.blockedByDistillationJobs.some((job) => job.job_id === deleteJob.job.job_id));
-  const blockedDelete = await client.callTool({
-    name: "memmy_project_manage",
-    arguments: { action: "execute", authorization_id: deletePlan.authorization_id }
-  });
-  assert.equal(blockedDelete.isError, true);
-  assert.match(blockedDelete.content[0].text, /unfinished distillation job/);
-  const deleteHarness = `delete-job-${conversationId}`;
-  const leasedDelete = JSON.parse((await client.callTool({
-    name: "memhub_distill",
-    arguments: {
-      action: "next",
-      kind: "l3",
-      scope: "project",
-      project: deleteProject,
-      source_harness: deleteHarness
-    }
-  })).content[0].text);
-  assert.equal(leasedDelete.job.job_id, deleteJob.job.job_id);
-  assert.equal(JSON.parse((await client.callTool({
-    name: "memhub_distill",
-    arguments: { action: "skip", job_id: deleteJob.job.job_id, source_harness: deleteHarness }
-  })).content[0].text).ok, true);
-  const deletePlanAfterResolution = JSON.parse((await client.callTool({
-    name: "memmy_project_manage",
-    arguments: { action: "plan", operation: "delete", project: deleteProject }
-  })).content[0].text);
-  assert.equal(deletePlanAfterResolution.impact.blockedByDistillationJobs.length, 0);
-  assert.equal(JSON.parse((await client.callTool({
-    name: "memmy_project_manage",
-    arguments: { action: "execute", authorization_id: deletePlanAfterResolution.authorization_id }
-  })).content[0].text).ok, true);
-  const historicalProjects = JSON.parse((await client.callTool({
-    name: "memmy_project_list",
-    arguments: { include_inactive: true }
-  })).content[0].text).projects;
-  assert.equal(historicalProjects.find((project) => project.project === mergeSource)?.state, "merged");
-  assert.equal(historicalProjects.find((project) => project.project === mergeSource)?.mergedInto, mergeTarget);
-  assert.equal(historicalProjects.find((project) => project.project === deleteProject)?.state, "deleted");
-  await client.callTool({ name: "memmy_project", arguments: { action: "bind", conversation_id: conversationId, project: "aide" } });
+  const updatedList = JSON.parse((await client.callTool({ name: "memmy_project_list", arguments: { query: "alpha" } })).content[0].text);
+  assert.match(updatedList.projects.find((project) => project.project === "alpha")?.description ?? "", /integration tests/);
   const context = await client.callTool({ name: "memmy_context", arguments: { query: "continue", conversation_id: conversationId } });
   const capsule = JSON.parse(context.content[0].text);
-  assert.equal(capsule.resolvedProjectId, "aide");
+  assert.equal(capsule.resolvedProjectId, null);
   assert.equal(capsule.globalMemory.length, 1);
-  assert.equal(capsule.projectMemory.length, 1);
+  assert.equal(capsule.projectMemory.length, 0);
+  const explicitContext = JSON.parse((await client.callTool({
+    name: "memmy_context",
+    arguments: { query: "continue", project: "alpha", workspace_project: "alpha", conversation_id: conversationId }
+  })).content[0].text);
+  assert.equal(explicitContext.resolvedProjectId, "alpha");
+  assert.equal(explicitContext.projectMemory.length, 1);
   if (conversationId === "stdio-chat") {
-    assert.ok(capsule.projectArchitecture.some((item) => /AIDE Core Architecture/.test(item.content)));
+    assert.ok(explicitContext.projectArchitecture.some((item) => /ALPHA Core Architecture/.test(item.content)));
     const architecture = JSON.parse((await client.callTool({
       name: "memmy_project",
-      arguments: { action: "architecture", project: "aide", query: "broker workspace ownership" }
+      arguments: { action: "architecture", project: "alpha", query: "broker workspace ownership" }
     })).content[0].text);
-    assert.equal(architecture.project, "aide");
+    assert.equal(architecture.project, "alpha");
     assert.ok(architecture.architecture.some((item) => /Broker routes work/.test(item.content)));
   }
   const openedTurn = JSON.parse((await client.callTool({
@@ -2990,11 +1864,12 @@ async function exerciseClient(client, conversationId, stateRoot) {
       conversation_id: conversationId,
       continuity_id: conversationId,
       turn_id: `source-${conversationId}`,
+      project: "alpha",
       user_text: "Keep this original user message in L1."
     }
   })).content[0].text);
   assert.equal(openedTurn.turn.status, "open");
-  assert.equal(openedTurn.turn.project_hint, "aide");
+  assert.equal(openedTurn.turn.project_hint, "alpha");
   const l1EventId = openedTurn.turn.event_id;
   await client.callTool({
     name: "memmy_turn",
@@ -3004,7 +1879,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
       conversation_id: conversationId,
       continuity_id: conversationId,
       turn_id: `source-${conversationId}`,
-      reasoning_summary: "Validated the project binding and memory boundary."
+      reasoning_summary: "Validated the explicit project scope and memory boundary."
     }
   });
   await client.callTool({
@@ -3015,7 +1890,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
       conversation_id: conversationId,
       continuity_id: conversationId,
       turn_id: `source-${conversationId}`,
-      reasoning_summary: "Validated the project binding, memory boundary, and lifecycle update semantics.",
+      reasoning_summary: "Validated the explicit project scope, memory boundary, and lifecycle update semantics.",
       tool_summary: "Checkpoint summaries may advance while the L1 turn is incomplete."
     }
   });
@@ -3048,7 +1923,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: {
       action: "open",
       conversation_id: largeResultConversation,
-      project: "aide",
+      project: "alpha",
       user_text: "Verify generic MCP result chunk transport."
     }
   })).content[0].text);
@@ -3083,14 +1958,13 @@ async function exerciseClient(client, conversationId, stateRoot) {
     name: "memmy_turn",
     arguments: {
       action: "open",
-      project: "aide",
+      project: "alpha",
       user_text: "Capture this turn even when the transport exposes no conversation id."
     }
   })).content[0].text);
-  assert.equal(unboundOpen.binding_available, false);
   assert.equal(unboundOpen.transport_conversation_id, null);
   assert.match(unboundOpen.turn.conversation_id, /^memhub-unbound:l1_/);
-  assert.equal(unboundOpen.turn.project_hint, "aide");
+  assert.equal(unboundOpen.turn.project_hint, "alpha");
   const unboundEventId = unboundOpen.turn.event_id;
   const unboundCommit = JSON.parse((await client.callTool({
     name: "memmy_turn",
@@ -3100,11 +1974,10 @@ async function exerciseClient(client, conversationId, stateRoot) {
       assistant_text: "The unbound transport turn still reaches complete L1 safely."
     }
   })).content[0].text);
-  assert.equal(unboundCommit.binding_available, false);
   assert.equal(unboundCommit.turn.event_id, unboundEventId);
   assert.equal(unboundCommit.turn.status, "complete");
   assert.equal(unboundCommit.turn.ingested, true);
-  assert.equal(unboundCommit.project_id, "aide");
+  assert.equal(unboundCommit.project_id, "alpha");
   const colonEventId = `codex:${conversationId}:colon-turn`;
   await client.callTool({
     name: "memmy_turn",
@@ -3113,7 +1986,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
       event_id: colonEventId,
       conversation_id: conversationId,
       continuity_id: conversationId,
-      project: "aide",
+      project: "alpha",
       user_text: "Verify L1 evidence ids containing colons remain intact."
     }
   });
@@ -3132,18 +2005,13 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: {
       kind: "l2",
       scope: "project",
-      project: "aide",
+      project: "alpha",
       content: "Colon-bearing L1 evidence is accepted without truncating its event id.",
       evidence_refs: [`l1:${colonEventId}`],
       dry_run: true
     }
   });
   assert.equal(JSON.parse(colonEvidenceDryRun.content[0].text).dryRun, true);
-  const syntheticBinding = JSON.parse((await client.callTool({
-    name: "memmy_project",
-    arguments: { action: "current", conversation_id: unboundCommit.turn.conversation_id }
-  })).content[0].text);
-  assert.equal(syntheticBinding.project, null);
   const invalidResume = await client.callTool({ name: "memmy_turn", arguments: { action: "resume" } });
   assert.equal(invalidResume.isError, true);
   assert.match(invalidResume.content[0].text, /resume requires continuity_id or conversation_id/);
@@ -3152,7 +2020,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     name: "memmy_context",
     arguments: { query: "continue", conversation_id: conversationId, continuity_id: conversationId }
   })).content[0].text);
-  assert.ok(continuityContext.recentSession.some((item) => item.id === l1EventId));
+  assert.equal(continuityContext.resolvedProjectId, null);
 
   const contractResult = await client.callTool({
     name: "memhub_distill",
@@ -3170,7 +2038,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
       kind: "l4",
       scope: "account",
       content: "Durable cross-project evidence-backed user profile candidate.",
-      evidence_refs: [golden.aideL3Ref, golden.betaL3Ref],
+      evidence_refs: [golden.alphaL3Ref, golden.betaL3Ref],
       dry_run: true
     }
   });
@@ -3179,38 +2047,38 @@ async function exerciseClient(client, conversationId, stateRoot) {
 
   const exactContext = JSON.parse((await client.callTool({
     name: "memmy_context",
-    arguments: { query: "__exact_evidence_ref_probe__", project: "aide" }
+    arguments: { query: "__exact_evidence_ref_probe__", project: "alpha" }
   })).content[0].text);
-  const exactL2 = exactContext.projectMemory.find((item) => item.id === golden.aideL2Id);
+  const exactL2 = exactContext.projectMemory.find((item) => item.id === golden.alphaL2Id);
   assert.ok(exactL2);
-  assert.equal(exactL2.evidenceRef, golden.aideL2Ref);
+  assert.equal(exactL2.evidenceRef, golden.alphaL2Ref);
   assert.equal(exactL2.provenance.hydration.tool, "memhub_memory");
   assert.equal(exactContext.progressiveDisclosure.discover, "memmy_context");
   const hydratedL2 = JSON.parse((await client.callTool({
     name: "memhub_memory",
     arguments: { action: "load", evidence_ref: exactL2.evidenceRef }
   })).content[0].text);
-  assert.equal(hydratedL2.item.evidence_ref, golden.aideL2Ref);
+  assert.equal(hydratedL2.item.evidence_ref, golden.alphaL2Ref);
   assert.equal(hydratedL2.item.layer, "L2");
-  assert.match(hydratedL2.item.content, /AIDE/);
+  assert.match(hydratedL2.item.content, /ALPHA/);
   assert.equal(hydratedL2.telemetry.hydrations, 1);
 
-  const governedL3Content = "# AIDE Project Rules\n\n- Validate current state before modifying project truth.\n- Preserve explicit project and workspace boundaries.\n- User-confirmed rules replace the canonical L3 only after full-text approval.\n";
+  const governedL3Content = "# ALPHA Project Rules\n\n- Validate current state before modifying project truth.\n- Preserve explicit project and workspace boundaries.\n- User-confirmed rules replace the canonical L3 only after full-text approval.\n";
   const governedL3Plan = JSON.parse((await client.callTool({
     name: "memhub_memory",
     arguments: {
       action: "plan",
       kind: "l3",
-      project: "aide",
-      workspace_project: "aide",
-      base_evidence_ref: golden.aideL3Ref,
+      project: "alpha",
+      workspace_project: "alpha",
+      base_evidence_ref: golden.alphaL3Ref,
       content: governedL3Content,
       note: "User explicitly requested a new project rule."
     }
   })).content[0].text);
   assert.equal(governedL3Plan.status, "awaiting_user_authorization");
   assert.equal(governedL3Plan.proposed_content, governedL3Content);
-  assert.equal(governedL3Plan.current_evidence_ref, golden.aideL3Ref);
+  assert.equal(governedL3Plan.current_evidence_ref, golden.alphaL3Ref);
   assert.ok(governedL3Plan.instructions.some((line) => /Show proposed_content.*in full/i.test(line)));
   const l3Confirmation = JSON.parse((await client.callTool({
     name: "memmy_turn",
@@ -3218,7 +2086,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
       action: "open",
       conversation_id: `${conversationId}-l3-confirmation`,
       continuity_id: `${conversationId}-l3-confirmation`,
-      project: "aide",
+      project: "alpha",
       user_text: "Yes. Write the exact full L3 replacement you just showed me."
     }
   })).content[0].text);
@@ -3232,7 +2100,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
   })).content[0].text);
   assert.equal(governedL3.ok, true);
   assert.equal(governedL3.kind, "l3");
-  assert.equal(governedL3.project, "aide");
+  assert.equal(governedL3.project, "alpha");
   assert.equal(governedL3.derived_jobs_enqueued, 0);
   assert.match(governedL3.result_evidence_ref, /^l3:[^:]+:[^:]+$/);
   await client.callTool({
@@ -3269,7 +2137,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
       action: "open",
       conversation_id: `${conversationId}-l4-confirmation`,
       continuity_id: `${conversationId}-l4-confirmation`,
-      project: "aide",
+      project: "alpha",
       user_text: "Confirmed. Write exactly that full L4 replacement."
     }
   })).content[0].text);
@@ -3306,10 +2174,10 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: {
       action: "plan",
       kind: "l3",
-      project: "aide",
-      workspace_project: "aide",
+      project: "alpha",
+      workspace_project: "alpha",
       base_evidence_ref: governedL3.result_evidence_ref,
-      content: "# AIDE Project Rules\n\nThis stale proposal must not overwrite a newer canonical L3.\n"
+      content: "# ALPHA Project Rules\n\nThis stale proposal must not overwrite a newer canonical L3.\n"
     }
   })).content[0].text);
   const concurrentL3 = JSON.parse((await client.callTool({
@@ -3317,9 +2185,9 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: {
       kind: "l3",
       scope: "project",
-      project: "aide",
-      content: "# AIDE Project Rules\n\nA concurrent canonical L3 update happened after the governed plan.\n",
-      evidence_refs: [golden.aideL2Ref],
+      project: "alpha",
+      content: "# ALPHA Project Rules\n\nA concurrent canonical L3 update happened after the governed plan.\n",
+      evidence_refs: [golden.alphaL2Ref],
       source_harness: "concurrent-update-test"
     }
   })).content[0].text);
@@ -3330,7 +2198,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
       action: "open",
       conversation_id: `${conversationId}-stale-l3-confirmation`,
       continuity_id: `${conversationId}-stale-l3-confirmation`,
-      project: "aide",
+      project: "alpha",
       user_text: "Confirm the stale plan."
     }
   })).content[0].text);
@@ -3350,9 +2218,9 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: {
       kind: "l3",
       scope: "project",
-      project: "aide",
+      project: "alpha",
       content: "A mutable stable Memory id must not be accepted as exact L2 evidence.",
-      evidence_refs: [`l2:${golden.aideL2Id}`],
+      evidence_refs: [`l2:${golden.alphaL2Id}`],
       dry_run: true
     }
   });
@@ -3365,10 +2233,10 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: {
       kind: "l3",
       scope: "project",
-      project: "aide",
+      project: "alpha",
       artifact_id: `direct-ledger-${conversationId}`,
       content: "Direct manual L3 writes also leave an immutable completed revision ledger.",
-      evidence_refs: [golden.aideL2Ref],
+      evidence_refs: [golden.alphaL2Ref],
       source_harness: "direct-ledger-test"
     }
   })).content[0].text);
@@ -3390,7 +2258,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: {
       kind: "l3",
       scope: "project",
-      project: "aide",
+      project: "alpha",
       content: "This must not validate against invented evidence.",
       evidence_refs: ["l2:not-a-real-memory"],
       dry_run: true
@@ -3407,22 +2275,22 @@ async function exerciseClient(client, conversationId, stateRoot) {
     title: "Other account timeline",
     summary: "Must never be accepted as current-account evidence.",
     body: "Must never be accepted as current-account evidence.",
-    tags: ["artifact:l2", "project:aide"],
-    namespace: { tenantId: "acct-other", userId: "acct_other_user", projectId: "aide" },
+    tags: ["artifact:l2", "project:alpha"],
+    namespace: { tenantId: "acct-other", userId: "acct_other_user", projectId: "alpha" },
     version: 1
   });
   const otherAccountRevision = await recordCompletedDistillationRevision({
     stateRoot,
     accountId: "acct-other",
     target: "l2",
-    projectId: "aide",
+    projectId: "alpha",
     conversationId: "other-account-conversation",
     evidence: [{
       ref: "l1:other-account-turn",
       kind: "turn",
       layer: "L1",
       timestamp: new Date().toISOString(),
-      project_id: "aide",
+      project_id: "alpha",
       conversation_id: "other-account-conversation",
       user_text: "other account user",
       assistant_text: "other account assistant"
@@ -3436,7 +2304,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: {
       kind: "l3",
       scope: "project",
-      project: "aide",
+      project: "alpha",
       content: "This must not validate against another account's L2.",
       evidence_refs: [`l2:${otherAccountEvidenceId}:${otherAccountRevision.job_id}`],
       dry_run: true
@@ -3448,8 +2316,8 @@ async function exerciseClient(client, conversationId, stateRoot) {
   const missingSkillIdentity = await client.callTool({
     name: "memhub_distill",
     arguments: {
-      kind: "skill", scope: "project", conversation_id: conversationId,
-      title: "AIDE unstable skill", content: "Reusable procedure", version: "1.0.0", dry_run: true
+      kind: "skill", scope: "project", project: "alpha",
+      title: "ALPHA unstable skill", content: "Reusable procedure", version: "1.0.0", dry_run: true
     }
   });
   assert.equal(missingSkillIdentity.isError, true);
@@ -3457,23 +2325,23 @@ async function exerciseClient(client, conversationId, stateRoot) {
   const invalidSkillVersion = await client.callTool({
     name: "memhub_distill",
     arguments: {
-      kind: "skill", scope: "project", conversation_id: conversationId,
-      title: "AIDE unstable skill", content: "Reusable procedure", artifact_id: "aide-unstable",
+      kind: "skill", scope: "project", project: "alpha",
+      title: "ALPHA unstable skill", content: "Reusable procedure", artifact_id: "alpha-unstable",
       version: "1.0-retracted", dry_run: true
     }
   });
   assert.equal(invalidSkillVersion.isError, true);
   assert.match(invalidSkillVersion.content[0].text, /numeric dotted/);
 
-  const reconnectArtifactId = `aide-reconnect-${conversationId}`;
+  const reconnectArtifactId = `alpha-reconnect-${conversationId}`;
   await client.callTool({
     name: "memhub_distill",
     arguments: {
       kind: "skill",
       scope: "project",
-      conversation_id: conversationId,
-      title: "AIDE reconnect workflow",
-      content: "Use this when AIDE reconnect fails. Inspect state, repair the bridge, then verify reconnection.",
+      project: "alpha",
+      title: "ALPHA reconnect workflow",
+      content: "Use this when ALPHA reconnect fails. Inspect state, repair the MCP route, then verify reconnection.",
       source_harness: "codex",
       artifact_id: reconnectArtifactId,
       version: "1.0.0",
@@ -3484,20 +2352,20 @@ async function exerciseClient(client, conversationId, stateRoot) {
   });
   const skillWrite = [...requests].reverse().find((entry) => entry.url === "/api/v1/memory/add");
   assert.equal(skillWrite.body.layer, "Skill");
-  assert.equal(skillWrite.body.namespace.projectId, "aide");
+  assert.equal(skillWrite.body.namespace.projectId, "alpha");
   assert.equal(skillWrite.body.namespace.tenantId, "acct-test");
   assert.equal(skillWrite.body.sourceAgentId, "codex");
   assert.equal(skillWrite.body.sourceSkillId, reconnectArtifactId);
   assert.equal(skillWrite.body.sourceSkillVersion, "1.0.0");
   assert.ok(skillWrite.body.tags.includes("artifact:skill"));
-  assert.ok(skillWrite.body.tags.includes("project:aide"));
+  assert.ok(skillWrite.body.tags.includes("project:alpha"));
   assert.ok(skillWrite.body.tags.includes("distill-contract:memhub-distill-v3"));
   assert.ok(skillWrite.body.tags.includes("evidence:l1:test-turn"));
   assert.ok(skillWrite.body.tags.includes(`source-conversation:${conversationId}`));
   assert.equal(typeof skillWrite.body.requestId, "string");
 
   const skillRecord = [...memoryById.values()].find((item) => item.memoryLayer === "Skill" &&
-    item.title === "AIDE reconnect workflow" &&
+    item.title === "ALPHA reconnect workflow" &&
     item.metadata?.properties?.internal_info?.source_skill_id === reconnectArtifactId);
   assert.ok(skillRecord);
   const loadedSkill = JSON.parse((await client.callTool({
@@ -3506,9 +2374,9 @@ async function exerciseClient(client, conversationId, stateRoot) {
   })).content[0].text);
   assert.equal(loadedSkill.skill_id, skillRecord.id);
   assert.equal(typeof loadedSkill.execution_id, "string");
-  assert.match(loadedSkill.content, /repair the bridge/);
+  assert.match(loadedSkill.content, /repair the MCP route/);
   assert.equal(loadedSkill.metadata.loadRequired, true);
-  assert.equal(loadedSkill.metadata.scope, "project:aide");
+  assert.equal(loadedSkill.metadata.scope, "project:alpha");
 
   const invalidSkillRecord = await client.callTool({
     name: "memhub_skill", arguments: { action: "record", skill_id: skillRecord.id, stage: "success" }
@@ -3563,12 +2431,12 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(foreignLoad.isError, true, "cross-account Skill must not be loaded");
   memoryById.delete(foreignSkillId);
 
-  const revisionContent = `# AIDE reconnect workflow\n\n## When to use\nWhen AIDE reconnect fails.\n\n## Procedure\nRead the current project state, repair the bridge, and verify reconnection with a real MCP round trip. Never infer success from a local build alone.`;
+  const revisionContent = `# ALPHA reconnect workflow\n\n## When to use\nWhen ALPHA reconnect fails.\n\n## Procedure\nRead the current project state, repair the bridge, and verify reconnection with a real MCP round trip. Never infer success from a local build alone.`;
   const plan = JSON.parse((await client.callTool({
     name: "memhub_skill",
     arguments: {
       action: "plan", operation: "revise", skill_id: skillRecord.id,
-      version: "2.0.0", content: revisionContent, title: "AIDE reconnect workflow",
+      version: "2.0.0", content: revisionContent, title: "ALPHA reconnect workflow",
       tags: ["reconnect", "reusable"], note: "replace stale reconnect checks"
     }
   })).content[0].text);
@@ -3589,7 +2457,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(revisedWrite.body.sourceSkillId, reconnectArtifactId);
   assert.equal(revisedWrite.body.sourceSkillVersion, "2.0.0");
   assert.ok(revisedWrite.body.tags.includes(`revision-of:${skillRecord.id}`));
-  assert.equal(revisedWrite.body.namespace.projectId, "aide");
+  assert.equal(revisedWrite.body.namespace.projectId, "alpha");
   const oldLoad = await client.callTool({ name: "memhub_skill", arguments: { action: "load", skill_id: skillRecord.id } });
   assert.equal(oldLoad.isError, true, "superseded Skill cannot start another execution");
   assert.match(oldLoad.content[0].text, /archived or inactive/);
@@ -3643,81 +2511,80 @@ async function exerciseClient(client, conversationId, stateRoot) {
 
 }
 
-async function exerciseGoldenDistillationChain(client, stateRoot, conversationId, aideL1EventId) {
+async function exerciseGoldenDistillationChain(client, stateRoot, conversationId, alphaL1EventId) {
   const harnessA = `golden-a-${conversationId}`;
   const harnessB = `golden-b-${conversationId}`;
   const harnessGlobal = `golden-global-${conversationId}`;
   const parseTool = (result) => JSON.parse(result.content[0].text);
 
   const captures = await listCaptureEvents(stateRoot, "acct-test");
-  const aideCapture = captures.find((item) => item.event_id === aideL1EventId);
-  assert.ok(aideCapture);
-  const aideQueued = await enqueueDistillationJob({
+  const alphaCapture = captures.find((item) => item.event_id === alphaL1EventId);
+  assert.ok(alphaCapture);
+  const alphaQueued = await enqueueDistillationJob({
     stateRoot,
     accountId: "acct-test",
-    projectId: "aide",
-    conversationId,
-    captures: [aideCapture],
+    projectId: "alpha",
+    captures: [alphaCapture],
     reason: "manual"
   });
-  assert.equal(aideQueued.created, true);
-  const aideNext = parseTool(await client.callTool({
+  assert.equal(alphaQueued.created, true);
+  const alphaNext = parseTool(await client.callTool({
     name: "memhub_distill",
-    arguments: { action: "next", kind: "l2", scope: "project", project: "aide", source_harness: harnessA, lease_token_supported: true }
+    arguments: { action: "next", kind: "l2", scope: "project", project: "alpha", source_harness: harnessA, lease_token_supported: true }
   }));
-  assert.equal(aideNext.job.job_id, aideQueued.job.job_id);
-  assert.ok(aideNext.job.lease_token);
+  assert.equal(alphaNext.job.job_id, alphaQueued.job.job_id);
+  assert.ok(alphaNext.job.lease_token);
   const missingToken = await client.callTool({
     name: "memhub_distill",
-    arguments: { action: "next", job_id: aideNext.job.job_id, source_harness: harnessA }
+    arguments: { action: "next", job_id: alphaNext.job.job_id, source_harness: harnessA }
   });
   assert.equal(missingToken.isError, true);
   assert.match(missingToken.content[0].text, /lease token is missing or stale/i);
   const renewed = parseTool(await client.callTool({
     name: "memhub_distill",
-    arguments: { action: "renew", job_id: aideNext.job.job_id, source_harness: harnessA, lease_token: aideNext.job.lease_token, lease_seconds: 600 }
+    arguments: { action: "renew", job_id: alphaNext.job.job_id, source_harness: harnessA, lease_token: alphaNext.job.lease_token, lease_seconds: 600 }
   }));
-  assert.equal(renewed.lease_token, aideNext.job.lease_token);
+  assert.equal(renewed.lease_token, alphaNext.job.lease_token);
   const wrongOwner = await client.callTool({
     name: "memhub_distill",
     arguments: {
       action: "submit",
-      job_id: aideNext.job.job_id,
+      job_id: alphaNext.job.job_id,
       content: "This write must be rejected before reaching Memory Core.",
       source_harness: "wrong-harness"
     }
   });
   assert.equal(wrongOwner.isError, true);
   assert.match(wrongOwner.content[0].text, /leased by another harness/i);
-  const aideL2V1 = parseTool(await client.callTool({
+  const alphaL2V1 = parseTool(await client.callTool({
     name: "memhub_distill",
     arguments: {
       action: "submit",
-      job_id: aideNext.job.job_id,
-      content: "AIDE timeline v1: the project binding was validated before memory changes.",
-      project_description: "AIDE is an AI development environment focused on project-scoped orchestration and safe routing of work between harnesses.",
+      job_id: alphaNext.job.job_id,
+      content: "ALPHA timeline v1: the project binding was validated before memory changes.",
+      project_description: "ALPHA is an AI development environment focused on project-scoped orchestration and safe routing of work between harnesses.",
       source_harness: harnessA,
-      lease_token: aideNext.job.lease_token
+      lease_token: alphaNext.job.lease_token
     }
   }));
-  assert.equal(aideL2V1.kind, "l2");
-  assert.equal(aideL2V1.next_layer_job.job.target, "l3");
+  assert.equal(alphaL2V1.kind, "l2");
+  assert.equal(alphaL2V1.next_layer_job.job.target, "l3");
   const derivedDryRun = parseTool(await client.callTool({
     name: "memhub_distill",
     arguments: {
       action: "reconcile_derived",
-      job_id: aideNext.job.job_id,
-      project: "aide"
+      job_id: alphaNext.job.job_id,
+      project: "alpha"
     }
   }));
   assert.equal(derivedDryRun.dry_run, true, "reconcile_derived must default to read-only");
   assert.equal(derivedDryRun.already_queued, true);
-  assert.equal(derivedDryRun.derived_job_id, aideL2V1.next_layer_job.job.job_id);
+  assert.equal(derivedDryRun.derived_job_id, alphaL2V1.next_layer_job.job.job_id);
   const foreignRepair = await client.callTool({
     name: "memhub_distill",
     arguments: {
       action: "reconcile_derived",
-      job_id: aideNext.job.job_id,
+      job_id: alphaNext.job.job_id,
       project: "nonexistent-project",
       dry_run: false
     }
@@ -3727,61 +2594,66 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
     name: "memhub_distill",
     arguments: {
       action: "reconcile_derived",
-      job_id: aideNext.job.job_id,
+      job_id: alphaNext.job.job_id,
       dry_run: false
     }
   });
   assert.equal(missingRepairProject.isError, true, "repair requires an explicit project");
-  const aideAfterDistilledDescription = parseTool(await client.callTool({
+  const alphaAfterDistilledDescription = parseTool(await client.callTool({
     name: "memmy_project_list",
-    arguments: { query: "aide" }
-  })).projects.find((project) => project.project === "aide");
-  assert.ok(aideAfterDistilledDescription);
-  assert.match(aideAfterDistilledDescription.description, /^AIDE project used by MCP integration tests \((?:re)?verified\)\.$/);
-  assert.equal(aideAfterDistilledDescription.descriptionSource, "manual");
-  assert.match(aideAfterDistilledDescription.distilledDescription, /AI development environment focused on project-scoped orchestration/);
-  const aideL2Id = aideL2V1.memory.id;
-  const aideL2WriteV1 = [...requests].reverse().find((entry) =>
-    entry.url === "/api/v1/memory/add" && entry.body?.layer === "L2" && entry.body?.namespace?.projectId === "aide"
+    arguments: { query: "alpha" }
+  })).projects.find((project) => project.project === "alpha");
+  assert.ok(alphaAfterDistilledDescription);
+  assert.match(alphaAfterDistilledDescription.description, /^ALPHA project used by MCP integration tests \((?:re)?verified\)\.$/);
+  assert.equal(alphaAfterDistilledDescription.descriptionSource, "manual");
+  assert.match(alphaAfterDistilledDescription.distilledDescription, /AI development environment focused on project-scoped orchestration/);
+  const alphaL2Id = alphaL2V1.memory.id;
+  const alphaL2WriteV1 = [...requests].reverse().find((entry) =>
+    entry.url === "/api/v1/memory/add" && entry.body?.layer === "L2" && entry.body?.namespace?.projectId === "alpha"
   );
-  assert.ok(aideL2WriteV1);
+  assert.ok(alphaL2WriteV1);
 
-  const aideL3Next = parseTool(await client.callTool({
+  const alphaL3Next = parseTool(await client.callTool({
     name: "memhub_distill",
-    arguments: { action: "next", kind: "l3", scope: "project", project: "aide", source_harness: harnessA }
+    arguments: { action: "next", kind: "l3", scope: "project", project: "alpha", source_harness: harnessA }
   }));
-  const aideL3V1 = parseTool(await client.callTool({
+  const alphaL3V1 = parseTool(await client.callTool({
     name: "memhub_distill",
     arguments: {
       action: "submit",
-      job_id: aideL3Next.job.job_id,
-      content: "Within AIDE, validate current state before changing deployment or routing configuration.",
+      job_id: alphaL3Next.job.job_id,
+      content: "Within ALPHA, validate current state before changing deployment or routing configuration.",
       source_harness: harnessA
     }
   }));
-  assert.equal(aideL3V1.kind, "l3");
-  const aideL3Id = aideL3V1.memory.id;
+  assert.equal(alphaL3V1.kind, "l3");
+  const alphaL3Id = alphaL3V1.memory.id;
 
   const betaProject = `beta-${conversationId}`;
-  const createBetaPlan = parseTool(await client.callTool({
-    name: "memmy_project_manage",
-    arguments: {
-      action: "plan",
-      operation: "create",
-      project: betaProject,
-      name: `Beta ${conversationId}`,
-      description: "Second project used to prove cross-project L4 evidence in the golden distillation test."
-    }
-  }));
-  assert.equal(createBetaPlan.status, "awaiting_user_authorization");
-  assert.ok(Date.parse(createBetaPlan.expires_at) - Date.now() > 23 * 60 * 60_000);
-  assert.equal(parseTool(await client.callTool({
-    name: "memmy_project_manage",
-    arguments: { action: "execute", authorization_id: createBetaPlan.authorization_id }
-  })).ok, true);
+  const betaExists = parseTool(await client.callTool({
+    name: "memmy_project_list",
+    arguments: { query: betaProject, include_inactive: true }
+  })).projects.some((project) => project.project === betaProject);
+  if (!betaExists) {
+    const createBetaPlan = parseTool(await client.callTool({
+      name: "memmy_project_manage",
+      arguments: {
+        action: "plan",
+        operation: "create",
+        project: betaProject,
+        name: `Beta ${conversationId}`,
+        description: "Second project used to prove cross-project L4 evidence in the golden distillation test."
+      }
+    }));
+    assert.equal(createBetaPlan.status, "awaiting_user_authorization");
+    assert.ok(Date.parse(createBetaPlan.expires_at) - Date.now() > 23 * 60 * 60_000);
+    assert.equal(parseTool(await client.callTool({
+      name: "memmy_project_manage",
+      arguments: { action: "execute", authorization_id: createBetaPlan.authorization_id }
+    })).ok, true);
+  }
 
   const betaConversation = `${conversationId}-beta`;
-  await client.callTool({ name: "memmy_project", arguments: { action: "bind", conversation_id: betaConversation, project: betaProject } });
   const betaOpen = parseTool(await client.callTool({
     name: "memmy_turn",
     arguments: {
@@ -3789,7 +2661,8 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
       conversation_id: betaConversation,
       continuity_id: betaConversation,
       turn_id: `source-${betaConversation}`,
-      user_text: "Keep the second project evidence isolated from AIDE."
+      project: betaProject,
+      user_text: "Keep the second project evidence isolated from ALPHA."
     }
   }));
   const betaCommit = parseTool(await client.callTool({
@@ -3810,7 +2683,6 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
     stateRoot,
     accountId: "acct-test",
     projectId: betaProject,
-    conversationId: betaConversation,
     captures: [betaCapture],
     reason: "manual"
   });
@@ -3880,79 +2752,79 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
   );
   assert.ok(l4WriteV1);
 
-  const aideOpenV2 = parseTool(await client.callTool({
+  const alphaOpenV2 = parseTool(await client.callTool({
     name: "memmy_turn",
     arguments: {
       action: "open",
       conversation_id: conversationId,
       continuity_id: conversationId,
       turn_id: `source-${conversationId}-v2`,
-      user_text: "Update AIDE with a second durable decision."
+      user_text: "Update ALPHA with a second durable decision."
     }
   }));
   await client.callTool({
     name: "memmy_turn",
     arguments: {
       action: "commit",
-      event_id: aideOpenV2.turn.event_id,
+      event_id: alphaOpenV2.turn.event_id,
       conversation_id: conversationId,
       continuity_id: conversationId,
       turn_id: `source-${conversationId}-v2`,
-      assistant_text: "The second decision is now part of AIDE current truth."
+      assistant_text: "The second decision is now part of ALPHA current truth."
     }
   });
-  const aideCaptureV2 = (await listCaptureEvents(stateRoot, "acct-test")).find((item) => item.event_id === aideOpenV2.turn.event_id);
-  assert.ok(aideCaptureV2);
-  const aideQueuedV2 = await enqueueDistillationJob({
+  const alphaCaptureV2 = (await listCaptureEvents(stateRoot, "acct-test")).find((item) => item.event_id === alphaOpenV2.turn.event_id);
+  assert.ok(alphaCaptureV2);
+  const alphaQueuedV2 = await enqueueDistillationJob({
     stateRoot,
     accountId: "acct-test",
-    projectId: "aide",
+    projectId: "alpha",
     conversationId,
-    captures: [aideCaptureV2],
+    captures: [alphaCaptureV2],
     reason: "manual"
   });
-  const aideL2NextV2 = parseTool(await client.callTool({
+  const alphaL2NextV2 = parseTool(await client.callTool({
     name: "memhub_distill",
-    arguments: { action: "next", kind: "l2", scope: "project", project: "aide", source_harness: harnessA }
+    arguments: { action: "next", kind: "l2", scope: "project", project: "alpha", source_harness: harnessA }
   }));
-  assert.equal(aideL2NextV2.job.job_id, aideQueuedV2.job.job_id);
-  const aideL2V2 = parseTool(await client.callTool({
+  assert.equal(alphaL2NextV2.job.job_id, alphaQueuedV2.job.job_id);
+  const alphaL2V2 = parseTool(await client.callTool({
     name: "memhub_distill",
     arguments: {
       action: "submit",
-      job_id: aideL2NextV2.job.job_id,
-      content: "AIDE timeline v2: preserve the original validation decision and append the second durable decision as current truth.",
-      project_description: "AIDE coordinates project-aware AI development work while preserving explicit workspace ownership, routing boundaries, and durable current state.",
+      job_id: alphaL2NextV2.job.job_id,
+      content: "ALPHA timeline v2: preserve the original validation decision and append the second durable decision as current truth.",
+      project_description: "ALPHA coordinates project-aware AI development work while preserving explicit workspace ownership, routing boundaries, and durable current state.",
       source_harness: harnessA
     }
   }));
-  assert.equal(aideL2V2.memory.id, aideL2Id);
-  const aideL2Writes = requests.filter((entry) =>
-    entry.url === "/api/v1/memory/add" && entry.body?.layer === "L2" && entry.body?.namespace?.projectId === "aide"
+  assert.equal(alphaL2V2.memory.id, alphaL2Id);
+  const alphaL2Writes = requests.filter((entry) =>
+    entry.url === "/api/v1/memory/add" && entry.body?.layer === "L2" && entry.body?.namespace?.projectId === "alpha"
   );
-  const aideL2WriteV2 = aideL2Writes.at(-1);
-  assert.notEqual(aideL2WriteV1.body.requestId, aideL2WriteV2.body.requestId);
+  const alphaL2WriteV2 = alphaL2Writes.at(-1);
+  assert.notEqual(alphaL2WriteV1.body.requestId, alphaL2WriteV2.body.requestId);
 
-  const aideL3NextV2 = parseTool(await client.callTool({
+  const alphaL3NextV2 = parseTool(await client.callTool({
     name: "memhub_distill",
-    arguments: { action: "next", kind: "l3", scope: "project", project: "aide", source_harness: harnessA }
+    arguments: { action: "next", kind: "l3", scope: "project", project: "alpha", source_harness: harnessA }
   }));
-  const aideL3V2 = parseTool(await client.callTool({
+  const alphaL3V2 = parseTool(await client.callTool({
     name: "memhub_distill",
     arguments: {
       action: "submit",
-      job_id: aideL3NextV2.job.job_id,
-      content: "Within AIDE, validate current state first and preserve durable decisions as the project evolves.",
+      job_id: alphaL3NextV2.job.job_id,
+      content: "Within ALPHA, validate current state first and preserve durable decisions as the project evolves.",
       source_harness: harnessA
     }
   }));
-  assert.equal(aideL3V2.memory.id, aideL3Id);
-  assert.equal(aideL3V2.next_layer_job.job.target, "l4");
+  assert.equal(alphaL3V2.memory.id, alphaL3Id);
+  assert.equal(alphaL3V2.next_layer_job.job.target, "l4");
   const staleL4Repair = await client.callTool({
     name: "memhub_distill",
     arguments: {
       action: "reconcile_l4",
-      job_id: aideL3Next.job.job_id,
+      job_id: alphaL3Next.job.job_id,
       dry_run: false
     }
   });
@@ -3980,10 +2852,10 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
   assert.equal(memoryById.get(l4IdV1).version >= 2, true);
 
   return {
-    aideL2Id,
-    aideL2Ref: aideL2V2.result_evidence_ref,
-    aideL3Id,
-    aideL3Ref: aideL3V2.result_evidence_ref,
+    alphaL2Id,
+    alphaL2Ref: alphaL2V2.result_evidence_ref,
+    alphaL3Id,
+    alphaL3Ref: alphaL3V2.result_evidence_ref,
     betaL3Id,
     betaL3Ref: betaL3.result_evidence_ref,
     l4Id: l4V2.memory.id,

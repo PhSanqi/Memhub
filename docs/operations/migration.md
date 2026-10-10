@@ -80,13 +80,13 @@ This validates the actual migration function without touching production.
 
 The production cutover must establish one frozen baseline and prevent concurrent writes while exact migration ownership changes occur:
 
-1. stop gateway/capture writers;
+1. stop Memhub/Core writers;
 2. stop `memhub-core.service`;
 3. create the final preflight baseline;
 4. start the v8 Memory Core against the existing database path;
 5. verify migration/integrity;
 6. start the Memhub gateway;
-7. run MCP, Control Plane and representative recall/capture smoke tests;
+7. run MCP, Control Plane and representative MCP recall/L1 smoke tests;
 8. run preservation verification before declaring the cutover complete.
 
 ## Exact verification versus preservation verification

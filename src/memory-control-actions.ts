@@ -1,7 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { setAccountRole, type listAccounts } from "./auth.js";
 import { setDistillationConfig, retryDistillationJob, type DistillationJob } from "./distillation-jobs.js";
-import { queueLegacyLayerRebuild } from "./legacy-rebuild.js";
 import { readJsonBody } from "./http-json.js";
 import type { MemhubRuntime } from "./runtime.js";
 
@@ -32,28 +31,6 @@ export async function handleMemoryControlAction(input: {
               ...(typeof body.idle_minutes === "number" ? { idle_minutes: body.idle_minutes } : {})
             });
             response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, config }));
-            return;
-          }
-          if (action === "queue-legacy-rebuild") {
-            if (!adminView) { response.writeHead(403).end(); return; }
-            const projectRef = optionalString(body.project);
-            let projectId: string | undefined;
-            if (projectRef) {
-              await runtime.projects.list(runtime.accountId);
-              projectId = await runtime.projects.resolve(runtime.accountId, projectRef) ?? undefined;
-              if (!projectId) {
-                response.writeHead(404, { "content-type": "application/json" })
-                  .end(JSON.stringify({ error: "project_not_found" }));
-                return;
-              }
-            }
-            const rebuild = await queueLegacyLayerRebuild({
-              stateRoot: stateRoot,
-              runtime,
-              ...(projectId ? { projectId } : {})
-            });
-            response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" })
-              .end(JSON.stringify({ ok: true, rebuild }));
             return;
           }
           if (action === "set-account-role") {

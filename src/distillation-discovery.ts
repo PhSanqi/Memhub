@@ -1,5 +1,7 @@
-import { captureIndexStats, captureIngestedAt, listCaptureEvents, listCaptureIndexEntries, type StoredCaptureEvent } from "./capture.js";
+import { captureIndexStats, captureIngestedAt, captureIsFullyExcludedFromMemory, listCaptureEvents, listCaptureIndexEntries, type StoredCaptureEvent } from "./capture.js";
+import { resolveCaptureProject } from "./capture-project-resolution.js";
 import {
+  effectiveDistillationFailureKind,
   enqueueDistillationJob,
   getDistillationConfig,
   listDistillationJobs
@@ -15,9 +17,13 @@ export interface DiscoveryReport {
   pending_jobs: number;
   leased_jobs: number;
   failed_jobs: number;
+  actionable_failed_jobs: number;
+  historical_failed_jobs: number;
   scanned: number;
   eligible: number;
   unresolved: number;
+  privacy_excluded: number;
+  workspace_resolved: number;
   already_queued: number;
   waiting: number;
   would_enqueue: number;
@@ -32,7 +38,6 @@ export async function discoverDistillationJobs(input: {
   accountId: string;
   resolveProject: (projectHint: string) => Promise<string | null>;
   enqueue?: boolean;
-  conversationId?: string;
   now?: Date;
 }): Promise<DiscoveryReport> {
   const config = await getDistillationConfig(input.stateRoot);
@@ -49,20 +54,25 @@ export async function discoverDistillationJobs(input: {
     pending_jobs: jobs.filter((job) => job.status === "pending").length,
     leased_jobs: jobs.filter((job) => job.status === "leased").length,
     failed_jobs: jobs.filter((job) => job.status === "failed").length,
-    scanned: 0, eligible: 0, unresolved: 0, already_queued: 0,
+    actionable_failed_jobs: jobs.filter((job) =>
+      job.status === "failed" && effectiveDistillationFailureKind(job) !== "invalid_legacy_evidence"
+    ).length,
+    historical_failed_jobs: jobs.filter((job) =>
+      job.status === "failed" && effectiveDistillationFailureKind(job) === "invalid_legacy_evidence"
+    ).length,
+    scanned: 0, eligible: 0, unresolved: 0, privacy_excluded: 0, workspace_resolved: 0, already_queued: 0,
     waiting: 0, would_enqueue: 0, queued: 0, duplicates: 0,
     cutover_missing: config.auto_enabled && !config.auto_since
   };
   if (!config.auto_enabled || !config.auto_since) return report;
   const captures = await listCaptureEvents(input.stateRoot, input.accountId, {
     ingested: true,
-    completeOnly: true,
-    ...(input.conversationId ? { conversationId: input.conversationId } : {})
+    completeOnly: true
   });
   const used = new Set(jobs.filter((job) => job.target === "l2").flatMap((job) =>
-    job.evidence_refs.map((ref) => `${job.project_id ?? ""}\0${job.conversation_id ?? ""}\0${ref}`)
+    job.evidence_refs.map((ref) => `${job.project_id ?? ""}\0${ref}`)
   ));
-  const groups = new Map<string, { projectId: string; conversationId: string; captures: StoredCaptureEvent[] }>();
+  const groups = new Map<string, { projectId: string; captures: StoredCaptureEvent[] }>();
   const resolved = new Map<string, string | null>();
   const ingestedTimes = new Map<string, string>();
   for (const event of captures) {
@@ -70,22 +80,28 @@ export async function discoverDistillationJobs(input: {
     if (!ingestedAt || ingestedAt < config.auto_since) continue;
     ingestedTimes.set(event.event_id, ingestedAt);
     report.scanned += 1;
-    if (!event.project_hint || !event.user_text?.trim() || !event.assistant_text?.trim()) {
+    if (captureIsFullyExcludedFromMemory(event)) {
+      report.privacy_excluded += 1;
+      continue;
+    }
+    if (!event.user_text?.trim() || !event.assistant_text?.trim()) {
       report.unresolved += 1;
       continue;
     }
-    if (!resolved.has(event.project_hint)) {
-      resolved.set(event.project_hint, await input.resolveProject(event.project_hint));
-    }
-    const projectId = resolved.get(event.project_hint);
+    const resolution = await resolveCaptureProject(event, async (hint) => {
+      if (!resolved.has(hint)) resolved.set(hint, await input.resolveProject(hint));
+      return resolved.get(hint) ?? null;
+    });
+    const projectId = resolution.projectId;
     if (!projectId) { report.unresolved += 1; continue; }
+    if (resolution.source === "workspace_path") report.workspace_resolved += 1;
     report.eligible += 1;
-    if (used.has(`${projectId}\0${event.conversation_id}\0l1:${event.event_id}`)) {
+    if (used.has(`${projectId}\0l1:${event.event_id}`)) {
       report.already_queued += 1;
       continue;
     }
-    const key = `${projectId}\0${event.conversation_id}`;
-    const group = groups.get(key) ?? { projectId, conversationId: event.conversation_id, captures: [] };
+    const key = projectId;
+    const group = groups.get(key) ?? { projectId, captures: [] };
     group.captures.push(event);
     groups.set(key, group);
   }
@@ -106,7 +122,6 @@ export async function discoverDistillationJobs(input: {
         stateRoot: input.stateRoot,
         accountId: input.accountId,
         projectId: group.projectId,
-        conversationId: group.conversationId,
         captures: batch,
         reason: batch.length >= config.turn_threshold ? "turn_threshold" : "idle"
       });
@@ -122,6 +137,12 @@ export async function discoverDistillationJobs(input: {
     report.pending_jobs = currentJobs.filter((job) => job.status === "pending").length;
     report.leased_jobs = currentJobs.filter((job) => job.status === "leased").length;
     report.failed_jobs = currentJobs.filter((job) => job.status === "failed").length;
+    report.actionable_failed_jobs = currentJobs.filter((job) =>
+      job.status === "failed" && effectiveDistillationFailureKind(job) !== "invalid_legacy_evidence"
+    ).length;
+    report.historical_failed_jobs = currentJobs.filter((job) =>
+      job.status === "failed" && effectiveDistillationFailureKind(job) === "invalid_legacy_evidence"
+    ).length;
   }
   return report;
 }

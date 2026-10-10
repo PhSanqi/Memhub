@@ -1,7 +1,6 @@
 import { buildContextCapsule, type ContextCapsule } from "./context-capsule.js";
 import { resolveProjectScope, type ProjectScopeResolution } from "./project-scope.js";
 import { NullProjectArchitectureSource, type ProjectArchitectureSource } from "./architecture-source.js";
-import type { ConversationProjectBindingStore } from "./binding-store.js";
 import type { JsonProjectBranchStore, ProjectBranch } from "./branch-store.js";
 import type { ContextMemorySource } from "./memory-source.js";
 import type { JsonProjectRegistry, ProjectDescriptor } from "./project-registry.js";
@@ -23,48 +22,28 @@ export interface ContextRouterInput {
 export class ContextRouter {
   private readonly memory: ContextMemorySource;
   private readonly architecture: ProjectArchitectureSource;
-  private readonly bindings: ConversationProjectBindingStore;
   private readonly projects?: JsonProjectRegistry;
   private readonly branches?: JsonProjectBranchStore;
 
   constructor(
     memory: ContextMemorySource,
-    bindings: ConversationProjectBindingStore,
+    architecture: ProjectArchitectureSource = new NullProjectArchitectureSource(),
     projects?: JsonProjectRegistry,
-    branches?: JsonProjectBranchStore
-  );
-  constructor(
-    memory: ContextMemorySource,
-    architecture: ProjectArchitectureSource,
-    bindings: ConversationProjectBindingStore,
-    projects?: JsonProjectRegistry,
-    branches?: JsonProjectBranchStore
-  );
-  constructor(
-    memory: ContextMemorySource,
-    architectureOrBindings: ProjectArchitectureSource | ConversationProjectBindingStore,
-    bindingsOrProjects?: ConversationProjectBindingStore | JsonProjectRegistry,
-    projectsOrBranches?: JsonProjectRegistry | JsonProjectBranchStore,
     branches?: JsonProjectBranchStore
   ) {
     this.memory = memory;
-    if (isArchitectureSource(architectureOrBindings)) {
-      this.architecture = architectureOrBindings;
-      this.bindings = bindingsOrProjects as ConversationProjectBindingStore;
-      this.projects = projectsOrBranches as JsonProjectRegistry | undefined;
-      this.branches = branches;
-    } else {
-      this.architecture = new NullProjectArchitectureSource();
-      this.bindings = architectureOrBindings;
-      this.projects = bindingsOrProjects as JsonProjectRegistry | undefined;
-      this.branches = projectsOrBranches as JsonProjectBranchStore | undefined;
-    }
+    this.architecture = architecture;
+    this.projects = projects;
+    this.branches = branches;
   }
 
   async context(input: ContextRouterInput): Promise<ContextCapsule> {
     const accountId = requireNonEmpty(input.accountId, "accountId");
     const userId = requireNonEmpty(input.userId, "userId");
     const query = requireNonEmpty(input.query, "query");
+    // Host conversation identifiers are provenance only. Project selection must
+    // come from the current request/workspace (or an explicit semantic/alias
+    // match), not from a durable chat-window binding.
     const conversationId = normalizeOptional(input.conversationId);
     const rawAvailableProjects = uniqueProjectIds([
       ...await this.architecture.listProjects(accountId),
@@ -96,11 +75,6 @@ export class ContextRouter {
       (requestedWorkspaceProjectId && !workspaceProjectId) ||
       ((input.semanticProjectIds?.length ?? 0) > 0 && semanticProjectIds.length === 0)
     );
-    const priorBinding = conversationId && !explicitProjectId && !unresolvedCurrentTurnProject
-      ? await this.bindings.get(accountId, conversationId)
-      : null;
-    const conversationProjectId = await this.canonicalize(accountId, priorBinding?.projectId, true);
-
     const resolution = unresolvedCurrentTurnProject
       ? {
           projectId: null,
@@ -112,26 +86,13 @@ export class ContextRouter {
       : resolveRouterProjectScope({
           explicitProjectId,
           workspaceProjectId,
-          conversationProjectId,
           exactAliasProjectIds: aliases,
           semanticProjectIds
         });
 
-    const hasCurrentTurnProjectEvidence = Boolean(
-      explicitProjectId || workspaceProjectId || aliases.length === 1 || semanticProjectIds.length === 1
-    );
-    if (
-      conversationId &&
-      resolution.projectId &&
-      (hasCurrentTurnProjectEvidence || priorBinding === null || priorBinding.projectId === resolution.projectId)
-    ) {
-      await this.bindings.bind(accountId, conversationId, resolution.projectId);
-    }
-
     const branchContext = await this.resolveBranchContext({
       accountId,
       projectId: resolution.projectId,
-      conversationId,
       branchRef: normalizeOptional(input.branchId)
     });
     const retrievalQuery = branchContext
@@ -153,7 +114,6 @@ export class ContextRouter {
       query: retrievalQuery,
       projectId: resolution.projectId,
       projectStorageIds,
-      conversationId,
       limit,
       reusableSkillProjectIds
     });
@@ -176,7 +136,6 @@ export class ContextRouter {
       projectMemory: recalled.projectMemory,
       reusableSkills: recalled.reusableSkills,
       projectArchitecture,
-      recentSession: [],
       retrievalDiagnostics: recalled.diagnostics,
       branchContext: branchContext ? {
         branchId: branchContext.branch.branchId,
@@ -190,9 +149,8 @@ export class ContextRouter {
   private async resolveBranchContext(input: {
     accountId: string;
     projectId: string | null;
-    conversationId?: string;
     branchRef?: string;
-  }): Promise<{ branch: ProjectBranch; source: "explicit" | "conversation_binding" } | null> {
+  }): Promise<{ branch: ProjectBranch; source: "explicit" } | null> {
     if (!this.branches) return null;
     if (input.branchRef && !input.projectId) {
       throw new Error("branch requires one resolved project");
@@ -200,48 +158,9 @@ export class ContextRouter {
     if (input.branchRef && input.projectId) {
       const branch = await this.branches.resolve(input.accountId, input.projectId, input.branchRef);
       if (!branch) throw new Error(`unknown active branch for project ${input.projectId}: ${input.branchRef}`);
-      if (input.conversationId) {
-        await this.branches.bind(input.accountId, input.conversationId, input.projectId, branch.branchId);
-      }
       return { branch, source: "explicit" };
     }
-    if (!input.conversationId || !input.projectId) return null;
-    const branch = await this.branches.current(input.accountId, input.conversationId, input.projectId);
-    return branch ? { branch, source: "conversation_binding" } : null;
-  }
-
-  async currentProject(accountId: string, conversationId: string): Promise<string | null> {
-    const bound = (await this.bindings.get(accountId, conversationId))?.projectId;
-    if (!bound) return null;
-    if (this.projects) {
-      const discovered = await this.architecture.listProjects(accountId).catch(() => []);
-      await this.projects.reconcile(accountId, [...discovered, bound]);
-    }
-    return await this.canonicalize(accountId, bound, true) ?? null;
-  }
-
-  async bindProject(accountId: string, conversationId: string, projectId: string): Promise<void> {
-    const projects = await this.listProjects(accountId);
-    const canonical = await this.canonicalize(accountId, projectId, true);
-    if (!canonical || (projects.length > 0 && !projects.includes(canonical))) {
-      throw new Error(`unknown project for account: ${projectId}`);
-    }
-    await this.bindings.bind(accountId, conversationId, canonical);
-  }
-
-  async bindObservedProject(accountId: string, conversationId: string, projectId: string): Promise<void> {
-    const observed = requireNonEmpty(projectId, "projectId");
-    if (this.projects) await this.projects.reconcile(accountId, [observed]);
-    const canonical = await this.canonicalize(accountId, observed, true) ?? observed;
-    await this.bindings.bind(
-      requireNonEmpty(accountId, "accountId"),
-      requireNonEmpty(conversationId, "conversationId"),
-      canonical
-    );
-  }
-
-  unbindProject(accountId: string, conversationId: string): Promise<boolean> {
-    return this.bindings.unbind(accountId, conversationId);
+    return null;
   }
 
   async listProjects(accountId: string): Promise<string[]> {
@@ -288,7 +207,6 @@ export class ContextRouter {
 function resolveRouterProjectScope(input: {
   explicitProjectId?: string;
   workspaceProjectId?: string;
-  conversationProjectId?: string;
   exactAliasProjectIds: string[];
   semanticProjectIds?: string[];
 }): ProjectScopeResolution {
@@ -324,9 +242,7 @@ function resolveRouterProjectScope(input: {
     }
     return resolveProjectScope({ semanticProjectIds: [projectId] });
   }
-  return resolveProjectScope({
-    conversationProjectId: input.conversationProjectId
-  });
+  return resolveProjectScope({});
 }
 
 function exactProjectMentions(query: string, projects: readonly ProjectDescriptor[]): string[] {
@@ -360,13 +276,6 @@ function requireNonEmpty(value: string, field: string): string {
   const normalized = value.trim();
   if (!normalized) throw new TypeError(`${field} must be non-empty`);
   return normalized;
-}
-
-function isArchitectureSource(
-  value: ProjectArchitectureSource | ConversationProjectBindingStore
-): value is ProjectArchitectureSource {
-  return typeof (value as ProjectArchitectureSource).listProjects === "function" &&
-    typeof (value as ProjectArchitectureSource).getProjectArchitecture === "function";
 }
 
 function uniqueProjectIds(values: readonly (string | undefined)[]): string[] {

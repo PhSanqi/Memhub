@@ -35,10 +35,18 @@ const commonPaths = [
   "src",
   "scripts",
   "web-assets",
-  "deploy",
-  "adapters",
+  "deploy/cloudflared-memhub.service.d.conf.example",
+  "deploy/cloudflared-memhub.yml.example",
+  "deploy/install-tunnel-watchdog.sh",
+  "deploy/install-user-service.sh",
+  "deploy/memhub-core.service.in",
+  "deploy/memhub-stack.target.in",
+  "deploy/memhub-tunnel-watchdog.service.in",
+  "deploy/memhub-tunnel-watchdog.timer",
+  "deploy/memhub.service.in",
   "vendor",
-  "editions/README.md"
+  "editions/README.md",
+  "editions/common"
 ];
 
 const packageJson = CHECK_ONLY || WORKTREE
@@ -46,13 +54,6 @@ const packageJson = CHECK_ONLY || WORKTREE
   : JSON.parse(gitText("show", `${REF}:package.json`));
 const version = String(packageJson.version ?? "").trim();
 if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`invalid package version: ${version || "<empty>"}`);
-
-const pluginJson = CHECK_ONLY || WORKTREE
-  ? JSON.parse(await readFile(resolve(ROOT, "adapters/plugin/plugin.json"), "utf8"))
-  : JSON.parse(gitText("show", `${REF}:adapters/plugin/plugin.json`));
-if (pluginJson.version !== version) {
-  throw new Error(`version mismatch: package=${version}, plugin=${pluginJson.version}`);
-}
 
 for (const variant of variants) {
   const installer = `editions/${variant.edition}/${variant.os}/install.${variant.os === "windows" ? "ps1" : "sh"}`;
@@ -68,8 +69,6 @@ for (const path of [
   "scripts/windows-task-ownership.ps1",
   "scripts/windows-stack-owner.ps1",
   "scripts/windows-memory-credentials.ps1",
-  "scripts/windows-legacy-migration-audit.ps1",
-  "scripts/windows-legacy-migration-plan.ps1"
 ]) assertTracked(path);
 
 if (CHECK_ONLY) {

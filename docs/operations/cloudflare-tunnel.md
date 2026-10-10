@@ -2,14 +2,11 @@
 
 Memhub should stay bound to loopback and let `cloudflared` own the public edge connection. Do not expose port 3001 directly.
 
-## Your authenticated hostname
+## Canonical production route
 
-Use a hostname you control, for example `https://memory.example.com/`.
-Health, MCP, capture, the browser UI, and the dedicated Tunnel watchdog
-must resolve from your chosen authenticated hostname.
+A Server deployment publishes its loopback MCP runtime through an authenticated hostname such as `https://memory.example.com/`. Health, MCP, browser UI, and the dedicated Tunnel watchdog should resolve through that configured hostname.
 
-The `memory.example.com` values throughout this document are placeholders,
-not an available hosted account. Replace them with your own domain.
+The `memory.example.com` values used later in this document are intentionally generic placeholders for self-hosted installations; they do not replace the canonical route above for the project deployment.
 
 ## Recommended connector transport
 
@@ -131,8 +128,7 @@ export MEMHUB_TUNNEL_WATCHDOG_SERVICE=cloudflared.service
 systemctl --user enable --now memhub-tunnel-watchdog.timer
 ```
 
-Set `MEMHUB_TUNNEL_WATCHDOG_PUBLIC_URL=https://memory.example.com/`
-to the actual authenticated hostname of your deployment.
+The production watchdog should set `MEMHUB_TUNNEL_WATCHDOG_PUBLIC_URL=https://memory.example.com/` (replace with the deployment hostname).
 
 The default policy is three consecutive observations before recovery and a ten-minute restart cooldown. Unknown/malformed connector metrics never trigger a restart. The watchdog restarts only the configured Tunnel service; it does not change the machine-wide proxy, firewall, DNS, or unrelated Cloudflare connectors.
 

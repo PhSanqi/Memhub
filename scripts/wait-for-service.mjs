@@ -8,8 +8,8 @@ const arg = (name, fallback) => {
 const url = arg("--url");
 const kind = arg("--kind");
 const timeout = Number(arg("--timeout-ms", "20000"));
-if (!url || !["core", "gateway", "bridge"].includes(kind)) {
-  throw new Error("usage: wait-for-service.mjs --url http://127.0.0.1:PORT/health --kind core|gateway|bridge [--timeout-ms 20000]");
+if (!url || !["core", "gateway"].includes(kind)) {
+  throw new Error("usage: wait-for-service.mjs --url http://127.0.0.1:PORT/health --kind core|gateway [--timeout-ms 20000]");
 }
 try {
   await waitForService({ url, kind, timeoutMs: timeout });

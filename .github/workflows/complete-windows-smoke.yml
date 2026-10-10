@@ -133,18 +133,14 @@ jobs:
           $localState = Join-Path $env:RUNNER_TEMP 'memhub-complete-local-state'
           try {
             & (Join-Path $root.FullName 'install-complete.ps1') -Edition local -StateRoot $localState
-            $localEnv = Get-Content -Raw (Join-Path $localState 'local.env')
+            $localEnv = Get-Content -Raw (Join-Path $localState 'memhub.env')
             if ($localEnv -notmatch '(?m)^MEMHUB_MEMORY_TOKEN=[0-9a-f]{64}\r?$') { throw 'Local memory token is invalid' }
             Wait-Port 18960
             Wait-Port 3001
-            Wait-Port 17861
-            $status = Invoke-RestMethod -Uri 'http://127.0.0.1:17861/status' -TimeoutSec 10
-            if (-not $status) { throw 'Bridge status endpoint returned no data' }
             Write-Host '[memhub] Windows Complete Local install smoke PASS'
           } finally {
-            Remove-TestTasks @('Memhub-Local-Stack','Memhub-Bridge','Memhub-Local','Memhub-Memory')
+            Remove-TestTasks @('Memhub-Stack')
             Stop-TestMemhubProcesses $root.FullName
-            Wait-PortClosed 17861
             Wait-PortClosed 3001
             Wait-PortClosed 18960
             Remove-PathWithRetry $localState
@@ -153,13 +149,13 @@ jobs:
           $serverState = Join-Path $env:RUNNER_TEMP 'memhub-complete-server-state'
           try {
             & (Join-Path $root.FullName 'install-complete.ps1') -Edition server -StateRoot $serverState -Username owner
-            $serverEnv = Get-Content -Raw (Join-Path $serverState 'server.env')
+            $serverEnv = Get-Content -Raw (Join-Path $serverState 'memhub.env')
             if ($serverEnv -notmatch '(?m)^MEMHUB_MEMORY_TOKEN=[0-9a-f]{64}\r?$') { throw 'Server memory token is invalid' }
             Wait-Port 18960
             Wait-Port 3001
             Write-Host '[memhub] Windows Complete Server install smoke PASS'
           } finally {
-            Remove-TestTasks @('Memhub-Server-Stack','Memhub-Server','Memhub-Server-Memory')
+            Remove-TestTasks @('Memhub-Stack')
             Stop-TestMemhubProcesses $root.FullName
             Wait-PortClosed 3001
             Wait-PortClosed 18960

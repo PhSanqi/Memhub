@@ -2392,7 +2392,7 @@ export function skillMetaFromMemory(memory) {
     return {
         id: memory.id,
         memory,
-        name: stringField(skill, "name") ?? memory.memoryKey ?? firstLine(memory.memoryValue),
+        name: stringField(memory.info, "title") ?? stringField(skill, "name") ?? memory.memoryKey ?? firstLine(memory.memoryValue),
         eta: numberField(skill, "eta") ?? 0,
         status: statusField(skill, "status", ["candidate", "active", "archived"]) ?? "candidate",
         support: numberField(skill, "support") ?? 0,
@@ -3284,7 +3284,7 @@ function candidateFromMemory(memory, queryVec, query, now, options) {
         memory,
         tier,
         kind,
-        title: memory.memoryKey ?? firstLine(memory.memoryValue),
+        title: skill?.name ?? memory.memoryKey ?? firstLine(memory.memoryValue),
         snippet: snippetForCandidateMemory(memory, text),
         channels,
         vector: vector ?? (queryVec.length > 0 && channels.length > 0 ? queryVec : null),

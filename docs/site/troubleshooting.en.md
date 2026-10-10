@@ -6,11 +6,11 @@ Diagnose from the most deterministic layer outward: process/port → HTTP ingres
 
 ## Service or port missing
 
-On Linux inspect the units appropriate to the Edition and then the listening ports. If Memory Core is down, fix it before Gateway/Bridge. Use journal output to find path, permission, Node, state-root, or port conflicts.
+On Linux inspect the units appropriate to the Edition and then the listening ports. If Memory Core is down, fix it before the MCP runtime. Use journal output to find path, permission, Node, state-root, or port conflicts.
 
 ## Local MCP cannot connect
 
-Local plugins normally use `http://127.0.0.1:17861/mcp`. If 17861 is down but 3001 is healthy, investigate Bridge. If 3001 is down, move upstream to Gateway/Core. Do not “fix” this by exposing Memory Core directly.
+Local MCP clients use `http://127.0.0.1:3001/mcp` directly. If 3001 is down, move upstream to the MCP runtime/Core. Do not “fix” this by exposing Memory Core directly.
 
 ## Public Server returns 401
 
@@ -18,7 +18,7 @@ Determine whether the 401 is expected. Anonymous User/Admin should be rejected o
 
 ## 404 or wrong path
 
-Internal deployments may use `/memhub/*` while a root-base deployment rewrites to `/`, `/user`, `/admin`, `/docs`. Server origin MCP is `/memhub/mcp`. Do not assume browser and MCP routes are interchangeable.
+The MCP transport endpoint is `/mcp`; browser Control Plane pages remain under `/memhub` (or a configured base-path rewrite). Do not assume browser and MCP routes are interchangeable.
 
 ## Wrong account
 
@@ -26,7 +26,7 @@ Check authenticated identity and stable account mapping. Do not use a front-end 
 
 ## Wrong project
 
-Check Project Scope, current workspace/project evidence, registry slug/aliases/description, and stale conversation binding. Explicit current evidence must beat the old binding. Fix routing before repairing contaminated content.
+Check Project Scope, current workspace/project evidence, and registry slug/aliases/description. Host conversation identity does not select the business project. Fix current-turn routing evidence before repairing contaminated content.
 
 ## All Projects shows one project
 
@@ -34,7 +34,7 @@ Confirm project selector is truly empty and the API request has no project filte
 
 ## L1 is missing
 
-Inspect harness capture, Bridge/capture endpoint, Device Token, and ingestion. Per-turn capture is the authoritative source; the index is rebuildable metadata.
+For the MCP path, confirm the model executed `memmy_turn open` and `memmy_turn commit` with the intended project/workspace evidence. Per-turn L1 evidence is authoritative; the index is rebuildable metadata.
 
 ## L1 exists but L2/L3 does not update
 

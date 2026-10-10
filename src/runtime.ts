@@ -1,11 +1,10 @@
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import {
   FileProjectArchitectureSource,
   NullProjectArchitectureSource,
   type ProjectArchitectureSource
 } from "./architecture-source.js";
-import { JsonConversationProjectBindingStore } from "./binding-store.js";
 import { JsonProjectBranchStore } from "./branch-store.js";
 import { ContextRouter } from "./context-router.js";
 import { LocalMemoryRestClient } from "./local-memory-client.js";
@@ -16,7 +15,7 @@ export interface MemhubRuntimeOptions {
   accountId?: string;
   memoryEndpoint?: string;
   memoryToken?: string;
-  bindingsPath?: string;
+  controlRoot?: string;
   branchesPath?: string;
   architectureRoot?: string;
   disableArchitecture?: boolean;
@@ -46,17 +45,29 @@ export interface MemhubRuntime {
   source: MemhubSourceContext;
 }
 
+export function resolveLocalAccountId(options: Pick<MemhubRuntimeOptions, "accountId" | "ownerAccountId"> = {}): string {
+  return requireNonEmpty(
+    options.accountId?.trim() ||
+    process.env.MEMHUB_ACCOUNT_ID?.trim() ||
+    options.ownerAccountId?.trim() ||
+    process.env.MEMHUB_OWNER_ACCOUNT_ID?.trim() ||
+    "local",
+    "accountId"
+  );
+}
+
 export function createMemhubRuntime(options: MemhubRuntimeOptions = {}): MemhubRuntime {
-  const accountId = requireNonEmpty(options.accountId ?? process.env.MEMHUB_ACCOUNT_ID ?? "local", "accountId");
+  const accountId = resolveLocalAccountId(options);
   const memoryEndpoint = options.memoryEndpoint ?? process.env.MEMHUB_MEMORY_URL ?? "http://127.0.0.1:18960";
   const memoryToken = options.memoryToken ?? process.env.MEMHUB_MEMORY_TOKEN;
   const ownerAccountId = options.ownerAccountId ?? process.env.MEMHUB_OWNER_ACCOUNT_ID;
   const ownerUserId = options.ownerUserId ?? process.env.MEMHUB_OWNER_USER_ID ?? "local-user";
   const userId = defaultMemoryUserId(accountId, ownerAccountId, ownerUserId);
-  const bindingsPath = resolve(
-    options.bindingsPath ??
-    process.env.MEMHUB_BINDINGS ??
-    join(homedir(), ".memmy", "memhub", "conversation-project-bindings.json")
+  const controlRoot = resolve(
+    options.controlRoot ??
+    process.env.MEMHUB_CONTROL_ROOT ??
+    process.env.MEMHUB_STATE_ROOT ??
+    join(homedir(), ".memmy", "memhub")
   );
 
   const memoryClient = new LocalMemoryRestClient({ endpoint: memoryEndpoint, token: memoryToken });
@@ -74,20 +85,19 @@ export function createMemhubRuntime(options: MemhubRuntimeOptions = {}): MemhubR
     ? new NullProjectArchitectureSource()
     : new FileProjectArchitectureSource({
       rootDir: architectureRoot,
-      managedRootDir: join(dirname(bindingsPath), "project-architecture")
+      managedRootDir: join(controlRoot, "project-architecture")
     });
-  const bindings = new JsonConversationProjectBindingStore(bindingsPath);
   const branches = new JsonProjectBranchStore(resolve(
     options.branchesPath ??
     process.env.MEMHUB_BRANCHES ??
-    join(dirname(bindingsPath), "project-branches.json")
+    join(controlRoot, "project-branches.json")
   ));
   const projects = new JsonProjectRegistry(resolve(
     options.projectRegistryPath ??
     process.env.MEMHUB_PROJECT_REGISTRY ??
-    join(dirname(bindingsPath), "project-registry.json")
+    join(controlRoot, "project-registry.json")
   ));
-  const router = new ContextRouter(memory, architecture, bindings, projects, branches);
+  const router = new ContextRouter(memory, architecture, projects, branches);
   const source = options.source ?? { platform: "local", transport: "local" };
   return { accountId, userId, memoryClient, router, memory, architecture, projects, branches, source };
 }

@@ -4,7 +4,7 @@ A bounded, read-first audit of Memhub's durable memory, project routing, evidenc
 
 ## When to use
 
-Use when Memhub appears to have missing or misrouted memories, projects, Skill candidates, conversation bindings, architecture, or distillation output; or when a read-only assessment of long-term content integrity is requested.
+Use when Memhub appears to have missing or misrouted memories, projects, Skill candidates, architecture, or distillation output; or when a read-only assessment of long-term content integrity is requested.
 
 ## Boundaries
 
@@ -12,7 +12,7 @@ Read first. Never delete, rewrite, re-scope, merge, restart, or retry a migratio
 
 ## Procedure
 
-1. Resolve the authenticated account and the canonical project via Project Registry. Prefer current explicit project/workspace evidence to stale conversation binding; ambiguous project resolution stays global-only. Do not silently create another project or infer account identity from an unverified email or client-supplied ID.
+1. Resolve the authenticated account and the canonical project via Project Registry. Use current explicit project/workspace evidence; ambiguous project resolution stays global-only. Do not silently create another project or infer account identity from an unverified email or client-supplied ID.
 2. Read the project's current architecture document (for Memhub itself: `docs/architecture/overview.md`) or the read-only Architecture Reader output together with the Project Registry description, aliases, and active status. The Normify runtime is retired. Legacy `normify-*` trees are optional compatibility sources **only**; their absence is not a failed health check and they must not override current project docs or Registry.
 3. Inventory L1 source turns, capture status, provenance, and rebuildable capture index/dirty ledger. An `open`, `partial`, or `failed` turn is not complete distillation evidence. Distinguish missing evidence from a missing index and verify account/project/continuity filters before suggesting a repair.
 4. Inspect the evidence-bounded distillation queue: pending, leased, completed, failed, and skipped jobs. Do not retry legacy failed jobs without rebuilding valid project-scoped evidence. Compare L2 chronological Current Truth, L3 project rules, and account L4 cross-project profile against actual completed evidence, preserving superseded history and canonical artifact identity.

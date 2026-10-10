@@ -80,7 +80,7 @@ try {
   const alphaV1 = await completeL3("alpha", "1", "Alpha current project rules v1.");
   const betaV1 = await completeL3("beta", "2", "Beta current project rules v1.");
   let audit = await auditDistillationPipeline({
-    stateRoot: root, accountId, bridgeRoot: null,
+    stateRoot: root, accountId,
     resolveProject: async (hint) => hint
   });
   assert.equal(audit.recovery.current_l3_set_missing_l4, 1);
@@ -109,7 +109,7 @@ try {
   assert.equal((await reconcileCurrentL4DerivedJob({ ...recoveryInput, dryRun: false })).already_queued, true);
 
   audit = await auditDistillationPipeline({
-    stateRoot: root, accountId, bridgeRoot: null,
+    stateRoot: root, accountId,
     resolveProject: async (hint) => hint
   });
   assert.equal(audit.recovery.current_l3_set_missing_l4, 0);
@@ -141,7 +141,7 @@ try {
     currentL4.evidence[0].content = "forged L3 body with a reused reference";
     await writeFile(jobsPath, JSON.stringify(corrupt));
     const conflict = await auditDistillationPipeline({
-      stateRoot: root, accountId, bridgeRoot: null,
+      stateRoot: root, accountId,
       resolveProject: async (hint) => hint
     });
     assert.equal(conflict.recovery.current_l3_set_missing_l4, 0);
@@ -166,7 +166,7 @@ try {
     });
     await writeFile(jobsPath, JSON.stringify(contaminated));
     const conflict = await auditDistillationPipeline({
-      stateRoot: root, accountId, bridgeRoot: null,
+      stateRoot: root, accountId,
       resolveProject: async (hint) => hint
     });
     assert.equal(conflict.recovery.current_l3_set_conflicting_l4, 1);

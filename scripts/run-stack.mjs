@@ -16,8 +16,6 @@ const value = (flag, fallback) => {
   if (!process.argv[i + 1] || process.argv[i + 1].startsWith("--")) throw new Error(`${flag} requires a value`);
   return process.argv[i + 1];
 };
-const mode = value("--mode", "local");
-if (mode !== "local" && mode !== "server") throw new Error("--mode must be local or server");
 const port = (flag, fallback) => {
   const parsed = Number(value(flag, String(fallback)));
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) throw new Error(`${flag} must be a TCP port`);
@@ -25,17 +23,15 @@ const port = (flag, fallback) => {
 };
 const corePort = port("--core-port", 18960);
 const gatewayPort = port("--gateway-port", 3001);
-const bridgePort = port("--bridge-port", 17861);
-if (new Set([corePort, gatewayPort, bridgePort]).size !== 3) throw new Error("Memhub stack ports must be distinct");
+if (corePort === gatewayPort) throw new Error("Memhub stack ports must be distinct");
 const home = resolve(value("--home", process.env.MEMHUB_HOME ?? join(process.env.USERPROFILE ?? process.env.HOME ?? repoRoot, ".memhub")));
 const action = value("--action", "serve");
-const lockPath = join(home, `.${mode}-stack.lock`);
+const lockPath = join(home, ".memhub-stack.lock");
 const stopRequestPath = `${lockPath}.stop`;
 
 if (action === "preflight") {
   if (existsSync(lockPath)) throw new Error("Memhub stack lock remains; refusing to replace an unverified owner");
-  for (const [name, port] of [["core", corePort], ["gateway", gatewayPort], ["bridge", bridgePort]]) {
-    if (mode === "server" && name === "bridge") continue;
+  for (const [name, port] of [["core", corePort], ["gateway", gatewayPort]]) {
     await new Promise((resolveProbe, rejectProbe) => {
       const probe = createServer();
       probe.once("error", (error) => {
@@ -44,7 +40,7 @@ if (action === "preflight") {
       probe.listen({ host: "127.0.0.1", port, exclusive: true }, () => probe.close(resolveProbe));
     });
   }
-  console.log(JSON.stringify({ mode, ready_to_install: true }));
+  console.log(JSON.stringify({ ready_to_install: true }));
   process.exit(0);
 }
 
@@ -53,11 +49,11 @@ if (action === "status") {
     const lock = JSON.parse(await readFile(lockPath, "utf8"));
     const verified = await verifyOwnerIdentity(lock);
     console.log(JSON.stringify({
-      mode, running: verified, pid: lock.pid, started_at: lock.started_at,
+      running: verified, pid: lock.pid, started_at: lock.started_at,
       owner_verified: verified
     }, null, 2));
   } catch {
-    console.log(JSON.stringify({ mode, running: false }, null, 2));
+    console.log(JSON.stringify({ running: false }, null, 2));
   }
   process.exit(0);
 }
@@ -66,7 +62,7 @@ if (action === "stop") {
   try { owner = JSON.parse(await readFile(lockPath, "utf8")); }
   catch (error) {
     if (error?.code !== "ENOENT") throw error;
-    console.log(JSON.stringify({ mode, stopped: true, running: false }));
+    console.log(JSON.stringify({ stopped: true, running: false }));
     process.exit(0);
   }
   if (!(await verifyOwnerIdentity(owner))) {
@@ -86,19 +82,18 @@ if (action === "stop") {
   }
   const current = await readFile(lockPath, "utf8").catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
   if (current && JSON.parse(current).token === owner.token) throw new Error("stack graceful stop timed out");
-  console.log(JSON.stringify({ mode, stopped: true, running: false }));
+  console.log(JSON.stringify({ stopped: true, running: false }));
   process.exit(0);
 }
 if (action !== "serve") throw new Error("--action must be serve, status, stop or preflight");
 
-const envPath = join(home, mode === "local" ? "local.env" : "server.env");
+const envPath = join(home, "memhub.env");
 const configPath = join(home, "memory-config.yaml");
 const dbPath = join(home, "memory", "memory.sqlite");
 const stateRoot = join(home, "server");
 const coreEntry = join(repoRoot, "vendor", "memory-core", "src", "server", "index.js");
 const gatewayEntry = join(repoRoot, "dist", "mcp.js");
-const bridgeEntry = join(repoRoot, "dist", "bridge.js");
-const required = [envPath, configPath, coreEntry, gatewayEntry, ...(mode === "local" ? [bridgeEntry, join(home, "bridge.json")] : [])];
+const required = [envPath, configPath, coreEntry, gatewayEntry];
 for (const path of required) {
   if (!existsSync(path)) throw new Error(`Memhub stack preflight: missing ${path}`);
 }
@@ -121,15 +116,10 @@ const services = [
   },
   {
     name: "gateway", kind: "gateway", entrypoint: gatewayEntry, cwd: repoRoot,
-    args: ["--http", String(gatewayPort), "--http-path", "/memhub/mcp", "--capture-path", "/memhub/capture", "--state-root", stateRoot,
+    args: ["--http", String(gatewayPort), "--http-path", "/mcp", "--state-root", stateRoot,
       "--memory-url", `http://127.0.0.1:${corePort}`, ...(env.MEMHUB_PUBLIC_HOST ? ["--public-host", env.MEMHUB_PUBLIC_HOST] : [])],
     healthUrl: gatewayUrl, env: { ...env, MEMHUB_MEMORY_URL: `http://127.0.0.1:${corePort}` }
-  },
-  ...(mode === "local" ? [{
-    name: "bridge", kind: "bridge", entrypoint: bridgeEntry, cwd: repoRoot,
-    args: ["serve", "--port", String(bridgePort)], healthUrl: `http://127.0.0.1:${bridgePort}/health`,
-    env: { MEMHUB_BRIDGE_HOME: home }
-  }] : [])
+  }
 ];
 
 await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
@@ -140,8 +130,7 @@ await acquireLock(lockPath, {
   started_at: new Date().toISOString(),
   entrypoint: stackEntrypoint,
   exec_path: resolve(process.execPath),
-  home,
-  mode
+  home
 });
 let stack;
 let closing = false;
@@ -152,7 +141,7 @@ let stopRequestChecking = false;
 let finish;
 const finished = new Promise((resolveFinish) => { finish = resolveFinish; });
 const emit = (event) => {
-  console.error(JSON.stringify({ component: "memhub-stack", mode, ...event, timestamp: new Date().toISOString() }));
+  console.error(JSON.stringify({ component: "memhub-stack", ...event, timestamp: new Date().toISOString() }));
   if (event.type === "fatal") void shutdown(1);
 };
 async function shutdown(code = 0) {
@@ -182,13 +171,13 @@ stopWatcher = setInterval(() => { void checkStopRequest(); }, 250);
 try {
   stack = new ManagedProcessStack({ services, onEvent: emit });
   await stack.startWithRetry({ attempts: 5, signal: lifecycleAbort.signal });
-  console.error(JSON.stringify({ component: "memhub-stack", mode, type: "stack_ready", pids: stack.status.pids }));
+    console.error(JSON.stringify({ component: "memhub-stack", type: "stack_ready", pids: stack.status.pids }));
   await finished;
 } catch (error) {
   if (closing && lifecycleAbort.signal.aborted) {
     await finished;
   } else {
-    console.error(JSON.stringify({ component: "memhub-stack", mode, type: "startup_failed", error: error instanceof Error ? error.message : String(error) }));
+    console.error(JSON.stringify({ component: "memhub-stack", type: "startup_failed", error: error instanceof Error ? error.message : String(error) }));
     exitCode = 1;
     if (stopWatcher) clearInterval(stopWatcher);
     await stack?.stop();
@@ -254,7 +243,7 @@ async function verifyOwnerIdentity(owner) {
       !(claimedEntrypoint === stackEntrypoint || priorWindowsEntrypoint) ||
       typeof owner.exec_path !== "string" ||
       typeof owner.home !== "string" || resolve(owner.home) !== home ||
-      owner.mode !== mode || !isAlive(owner.pid)) {
+      !isAlive(owner.pid)) {
     return false;
   }
   if (process.platform !== "win32") return true;
@@ -262,7 +251,7 @@ async function verifyOwnerIdentity(owner) {
   if (!identity || !identity.ownerMatches) return false;
   const normalize = (value) => String(value ?? "").replaceAll("\\", "/").toLowerCase();
   if (normalize(resolve(identity.executablePath)) !== normalize(resolve(owner.exec_path)) ||
-      !exactWindowsStackInvocation(identity.commandLine, owner.exec_path, claimedEntrypoint, home, mode)) {
+      !exactWindowsStackInvocation(identity.commandLine, owner.exec_path, claimedEntrypoint, home)) {
     return false;
   }
   const processStarted = Date.parse(identity.startedAt);
@@ -271,7 +260,7 @@ async function verifyOwnerIdentity(owner) {
   return Number.isFinite(lag) && lag >= -2 && lag <= 30;
 }
 
-function exactWindowsStackInvocation(commandLine, nodePath, scriptPath, stateHome, edition) {
+function exactWindowsStackInvocation(commandLine, nodePath, scriptPath, stateHome) {
   // Require exact argv, including release entrypoint and state root, not
   // arbitrary substrings in a different Node process's command line.
   const normalize = (value) => String(value ?? "").replaceAll("\\", "/").toLowerCase();
@@ -280,13 +269,12 @@ function exactWindowsStackInvocation(commandLine, nodePath, scriptPath, stateHom
   const pattern = new RegExp(
     '^\\s*"?' + escape(normalize(nodePath)) +
     '"?\\s+"?' + escape(normalize(scriptPath)) +
-    '"?\\s+--mode\\s+' + edition +
-    '\\s+--home\\s+"?' + escape(normalize(stateHome)) +
-    '"?(?<extra>(?:\\s+--(?:core|gateway|bridge)-port\\s+[0-9]{1,5}){0,3})\\s*$'
+    '"?\\s+--home\\s+"?' + escape(normalize(stateHome)) +
+    '"?(?<extra>(?:\\s+--(?:core|gateway)-port\\s+[0-9]{1,5}){0,2})\\s*$'
   );
   const match = command.match(pattern);
   if (!match) return false;
-  const ports = [...(match.groups?.extra ?? "").matchAll(/--(core|gateway|bridge)-port\s+(\d{1,5})/g)];
+  const ports = [...(match.groups?.extra ?? "").matchAll(/--(core|gateway)-port\s+(\d{1,5})/g)];
   return new Set(ports.map((port) => port[1])).size === ports.length &&
     ports.every((port) => Number(port[2]) >= 1 && Number(port[2]) <= 65535);
 }

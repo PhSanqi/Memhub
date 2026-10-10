@@ -5,7 +5,6 @@ function Assert-MemhubStackProcessOwner {
     [Parameter(Mandatory)][string]$LockPath,
     [Parameter(Mandatory)][string]$NodePath,
     [Parameter(Mandatory)][string]$StackEntry,
-    [Parameter(Mandatory)][ValidateSet('local', 'server')][string]$Mode,
     [Parameter(Mandatory)][string]$StateRoot
   )
   $lockInfo = Get-Item -LiteralPath $LockPath -ErrorAction Stop
@@ -40,7 +39,7 @@ function Assert-MemhubStackProcessOwner {
   $stateHome = [IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
   $node = $selectedNode
   $script = $selectedScript
-  $identityFields = @('entrypoint', 'exec_path', 'home', 'mode')
+  $identityFields = @('entrypoint', 'exec_path', 'home')
   $presentFields = @($identityFields | Where-Object {
     $owner.PSObject.Properties.Name -contains $_ -and
     -not [string]::IsNullOrWhiteSpace([string]$owner.$_)
@@ -54,9 +53,8 @@ function Assert-MemhubStackProcessOwner {
       $declaredScript = [IO.Path]::GetFullPath([string]$owner.entrypoint)
       $declaredHome = [IO.Path]::GetFullPath([string]$owner.home).TrimEnd('\')
     } catch { throw 'Stack owner lock identity contains invalid paths; refusing stop' }
-    if (-not [string]::Equals($declaredHome, $stateHome, [StringComparison]::OrdinalIgnoreCase) -or
-        -not [string]::Equals([string]$owner.mode, $Mode, [StringComparison]::Ordinal)) {
-      throw 'Stack owner lock belongs to another StateRoot or edition; refusing stop'
+    if (-not [string]::Equals($declaredHome, $stateHome, [StringComparison]::OrdinalIgnoreCase)) {
+      throw 'Stack owner lock belongs to another StateRoot; refusing stop'
     }
     if (-not [string]::Equals($declaredScript, $selectedScript,
         [StringComparison]::OrdinalIgnoreCase)) {
@@ -82,8 +80,7 @@ function Assert-MemhubStackProcessOwner {
   # Windows quotes space-containing paths, but may elide quotes otherwise.
   # Require full argv, not a substring occurrence in another Node instance.
   $pattern = '^\s*"?' + [regex]::Escape($node) + '"?\s+"?' +
-    [regex]::Escape($script) + '"?\s+--mode\s+' + $Mode +
-    '\s+--home\s+"?' + [regex]::Escape($stateHome) + '"?\s*$'
+    [regex]::Escape($script) + '"?\s+--home\s+"?' + [regex]::Escape($stateHome) + '"?\s*$'
   if (-not $process.CommandLine -or
       -not [regex]::IsMatch([string]$process.CommandLine, $pattern,
         [Text.RegularExpressions.RegexOptions]::IgnoreCase)) {

@@ -11,14 +11,13 @@ import {
   resolveCloudflareAccount,
   setAccountRole
 } from "../dist/auth.js";
-import { JsonConversationProjectBindingStore } from "../dist/binding-store.js";
 import { JsonProjectBranchStore } from "../dist/branch-store.js";
 import { buildContextCapsule } from "../dist/context-capsule.js";
 import { ContextRouter } from "../dist/context-router.js";
 import { assertLoopbackMemoryEndpoint, LocalMemoryRestClient, MemoryCoreHttpError } from "../dist/local-memory-client.js";
 import { MemoryRestContextSource } from "../dist/memory-source.js";
 import { resolveProjectScope } from "../dist/project-scope.js";
-import { countCaptureEvents, createDevice, listCaptureEvents, normalizeCaptureEvent } from "../dist/capture.js";
+import { countCaptureEvents, listCaptureEvents, normalizeCaptureEvent } from "../dist/capture.js";
 import { completeDistillationJob, enqueueDerivedDistillationJob, failDistillationJob, leaseDistillationJob, listDistillationJobs, renewDistillationJobLease } from "../dist/distillation-jobs.js";
 import { EmbeddedMemoryCore } from "../dist/embedded-memory-core.js";
 import { JsonProjectRegistry, projectSimilarity } from "../dist/project-registry.js";
@@ -74,8 +73,8 @@ try {
     !error.message.includes(coreToken));
   assert.equal(observedCoreAuthorization, `Bearer ${coreToken}`);
   assert.equal(resolveProjectScope({}).recallScope, "global_only");
-  assert.equal(resolveProjectScope({ conversationProjectId: "atlas" }).projectId, "atlas");
-  const conflict = resolveProjectScope({ conversationProjectId: "atlas", workspaceProjectId: "memmy" });
+  assert.equal(resolveProjectScope({ workspaceProjectId: "alpha" }).projectId, "alpha");
+  const conflict = resolveProjectScope({ namespaceProjectId: "alpha", workspaceProjectId: "memmy" });
   assert.equal(conflict.projectId, null);
   assert.equal(conflict.recallScope, "global_only");
 
@@ -83,7 +82,7 @@ try {
     accountId: "acct",
     resolution: conflict,
     globalMemory: [{ id: "g", content: "global", authority: "remembered", scope: "global", source: "test" }],
-    projectMemory: [{ id: "a", content: "atlas", authority: "remembered", scope: "project", source: "test", projectId: "atlas" }],
+    projectMemory: [{ id: "a", content: "alpha", authority: "remembered", scope: "project", source: "test", projectId: "alpha" }],
     reusableSkills: [{ id: "s", content: "reusable", authority: "remembered", scope: "capability", source: "test", projectId: "memmy" }]
   });
   assert.equal(capsule.globalMemory.length, 1);
@@ -127,13 +126,13 @@ try {
 
   const largeCapsule = buildContextCapsule({
     accountId: "acct",
-    resolution: resolveProjectScope({ workspaceProjectId: "atlas" }),
+    resolution: resolveProjectScope({ workspaceProjectId: "alpha" }),
     maxContentBytes: 24_000,
     maxItemContentBytes: 8_000,
     globalMemory: [{ id: "large-global", content: "全".repeat(20_000), authority: "remembered", scope: "global", source: "test" }],
-    projectMemory: [{ id: "large-project", content: "项".repeat(20_000), authority: "remembered", scope: "project", source: "test", projectId: "atlas" }],
-    reusableSkills: [{ id: "large-skill", content: "技".repeat(20_000), authority: "remembered", scope: "capability", source: "test", projectId: "atlas" }],
-    projectArchitecture: [{ id: "large-arch", content: "架".repeat(20_000), authority: "authoritative", scope: "project", source: "test", projectId: "atlas" }]
+    projectMemory: [{ id: "large-project", content: "项".repeat(20_000), authority: "remembered", scope: "project", source: "test", projectId: "alpha" }],
+    reusableSkills: [{ id: "large-skill", content: "技".repeat(20_000), authority: "remembered", scope: "capability", source: "test", projectId: "alpha" }],
+    projectArchitecture: [{ id: "large-arch", content: "架".repeat(20_000), authority: "authoritative", scope: "project", source: "test", projectId: "alpha" }]
   });
   assert.ok(largeCapsule.globalMemory.length >= 1);
   assert.ok(largeCapsule.projectMemory.length >= 1);
@@ -165,7 +164,7 @@ try {
               title: "Bootstrap current truth",
               snippet: "Project history remains available before the first L2 artifact exists.",
               score: 0.9,
-              tags: ["project:atlas"],
+              tags: ["project:alpha"],
               source: "search"
             }]
           }
@@ -178,8 +177,8 @@ try {
     accountId: "acct",
     userId: "user",
     query: "current truth",
-    projectId: "atlas",
-    projectStorageIds: ["atlas"],
+    projectId: "alpha",
+    projectStorageIds: ["alpha"],
     limit: 8,
     reusableSkillProjectIds: []
   });
@@ -201,7 +200,7 @@ try {
               status: "activated",
               snippet: "Canonical project timeline.",
               score: 0.95,
-              tags: ["project:atlas"],
+              tags: ["project:alpha"],
               source: "search"
             }]
           }
@@ -215,8 +214,8 @@ try {
     accountId: "acct",
     userId: "user",
     query: "current truth",
-    projectId: "atlas",
-    projectStorageIds: ["atlas"],
+    projectId: "alpha",
+    projectStorageIds: ["alpha"],
     limit: 8,
     reusableSkillProjectIds: []
   });
@@ -234,17 +233,17 @@ try {
     accountId: "acct",
     userId: "user",
     kind: "l2",
-    projectId: "atlas",
-    title: "Project Timeline · atlas",
+    projectId: "alpha",
+    title: "Project Timeline · alpha",
     sourceHarness: "test",
-    artifactId: "project-timeline:atlas",
+    artifactId: "project-timeline:alpha",
     evidenceRefs: ["l1:turn-1"],
     contractVersion: "memhub-distill-v2"
   };
   await distillSource.distill({ ...distillBase, content: "timeline v1" });
   await distillSource.distill({ ...distillBase, content: "timeline v2" });
   await distillSource.distill({ ...distillBase, content: "timeline v2" });
-  assert.equal(distillWrites[0].sourceArtifactId, "project-timeline:atlas");
+  assert.equal(distillWrites[0].sourceArtifactId, "project-timeline:alpha");
   assert.notEqual(distillWrites[0].requestId, distillWrites[1].requestId);
   assert.equal(distillWrites[1].requestId, distillWrites[2].requestId);
 
@@ -267,29 +266,29 @@ try {
     },
     async remember() { return { ok: true }; }
   };
-  const router = new ContextRouter(memory, new JsonConversationProjectBindingStore(join(root, "bindings.json")));
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续 atlas", conversationId: "chat", knownProjectIds: ["atlas", "memmy"] })).resolvedProjectId, "atlas");
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续", conversationId: "chat", knownProjectIds: ["atlas", "memmy"] })).resolvedProjectId, "atlas");
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "转到 memmy", conversationId: "chat", knownProjectIds: ["atlas", "memmy"] })).resolvedProjectId, "memmy");
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续", conversationId: "chat", knownProjectIds: ["atlas", "memmy"] })).resolvedProjectId, "memmy");
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "回 atlas", conversationId: "chat", semanticProjectIds: ["atlas"], knownProjectIds: ["atlas", "memmy"] })).resolvedProjectId, "atlas");
-  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "转到 memmy", conversationId: "chat", projectId: "memmy", knownProjectIds: ["atlas", "memmy"] })).resolvedProjectId, "memmy");
-  assert.deepEqual(calls, ["atlas", "atlas", "memmy", "memmy", "atlas", "memmy"]);
+  const router = new ContextRouter(memory);
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续 alpha", conversationId: "chat", knownProjectIds: ["alpha", "memmy"] })).resolvedProjectId, "alpha");
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续", conversationId: "chat", knownProjectIds: ["alpha", "memmy"] })).resolvedProjectId, null);
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "转到 memmy", conversationId: "chat", knownProjectIds: ["alpha", "memmy"] })).resolvedProjectId, "memmy");
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "继续", conversationId: "chat", knownProjectIds: ["alpha", "memmy"] })).resolvedProjectId, null);
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "回 alpha", conversationId: "chat", semanticProjectIds: ["alpha"], knownProjectIds: ["alpha", "memmy"] })).resolvedProjectId, "alpha");
+  assert.equal((await router.context({ accountId: "acct", userId: "user", query: "转到 memmy", conversationId: "chat", projectId: "memmy", knownProjectIds: ["alpha", "memmy"] })).resolvedProjectId, "memmy");
+  assert.deepEqual(calls, ["alpha", null, "memmy", null, "alpha", "memmy"]);
 
   const branchStore = new JsonProjectBranchStore(join(root, "project-branches.json"));
-  const retrievalBranch = await branchStore.create("acct", "atlas", {
+  const retrievalBranch = await branchStore.create("acct", "alpha", {
     name: "Retrieval",
     goal: "Improve semantic BM25 retrieval and relevant-memory precision."
   });
-  const webBranch = await branchStore.create("acct", "atlas", {
+  const webBranch = await branchStore.create("acct", "alpha", {
     name: "Web",
     goal: "Finish the Control Plane web interface."
   });
-  await branchStore.create("acct", "atlas", {
+  await branchStore.create("acct", "alpha", {
     name: "Network",
     goal: "Diagnose Cloudflare transport stability."
   });
-  assert.equal((await branchStore.list("acct", "atlas")).length, 3);
+  assert.equal((await branchStore.list("acct", "alpha")).length, 3);
   const branchQueries = [];
   const branchMemory = {
     async recall(input) {
@@ -298,48 +297,39 @@ try {
     },
     async remember() { return { ok: true }; }
   };
-  const branchRouter = new ContextRouter(
-    branchMemory,
-    new JsonConversationProjectBindingStore(join(root, "branch-project-bindings.json")),
-    undefined,
-    branchStore
-  );
-  await branchStore.bind("acct", "branch-chat", "atlas", retrievalBranch.branchId);
+  const branchRouter = new ContextRouter(branchMemory, undefined, undefined, branchStore);
   let branchCapsule = await branchRouter.context({
     accountId: "acct",
     userId: "user",
     query: "继续",
     conversationId: "branch-chat",
-    projectId: "atlas",
-    knownProjectIds: ["atlas"]
+    projectId: "alpha",
+    knownProjectIds: ["alpha"]
   });
-  assert.equal(branchCapsule.branchContext?.branchId, retrievalBranch.branchId);
-  assert.equal(branchCapsule.branchContext?.source, "conversation_binding");
-  assert.match(branchQueries.at(-1), /semantic BM25 retrieval/);
+  assert.equal(branchCapsule.branchContext, null);
+  assert.doesNotMatch(branchQueries.at(-1), /semantic BM25 retrieval/);
   branchCapsule = await branchRouter.context({
     accountId: "acct",
     userId: "user",
     query: "继续",
     conversationId: "branch-chat",
-    projectId: "atlas",
+    projectId: "alpha",
     branchId: webBranch.branchId,
-    knownProjectIds: ["atlas"]
+    knownProjectIds: ["alpha"]
   });
   assert.equal(branchCapsule.branchContext?.branchId, webBranch.branchId);
   assert.equal(branchCapsule.branchContext?.source, "explicit");
   assert.match(branchQueries.at(-1), /Control Plane web interface/);
-  assert.equal((await branchStore.current("acct", "branch-chat", "atlas"))?.branchId, webBranch.branchId);
-  await branchStore.close("acct", "atlas", webBranch.branchId);
-  assert.equal(await branchStore.current("acct", "branch-chat", "atlas"), null);
-  assert.equal((await branchStore.list("acct", "atlas")).length, 2);
-  assert.equal((await branchStore.list("acct", "atlas", { includeClosed: true })).length, 3);
+  await branchStore.close("acct", "alpha", webBranch.branchId);
+  assert.equal((await branchStore.list("acct", "alpha")).length, 2);
+  assert.equal((await branchStore.list("acct", "alpha", { includeClosed: true })).length, 3);
   const crossProjectBranchCapsule = await branchRouter.context({
     accountId: "acct",
     userId: "user",
     query: "继续",
     conversationId: "branch-chat",
     projectId: "memmy",
-    knownProjectIds: ["atlas", "memmy"]
+    knownProjectIds: ["alpha", "memmy"]
   });
   assert.equal(crossProjectBranchCapsule.branchContext, null);
   await assert.rejects(() => branchRouter.context({
@@ -348,15 +338,15 @@ try {
     query: "继续",
     projectId: "memmy",
     branchId: retrievalBranch.branchId,
-    knownProjectIds: ["atlas", "memmy"]
+    knownProjectIds: ["alpha", "memmy"]
   }), /unknown active branch for project memmy/);
 
   const concurrentBranchPath = join(root, "concurrent-branches.json");
   const concurrentBranchStores = Array.from({ length: 16 }, () => new JsonProjectBranchStore(concurrentBranchPath));
   await Promise.all(concurrentBranchStores.map((store, index) =>
-    store.create("acct", "atlas", { name: `branch-${index}`, goal: `parallel workstream ${index}` })
+    store.create("acct", "alpha", { name: `branch-${index}`, goal: `parallel workstream ${index}` })
   ));
-  assert.equal((await concurrentBranchStores[0].list("acct", "atlas")).length, 16);
+  assert.equal((await concurrentBranchStores[0].list("acct", "alpha")).length, 16);
 
   const resultTransport = new JsonResultTransport(join(root, "result-state"), "acct", 100);
   const largeValue = { payload: "界".repeat(130_000), marker: "generic-result-transport" };
@@ -379,25 +369,6 @@ try {
   ));
   assert.throws(() => resultTransport.read("../escape", 0, 100_000), /invalid result_id/);
 
-  const concurrentBindingPath = join(root, "concurrent-bindings.json");
-  const concurrentBindingStores = Array.from(
-    { length: 32 },
-    () => new JsonConversationProjectBindingStore(concurrentBindingPath)
-  );
-  await Promise.all(concurrentBindingStores.map((store, index) =>
-    store.bind("acct", `parallel-chat-${index}`, `parallel-project-${index}`)
-  ));
-  const concurrentBindings = JSON.parse(await readFile(concurrentBindingPath, "utf8"));
-  assert.equal(concurrentBindings.bindings.length, 32);
-
-  const crossProcessBindingPath = join(root, "cross-process-bindings.json");
-  await Promise.all(Array.from({ length: 8 }, (_, index) => runNodeEval(
-    "import { JsonConversationProjectBindingStore } from './dist/binding-store.js'; await new JsonConversationProjectBindingStore(process.argv[1]).bind('acct', process.argv[2], process.argv[3]);",
-    [crossProcessBindingPath, `cross-chat-${index}`, `cross-project-${index}`]
-  )));
-  const crossProcessBindings = JSON.parse(await readFile(crossProcessBindingPath, "utf8"));
-  assert.equal(crossProcessBindings.bindings.length, 8);
-
   const crashedRegistryPath = join(root, "crashed-project-registry.json");
   await writeFile(`${crashedRegistryPath}.lock`, JSON.stringify({
     token: "crashed-owner",
@@ -411,7 +382,7 @@ try {
 
   const concurrentCaptureRoot = join(root, "cross-process-captures");
   await Promise.all(Array.from({ length: 8 }, (_, index) => runNodeEval(
-    "import { storeCaptureEvent } from './dist/capture.js'; const i=process.argv[2]; await storeCaptureEvent(process.argv[1], { device_id:'probe-device', account_id:'acct' }, { event_id:'capture-'+i, host:'probe', conversation_id:'capture-conv-'+i, continuity_id:'capture-conv-'+i, timestamp:'2026-09-22T00:00:00.000Z', project_hint:'memhub', user_text:'user-'+i, assistant_text:'assistant-'+i, capture_status:'complete' });",
+    "import { storeCaptureEvent } from './dist/capture.js'; const i=process.argv[2]; await storeCaptureEvent(process.argv[1], { actor_id:'probe-actor', account_id:'acct' }, { event_id:'capture-'+i, host:'probe', conversation_id:'capture-conv-'+i, continuity_id:'capture-conv-'+i, timestamp:'2026-09-22T00:00:00.000Z', project_hint:'memhub', user_text:'user-'+i, assistant_text:'assistant-'+i, capture_status:'complete' });",
     [concurrentCaptureRoot, String(index)]
   )));
   assert.equal(await countCaptureEvents(concurrentCaptureRoot), 8);
@@ -420,11 +391,11 @@ try {
   const sameCaptureArgs = [sameCaptureRoot, "same-event", "same-conversation"];
   await Promise.all([
     runNodeEval(
-      "import { storeCaptureEvent } from './dist/capture.js'; await storeCaptureEvent(process.argv[1], { device_id:'probe-device', account_id:'acct' }, { event_id:process.argv[2], host:'probe', conversation_id:process.argv[3], continuity_id:process.argv[3], timestamp:'2026-09-22T00:00:00.000Z', project_hint:'memhub', user_text:'user-half', capture_status:'partial' });",
+      "import { storeCaptureEvent } from './dist/capture.js'; await storeCaptureEvent(process.argv[1], { actor_id:'probe-actor', account_id:'acct' }, { event_id:process.argv[2], host:'probe', conversation_id:process.argv[3], continuity_id:process.argv[3], timestamp:'2026-09-22T00:00:00.000Z', project_hint:'memhub', user_text:'user-half', capture_status:'partial' });",
       sameCaptureArgs
     ),
     runNodeEval(
-      "import { storeCaptureEvent } from './dist/capture.js'; await storeCaptureEvent(process.argv[1], { device_id:'probe-device', account_id:'acct' }, { event_id:process.argv[2], host:'probe', conversation_id:process.argv[3], continuity_id:process.argv[3], timestamp:'2026-09-22T00:00:00.000Z', project_hint:'memhub', assistant_text:'assistant-half', capture_status:'partial' });",
+      "import { storeCaptureEvent } from './dist/capture.js'; await storeCaptureEvent(process.argv[1], { actor_id:'probe-actor', account_id:'acct' }, { event_id:process.argv[2], host:'probe', conversation_id:process.argv[3], continuity_id:process.argv[3], timestamp:'2026-09-22T00:00:00.000Z', project_hint:'memhub', assistant_text:'assistant-half', capture_status:'partial' });",
       sameCaptureArgs
     )
   ]);
@@ -504,57 +475,27 @@ try {
   assert.equal((await listDistillationJobs(tokenRoot, "acct"))[0].status, "completed");
   assert.equal((await listDistillationJobs(tokenRoot, "acct"))[0].lease_token, undefined);
 
-  const concurrentBridgeRoot = join(root, "cross-process-bridge");
-  const bridgeBaseArgs = [concurrentBridgeRoot, "bridge-race-event", "bridge-race-conv"];
-  await Promise.all([
-    runNodeEval(
-      "import { MemhubBridgeQueue } from './dist/bridge.js'; await new MemhubBridgeQueue(process.argv[1]).enqueue({ event_id:process.argv[2], host:'probe', conversation_id:process.argv[3], continuity_id:process.argv[3], timestamp:'2026-09-22T00:00:00.000Z', user_text:'user-half', capture_status:'partial' });",
-      bridgeBaseArgs
-    ),
-    runNodeEval(
-      "import { MemhubBridgeQueue } from './dist/bridge.js'; await new MemhubBridgeQueue(process.argv[1]).enqueue({ event_id:process.argv[2], host:'probe', conversation_id:process.argv[3], continuity_id:process.argv[3], timestamp:'2026-09-22T00:00:00.000Z', assistant_text:'assistant-half', capture_status:'partial' });",
-      bridgeBaseArgs
-    )
-  ]);
-  const bridgeQueueFiles = (await readdir(join(concurrentBridgeRoot, "queue"))).filter((name) => name.endsWith(".json"));
-  assert.equal(bridgeQueueFiles.length, 1);
-  const bridgedRaceEvent = JSON.parse(await readFile(join(concurrentBridgeRoot, "queue", bridgeQueueFiles[0]), "utf8"));
-  assert.equal(bridgedRaceEvent.user_text, "user-half");
-  assert.equal(bridgedRaceEvent.assistant_text, "assistant-half");
-  assert.equal(bridgedRaceEvent.capture_status, "complete");
-
   const projectRegistry = new JsonProjectRegistry(join(state, "project-registry.json"));
   const reconciled = await projectRegistry.reconcile("acct", [
-    "atlas", "Atlas", "Memhub", "memhub", "delta"
+    "alpha-memory", "Alpha Memory", "Memhub", "memhub", "delta-project"
   ]);
-  assert.deepEqual(reconciled.map((item) => item.projectId), ["atlas", "delta", "memhub"]);
-  assert.equal(await projectRegistry.resolve("acct", "ATLAS"), "atlas");
+  assert.deepEqual(reconciled.map((item) => item.projectId), ["alpha-memory", "delta-project", "memhub"]);
+  assert.equal(await projectRegistry.resolve("acct", "Alpha Memory"), "alpha-memory");
   assert.equal(await projectRegistry.resolve("acct", "MEMHUB"), "memhub");
-  assert.equal(projectSimilarity("Atlas", "atlas"), 1);
-  const atlas = await projectRegistry.update("acct", "atlas", {
+  assert.equal(projectSimilarity("Alpha Memory", "alpha-memory"), 1);
+  const ours = await projectRegistry.update("acct", "alpha-memory", {
     description: "Long-term memory research and implementation project."
   });
-  assert.match(atlas.description, /Long-term memory/);
-  const suggestion = await projectRegistry.suggest("acct", "Atla", 3);
-  assert.equal(suggestion[0]?.projectId, "atlas");
+  assert.match(ours.description, /Long-term memory/);
+  const suggestion = await projectRegistry.suggest("acct", "OursMemori", 3);
+  assert.equal(suggestion[0]?.projectId, "alpha-memory");
   await projectRegistry.create("acct", {
-    projectId: "atlas-next",
+    projectId: "alpha-memory-next",
     description: "Temporary successor project used to verify logical merge."
   });
-  await projectRegistry.merge("acct", "atlas-next", "atlas");
-  assert.equal(await projectRegistry.resolve("acct", "atlas-next"), "atlas");
-  assert.ok((await projectRegistry.storageIds("acct", "atlas")).includes("atlas-next"));
-  await projectRegistry.create("acct", { projectId: "archive-me", description: "Archive lifecycle fixture." });
-  await projectRegistry.archive("acct", "archive-me");
-  assert.equal(await projectRegistry.resolve("acct", "archive-me"), null);
-  assert.equal(await projectRegistry.resolve("acct", "archive-me", { includeArchived: true }), "archive-me");
-  assert.equal((await projectRegistry.list("acct")).some((item) => item.projectId === "archive-me"), false);
-  assert.equal((await projectRegistry.list("acct", { includeArchived: true }))
-    .find((item) => item.projectId === "archive-me")?.state, "archived");
-  assert.deepEqual(await projectRegistry.storageIds("acct", "archive-me"), ["archive-me"]);
-  await projectRegistry.unarchive("acct", "archive-me");
-  assert.equal(await projectRegistry.resolve("acct", "archive-me"), "archive-me");
-  assert.equal((await projectRegistry.list("acct")).find((item) => item.projectId === "archive-me")?.state, "active");
+  await projectRegistry.merge("acct", "alpha-memory-next", "alpha-memory");
+  assert.equal(await projectRegistry.resolve("acct", "alpha-memory-next"), "alpha-memory");
+  assert.ok((await projectRegistry.storageIds("acct", "alpha-memory")).includes("alpha-memory-next"));
   await projectRegistry.create("acct", { projectId: "throwaway", description: "Disposable test project." });
   await projectRegistry.delete("acct", "throwaway");
   assert.equal(await projectRegistry.resolve("acct", "throwaway"), null);
@@ -583,20 +524,16 @@ try {
     },
     async remember() { return { ok: true }; }
   };
-  const aliasRouter = new ContextRouter(
-    aliasMemory,
-    new JsonConversationProjectBindingStore(join(root, "alias-bindings.json")),
-    projectRegistry
-  );
+  const aliasRouter = new ContextRouter(aliasMemory, undefined, projectRegistry);
   const aliasCapsule = await aliasRouter.context({
     accountId: "acct",
     userId: "user",
-    query: "continue Atlas",
+    query: "继续 Alpha Memory",
     conversationId: "alias-chat",
-    knownProjectIds: ["atlas", "Atlas"]
+    knownProjectIds: ["alpha-memory", "Alpha Memory"]
   });
-  assert.equal(aliasCapsule.resolvedProjectId, "atlas");
-  assert.ok(aliasCalls[0].projectStorageIds.includes("Atlas"));
+  assert.equal(aliasCapsule.resolvedProjectId, "alpha-memory");
+  assert.ok(aliasCalls[0].projectStorageIds.includes("Alpha Memory"));
 
   const owner = await addAccount(state, "owner", "owner@example.com");
   await assert.rejects(() => resolveCloudflareAccount(state, { sub: "unknown", email: "unknown@example.com" }), /允许列表/);
@@ -621,11 +558,6 @@ try {
     conversation_id: "conv",
     timestamp: "2026-09-18T08:00:00.000Z"
   }), /requires user_text, assistant_text, reasoning_summary, or tool_summary/);
-  const device = await createDevice(state, owner.account_id, "owner-laptop");
-  const deviceStoreText = await readFile(join(state, "devices.json"), "utf8");
-  assert.equal(deviceStoreText.includes(device.token), false);
-  assert.match(deviceStoreText, /"token_hash":\s*"[a-f0-9]{64}"/);
-
   console.log("memhub-core-e2e: ok");
 } finally {
   await rm(root, { recursive: true, force: true });

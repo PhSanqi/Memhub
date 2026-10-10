@@ -150,14 +150,13 @@ try {
   assert.equal(afterQueueFailure.filter((job) => job.target === "l3").length, 1,
     "downstream enqueue failure must not create a partial additional child");
   const audit = await auditDistillationPipeline({
-    stateRoot: root, accountId, bridgeRoot: null,
+    stateRoot: root, accountId,
     resolveProject: async () => projectId
   });
   assert.equal(audit.recovery.completed_l2_missing_l3, 1,
     "read-only audit must identify exactly the completed L2 without a child claim");
   assert.equal(audit.review_samples.completed_l2_missing_l3[0].job_id, third.job_id);
   assert.ok(audit.warnings.some((warning) => warning.includes("never replay the completed Core write")));
-  assert.equal(audit.bridge.inspected, false, "isolated audit must not probe a default Bridge");
   const recoveryInput = {
     stateRoot: root, accountId, jobId: third.job_id, projectId
   };
@@ -191,7 +190,7 @@ try {
   assert.equal(two.derived_job_id, children[0].job_id);
   assert.equal((await reconcileCompletedL2DerivedJob({ ...recoveryInput, dryRun: false })).already_queued, true);
   const repairedAudit = await auditDistillationPipeline({
-    stateRoot: root, accountId, bridgeRoot: null, resolveProject: async () => projectId
+    stateRoot: root, accountId, resolveProject: async () => projectId
   });
   assert.equal(repairedAudit.recovery.completed_l2_missing_l3, 0);
   const originalStoreBytes = await readFile(jobsPath);
@@ -206,7 +205,7 @@ try {
       "a reused ref with divergent content must not count as successful recovery"
     );
     const conflictAudit = await auditDistillationPipeline({
-      stateRoot: root, accountId, bridgeRoot: null,
+      stateRoot: root, accountId,
       resolveProject: async () => projectId
     });
     assert.equal(conflictAudit.recovery.completed_l2_missing_l3, 0,
@@ -235,7 +234,7 @@ try {
       "a child with extra foreign evidence must not be accepted as an exact L3 claim"
     );
     const contaminatedAudit = await auditDistillationPipeline({
-      stateRoot: root, accountId, bridgeRoot: null,
+      stateRoot: root, accountId,
       resolveProject: async () => projectId
     });
     assert.equal(contaminatedAudit.recovery.completed_l2_conflicting_l3, 1);

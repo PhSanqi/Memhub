@@ -36,6 +36,13 @@ assert.equal(metadata.reliability, 0.9);
 assert.equal(metadata.executor, "codex");
 assert.equal(metadata.loadRequired, true);
 
+const structuredTitleMetadata = skillSelectionMetadataFromBody(
+  "Purpose: audit durable project memory without mutating it.",
+  { projectId: "memhub", title: "Memhub Long-Term Content Audit" }
+);
+assert.equal(structuredTitleMetadata.title, "Memhub Long-Term Content Audit");
+assert.doesNotMatch(structuredTitleMetadata.title, /^Purpose:/);
+
 const flattened = compactSkillContextItem({
   id: "skill-flat",
   content: "Memhub Long-Term Content Audit # Memhub Long-Term Content Audit ## When to use Use when project memory appears missing or misrouted. ## Procedure SECRET FULL PROCEDURE",

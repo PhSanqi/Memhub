@@ -22,8 +22,6 @@ const rel = {
   capture: ".memmy/memhub/capture-index.sqlite",
   config: ".memmy/config.yaml",
   env: ".memmy/memhub/memhub.env",
-  bridge: ".memhub/bridge.json",
-  queue: ".memhub/queue/event.json",
   captureEvent: ".memmy/memhub/captures/event.json",
   job: ".memmy/memhub/distillation/jobs.json",
   unit: ".config/systemd/user/memhub.service"
@@ -60,13 +58,11 @@ const checkSqlite = (home, key, expected, seal = false) => {
 
 try {
   for (const name of [".memmy/memory-service", ".memmy/memhub/captures",
-    ".memmy/memhub/distillation", ".memhub/queue", ".config/systemd/user"]) {
+    ".memmy/memhub/distillation", ".config/systemd/user"]) {
     await mkdir(join(source, name), { recursive: true });
   }
   await writeFile(at(source, "config"), "private-core-config-v1\n", { mode: 0o600 });
   await writeFile(at(source, "env"), "private-gateway-token-v1\n", { mode: 0o600 });
-  await writeFile(at(source, "bridge"), "private-bridge-device-token-v1\n", { mode: 0o600 });
-  await writeFile(at(source, "queue"), '{"queued":"before-upgrade"}\n');
   await writeFile(at(source, "captureEvent"), '{"capture":"before-upgrade"}\n');
   await writeFile(at(source, "job"), '{"pending":"before-upgrade"}\n');
   await writeFile(at(source, "unit"), "ExecStart=/old-version/dist/mcp.js --http-path /mcp\n");
@@ -91,7 +87,6 @@ try {
     recursive: true,
     filter: (path) => !excludedCapture.has(basename(path))
   });
-  await cp(join(source, ".memhub"), join(snapshot, ".memhub"), { recursive: true });
   await cp(join(source, ".config"), join(snapshot, ".config"), { recursive: true });
   await cp(at(source, "config"), at(snapshot, "config"));
   await mkdir(join(snapshot, ".memmy/memory-service"), { recursive: true });
@@ -105,7 +100,6 @@ try {
   const baseline = await listHashes(snapshot);
   assert.ok(Object.keys(baseline).includes(rel.core));
   assert.ok(Object.keys(baseline).includes(rel.capture));
-  assert.ok(Object.keys(baseline).includes(rel.queue));
   assert.equal(Object.keys(baseline).some((name) => /\.sqlite-(wal|shm)$/.test(name)), false);
 
   // Model a candidate that changes BOTH databases, credentials, unit route
@@ -118,8 +112,6 @@ try {
   }
   await writeFile(at(restored, "config"), "rotated-token");
   await writeFile(at(restored, "env"), "rotated-token");
-  await writeFile(at(restored, "bridge"), "rotated-device");
-  await writeFile(at(restored, "queue"), '{"queued":"candidate-only"}');
   await writeFile(at(restored, "captureEvent"), '{"capture":"candidate-only"}');
   await writeFile(at(restored, "unit"), "ExecStart=/new-version/dist/mcp.js --http-path /memhub/mcp\n");
   assert.notDeepEqual(await listHashes(restored), baseline);
@@ -128,7 +120,7 @@ try {
   // used for rollback, even when the candidate tree needs recovery.
   const corrupt = join(sandbox, "corrupt");
   await cp(snapshot, corrupt, { recursive: true });
-  await writeFile(at(corrupt, "bridge"), "tampered-backup");
+  await writeFile(at(corrupt, "env"), "tampered-backup");
   assert.notDeepEqual(await listHashes(corrupt), baseline);
   await rm(corrupt, { recursive: true });
 
@@ -136,7 +128,7 @@ try {
   await rm(restored, { recursive: true });
   await cp(snapshot, restored, { recursive: true });
   assert.deepEqual(await listHashes(restored), baseline,
-    "rollback must restore units, credentials, complete Gateway/Bridge trees and both SQLite databases");
+    "rollback must restore units, credentials, complete Memhub state and both SQLite databases");
   checkSqlite(restored, "core", ["core-before-upgrade"]);
   checkSqlite(restored, "capture", ["capture-before-upgrade"]);
   checkSqlite(source, "core", ["core-before-upgrade"]);

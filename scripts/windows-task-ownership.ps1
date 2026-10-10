@@ -48,25 +48,21 @@ function Assert-MemhubInstallTask {
 
 function Assert-MemhubInstallTaskSet {
   param(
-    [Parameter(Mandatory)][ValidateSet("local", "server")][string]$Mode,
     [Parameter(Mandatory)][string]$StateRoot
   )
   $runtime = Join-Path ([IO.Path]::GetFullPath($StateRoot)) "runtime"
-  $specs = if ($Mode -eq "server") {
-    @(
-      @{ Name = "Memhub-Server-Stack"; Launcher = "stack-server.cmd"; Legacy = $false },
-      @{ Name = "Memhub-Server-Memory"; Launcher = "memory-server.cmd"; Legacy = $true },
-      @{ Name = "Memhub-Server"; Launcher = "gateway-server.cmd"; Legacy = $true }
-    )
-  } else {
-    @(
-      @{ Name = "Memhub-Local-Stack"; Launcher = "stack-local.cmd"; Legacy = $false },
-      # v0.2.2 Local launchers have no -server suffix (unlike Server Edition).
-      @{ Name = "Memhub-Memory"; Launcher = "memory.cmd"; Legacy = $true },
-      @{ Name = "Memhub-Local"; Launcher = "gateway.cmd"; Legacy = $true },
-      @{ Name = "Memhub-Bridge"; Launcher = "bridge.cmd"; Legacy = $true }
-    )
-  }
+  $specs = @(
+    @{ Name = "Memhub-Stack"; Launcher = "stack.cmd"; Legacy = $false },
+    # Historical task names are migration blockers only. They are never
+    # created by the current installer.
+    @{ Name = "Memhub-Local-Stack"; Launcher = "stack-local.cmd"; Legacy = $true },
+    @{ Name = "Memhub-Server-Stack"; Launcher = "stack-server.cmd"; Legacy = $true },
+    @{ Name = "Memhub-Memory"; Launcher = "memory.cmd"; Legacy = $true },
+    @{ Name = "Memhub-Local"; Launcher = "gateway.cmd"; Legacy = $true },
+    @{ Name = "Memhub-Bridge"; Launcher = "bridge.cmd"; Legacy = $true },
+    @{ Name = "Memhub-Server-Memory"; Launcher = "memory-server.cmd"; Legacy = $true },
+    @{ Name = "Memhub-Server"; Launcher = "gateway-server.cmd"; Legacy = $true }
+  )
   $managed = @()
   $legacy = @()
   foreach ($spec in $specs) {

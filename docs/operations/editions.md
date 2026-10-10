@@ -1,144 +1,61 @@
-# Memhub editions
+# Editions and runtime layout
 
-Memhub is developed as one shared core with two deployment editions. They must not become two diverging memory implementations.
+Memhub publishes Local and Server packages, but both packages contain the same runtime implementation.
 
-## Shared core
+## Canonical stack
 
-Both editions use the same:
-
-- Memory Core and schema;
-- Context Router;
-- project/global isolation rules;
-- Project Architecture reader plus explicit full-document plan/approval/execute for Memhub-managed private canonical documents; repository Markdown and legacy `normify-*` remain read-only;
-- MCP tool contract;
-- capture event schema;
-- distillation pipeline;
-- host plugin/adapter packages;
-- local bridge implementation.
-
-Only topology, authentication and storage placement differ.
-
-## Server Edition
-
-Target user: someone who has a VPS/server and can configure Cloudflare or another authenticated reverse proxy.
+Linux:
 
 ```text
-device A plugin ----\
-device B plugin -----+--> Cloudflare/Auth --> Memhub Server
-hosted MCP ----------/                         |- Memory Core
-                                               |- Context Router
-                                               |- Project Architecture
-                                               `- capture/distillation
+memhub-core.service   -> 127.0.0.1:18960
+memhub.service        -> 127.0.0.1:3001/mcp
+memhub-stack.target   -> owns both services
+memhub.env            -> shared runtime environment
 ```
 
-Properties:
-
-- one central long-term memory source of truth;
-- multi-device access;
-- account + device identity;
-- authenticated remote Streamable HTTP MCP;
-- authenticated capture endpoint;
-- server-side database and architecture data;
-- local device queue is temporary transport only;
-- Cloudflare is identity/transport, not a memory-processing backend.
-
-Server Edition is the right choice for the current deployment.
-
-### Server public routes
-
-The current Server Edition exposes two logical routes behind the authenticated reverse proxy:
+Windows:
 
 ```text
-/memhub/mcp      model/tool traffic
-/memhub/capture  background plugin capture
+Memhub-Stack -> runtime/stack.cmd -> scripts/run-stack.mjs
 ```
 
-Interactive/hosted MCP clients may authenticate through the human Cloudflare Access identity flow. Local Bridge installations use a Cloudflare Access service credential for the outer proxy plus a revocable Memhub device token for account/device identity at the origin.
+The managed direct process stack also owns exactly two children: Core and MCP runtime.
 
-## Local Edition
+## Local package
 
-Target user: no server, or someone who explicitly wants all memory to remain on one machine.
+Local clients connect directly to:
 
 ```text
-local AI plugins
-       |
-       v
-Memhub Local Bridge / MCP
-       |
-       +--> local Memory Core / SQLite
-       `--> local architecture data
+http://127.0.0.1:3001/mcp
 ```
 
-Properties:
+No public host is required.
 
-- zero server requirement;
-- no Cloudflare requirement;
-- loopback-only by default;
-- local SQLite and local architecture data;
-- the same plugin/bridge API as Server Edition;
-- optional manual export/backup, but no peer-to-peer merge protocol in the initial version.
+## Server package
 
-Local Edition should feel identical to an AI host: the host talks to the Memhub plugin/bridge and uses the same MCP tools.
-
-## Edition selection belongs below the plugin
-
-Plugins should not have independent Server and Local variants.
-
-The same installed adapter chooses one backend profile:
+Server is the same loopback stack with `MEMHUB_PUBLIC_HOST` configured and an authenticated reverse proxy/Tunnel publishing the endpoint:
 
 ```text
-mode = server
-endpoint = https://example.com/memhub/mcp
-
-or
-
-mode = local
-endpoint = http://127.0.0.1:<local-port>/mcp
+https://<public-host>/mcp -> 127.0.0.1:3001/mcp
 ```
 
-This avoids doubling every Codex/Claude/Gemini/CoWorker integration.
+The public transport never exposes Memory Core directly.
 
-## Repository direction
+## Installer design
 
-Recommended long-term layout:
+Linux and Windows each have one common installer/uninstaller implementation. Edition entrypoints are wrappers that set defaults such as account name or public host. Runtime ownership, credentials, ports and state layout are not duplicated per edition.
 
-```text
-Memhub/
-├── core/                 # router/contracts shared by editions
-├── bridge/               # local daemon, queue, device identity
-├── adapters/             # host packaging/hook overlays
-│   ├── agent-plugin/
-│   ├── openai/
-│   ├── claude/
-│   ├── gemini/
-│   └── coworker/
-├── editions/
-│   ├── server/           # authenticated HTTP deployment
-│   ├── local/            # all-local launcher/bundle
-├── install-complete.sh   # self-contained Linux release installer
-├── install-complete.ps1 # self-contained Windows release installer
-└── docs/
-```
+Fresh installers fail closed when existing Memhub state or historical owners are detected. Existing installations require a reviewed upgrade rather than an overwrite.
 
-The current `src/` implementation is the starting shared gateway and should be migrated toward this layout incrementally rather than rewritten.
+## Persistent state
 
-## Release naming
+Repository/runtime code is replaceable. Persistent user state is external and protected:
 
-Suggested artifacts:
+- `~/.memmy` on Linux;
+- `%LOCALAPPDATA%\Memhub` by default on Windows packages.
 
-- `memhub-server` — server deployment bundle;
-- `memhub-local` — standalone local bundle;
-- `memhub-vX.Y.Z-linux-x64-complete.tar.gz` — self-contained Linux package with Node runtime, native dependencies and prebuilt Memhub; selects Local or Server at install time;
-- `memhub-vX.Y.Z-windows-x64-complete.zip` — self-contained Windows package with the same semantics. Packaging installs target-specific Windows native modules and validates their PE/x64 format; final release acceptance still requires a Windows runtime smoke test.
-- `memhub-plugin` — portable adapter package where the host supports Agent Plugins;
-- `memhub` — installer/manager CLI that selects edition and installs host adapters.
+A cleanup or upgrade must never infer that old runtime code implies old user data is disposable.
 
-The Memhub gateway workspace package is named `memhub`; inherited Memory Core workspaces retain their upstream package names for compatibility during the refactor.
+## Packaging
 
-## No database synchronization between editions
-
-Server Edition does not synchronize full databases between devices. Devices upload events to one server-side source of truth.
-
-Local Edition owns its local source of truth.
-
-If migration between Local and Server Editions is needed later, implement an explicit export/import migration protocol rather than live multi-master SQLite synchronization.
+Release packages include the selected edition wrapper plus the common runtime implementation. Complete bundles include Node, dependencies, Core, MCP runtime and web assets. Local/Server package identity is installation UX, not an architectural fork.

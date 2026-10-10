@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
 import { normalizeCaptureEvent, captureIsFullyExcludedFromMemory } from "../dist/capture.js";
-import { retryableIngestError } from "../dist/capture-http.js";
-import { MemoryCoreHttpError } from "../dist/local-memory-client.js";
 
 const mixed = normalizeCaptureEvent({
   event_id: "privacy-mixed",
@@ -50,10 +48,5 @@ const failClosed = normalizeCaptureEvent({
   capture_status: "partial"
 });
 assert.equal(failClosed.user_text, "public prefix");
-
-assert.equal(retryableIngestError(new MemoryCoreHttpError(503, "offline")), true);
-assert.equal(retryableIngestError(new MemoryCoreHttpError(409, "conflict")), false);
-assert.equal(retryableIngestError(Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } })), true);
-assert.equal(retryableIngestError(new Error("schema bug")), false);
 
 console.log("capture-privacy-graceful-e2e: ok");

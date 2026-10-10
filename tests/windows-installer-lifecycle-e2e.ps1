@@ -12,7 +12,7 @@ $Node = if (Test-Path $BundledNode) { $BundledNode }
   else { (Get-Command node.exe -ErrorAction Stop).Source }
 $StackEntry = Join-Path $RepoRoot "scripts\run-stack.mjs"
 $StateRoot = Join-Path ([IO.Path]::GetTempPath()) ("memhub-installer-e2e-" + $Edition + "-" + [guid]::NewGuid().ToString("N"))
-$TaskName = if ($Edition -eq "server") { "Memhub-Server-Stack" } else { "Memhub-Local-Stack" }
+$TaskName = "Memhub-Stack"
 $global:OwnedProcesses = @()
 $global:TaskRequests = @()
 $global:UnrelatedProcess = $null
@@ -32,7 +32,7 @@ function schtasks.exe {
     if (($call -join " ") -notmatch [regex]::Escape($TaskName)) {
       throw "unexpected task start"
     }
-    $argumentLine = ('"{0}" --mode {1} --home "{2}"' -f $StackEntry, $Edition, $StateRoot)
+    $argumentLine = ('"{0}" --home "{1}"' -f $StackEntry, $StateRoot)
     $logBase = Join-Path $StateRoot ("runtime\stack-test-" + $global:OwnedProcesses.Count)
     $process = Start-Process -FilePath $Node -ArgumentList $argumentLine -WorkingDirectory $RepoRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput ($logBase + ".stdout.log") -RedirectStandardError ($logBase + ".stderr.log")
     $global:OwnedProcesses += $process
@@ -54,7 +54,7 @@ function Install-Edition {
   if ($LASTEXITCODE -ne 0) { throw "installer returned nonzero" }
 }
 function Check-PortsAvailable {
-  $ports = if ($Edition -eq "server") { @(18960, 3001) } else { @(18960, 3001, 17861) }
+  $ports = @(18960, 3001)
   foreach ($port in $ports) {
     $listener = [System.Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port)
     try { $listener.Start() } catch { throw "test skipped: port $port is occupied; never touch the occupying process" }
@@ -66,7 +66,7 @@ try {
   Check-PortsAvailable
   Install-Edition
   $configPath = Join-Path $StateRoot "memory-config.yaml"
-  $envPath = Join-Path $StateRoot ($Edition + ".env")
+  $envPath = Join-Path $StateRoot "memhub.env"
   $before = Get-Content -Raw $configPath
   . (Join-Path $RepoRoot "scripts\windows-memory-credentials.ps1")
   $token = Resolve-MemhubMemoryToken -ConfigPath $configPath -MemoryDir (Join-Path $StateRoot "memory")
@@ -76,7 +76,7 @@ try {
   if ($Edition -eq "server") {
     Add-Content -Path $envPath -Value "MEMHUB_PUBLIC_HOST=memhub-e2e.invalid" -Encoding UTF8
   }
-  $lock = Join-Path $StateRoot ("." + $Edition + "-stack.lock")
+  $lock = Join-Path $StateRoot ".memhub-stack.lock"
   $ownerBefore = Get-Content -Raw $lock | ConvertFrom-Json
   Set-Content -Path $configPath -Value '{"memmyMemory":{"storage":{"token":""}}}' -Encoding UTF8
   $rejected = $false
@@ -142,11 +142,11 @@ try {
     if ($Edition -eq "server") {
       Assert-True ((Get-Content -Raw $envPath).Contains("MEMHUB_PUBLIC_HOST=memhub-e2e.invalid")) ("public host removed on " + $phase)
     }
-    $lock = Join-Path $StateRoot ("." + $Edition + "-stack.lock")
+    $lock = Join-Path $StateRoot ".memhub-stack.lock"
     Assert-True (Test-Path $lock) ("stack owner lock absent on " + $phase)
   }
   & $Uninstaller -StateRoot $StateRoot
-  Assert-True (-not (Test-Path (Join-Path $StateRoot ("." + $Edition + "-stack.lock")))) "uninstall left stack owner"
+  Assert-True (-not (Test-Path (Join-Path $StateRoot ".memhub-stack.lock"))) "uninstall left stack owner"
   Assert-True (Test-Path $configPath) "uninstall without purge deleted config"
   Assert-True ((Get-Content -Raw $marker).Trim() -eq "KEEP") "uninstall without purge deleted user data"
   Install-Edition
@@ -162,9 +162,9 @@ try {
   Write-Output ("memhub-windows-installer-lifecycle-e2e: ok edition=" + $Edition + " launches=" + $global:OwnedProcesses.Count + " task_scheduler=shim real_stack=true")
   $global:TestSucceeded = $true
 } finally {
-  $lock = Join-Path $StateRoot ("." + $Edition + "-stack.lock")
+  $lock = Join-Path $StateRoot ".memhub-stack.lock"
   if (Test-Path $lock) {
-    & $Node $StackEntry --mode $Edition --home $StateRoot --action stop | Out-Null
+    & $Node $StackEntry --home $StateRoot --action stop | Out-Null
   }
   foreach ($process in $global:OwnedProcesses) {
     $process.Refresh()

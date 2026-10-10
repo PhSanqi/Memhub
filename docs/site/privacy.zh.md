@@ -18,7 +18,7 @@ Memory Core 是长期数据平面，默认只允许 loopback。仅仅配置一�
 
 ## Local Edition 的边界
 
-Local Edition 把 Memory Core、Gateway 和 Bridge 放在同一机器，默认 loopback。插件连接 `127.0.0.1:17861/mcp`，Bridge 再访问本地 Gateway。这个结构的好处是：插件不需要直接接触 Memory Core token，公网也没有必要参与。
+Local Edition 把 Memory Core 和 Memhub MCP runtime 放在同一机器，默认 loopback。MCP 客户端直接连接 `127.0.0.1:3001/mcp`，客户端直接使用 MCP endpoint。客户端仍然不会直接接触 Memory Core token，公网也没有必要参与。
 
 如果本机安装了全局代理，Memhub 不应该修改用户代理设置。loopback 是否被代理软件特殊处理由用户环境决定；排错时确认本机端口与 Host/Origin，而不是关闭全局代理来“验证”。
 
@@ -26,23 +26,23 @@ Local 并不意味着所有数据永远不会离开机器。如果你连接的 A
 
 ## Server Edition 的边界
 
-Server Edition 把 Memory Core 与 Gateway 放在服务器 loopback。建议的拓扑是：Internet AI host → authenticated HTTPS/MCP → Cloudflare Access/Tunnel → Memhub Gateway → loopback Memory Core。Gateway 是唯一预期公网 ingress；Memory Core 不直接发布。
+Server Edition 把 Memory Core 与同一个 MCP runtime 放在服务器 loopback。建议的拓扑是：Internet AI host → authenticated HTTPS/MCP → Cloudflare Access/Tunnel → loopback Memhub MCP runtime → Memory Core。公网 `/mcp` 与服务器本机 `/mcp` 进入同一个 runtime；Memory Core 不直接发布。
 
 Cloudflare 接收认证和传输流量，但不是 Memory Core 的存储后端，也不是语义蒸馏模型。你仍需要根据自己的 Cloudflare 配置、日志策略和所在地区评估元数据处理；产品边界只说明 Memhub 不把 Cloudflare 当长期记忆数据库。
 
-Server 多设备共享记忆依赖稳定 account_id。人类登录身份由 Access JWT 映射到账号；机器 Bridge 使用独立设备凭据。设备 token 可以撤销，不应该成为永久用户 ID。
+Server 多设备共享记忆依赖稳定 account_id。远程客户端身份由 Access/OAuth 边界映射到账号；设备、模型和 Harness 只是 provenance，不应该成为永久用户 ID。
 
 ## 人类身份与机器身份
 
 公开浏览器或 Hosted MCP 请求属于人类身份路径。Cloudflare Access 验证用户后，Memhub 验证 JWT issuer/audience/signature/sub/verified email，再解析到稳定账号。内部 role 存储在 Memhub，不信任客户端伪造 role。
 
-机器 Bridge 不是一个“人”。它可以使用 Cloudflare Service Token 通过边缘层，再用 Memhub Device Token 在 origin 选择账号与设备。两个 token 作用域不同，应分别轮换与撤销。
+机器客户端不是一个“人”。远程 MCP 客户端通过 Cloudflare/OAuth 等认证边界进入 Memhub，再解析到稳定账号；本地 loopback 客户端进入同一 MCP runtime。认证 token 只属于控制/传输平面，应按提供方能力轮换与撤销。
 
-不要把 Device Token、Service Token、local-admin token 放进项目描述、TODO、L1 对话或 prompt。凭据属于控制平面，不属于长期记忆内容。
+不要把 OAuth/Access token、local-admin token 等凭据放进项目描述、TODO、L1 对话或 prompt。凭据属于控制平面，不属于长期记忆内容。
 
 ## 项目边界
 
-项目隔离是隐私边界的一部分。一个账号可以有多个项目，但项目 A 的业务事实不应因为同一用户而自动进入项目 B。Context Router 正常解析一个 primary project；当前轮显式 workspace/project evidence 优先于旧 binding；证据含糊时可以 global-only。
+项目隔离是隐私边界的一部分。一个账号可以有多个项目，但项目 A 的业务事实不应因为同一用户而自动进入项目 B。Context Router 只根据当前轮显式 workspace/project evidence、精确 alias 与唯一 semantic candidate 解析 primary project；宿主会话标识不参与业务项目选择，证据含糊时保持 global-only。
 
 L3 是项目级长期规则。只有多个项目反复支持的稳定特征才进入 L4。这个设计避免一次敏感项目事件被错误泛化成账号全局画像。
 
@@ -65,6 +65,10 @@ Embedding 来自私有内容，仍属于私有数据。默认 Memory Core networ
 ## Capture 与索引边界
 
 L1 的 authoritative source 是 Memhub state root 下的 per-turn capture JSON；`capture-index.sqlite` 主要存可重建元数据，用于项目/会话过滤、计数、阈值调度和 idle scheduling。dirty ledger 在 raw/index 状态转换前写入，异常中断时可以根据原始 capture 重建受影响索引。
+
+当一段内容明确不应进入长期记忆时，可以在 Capture 边缘使用 `<private>…</private>` 或 `<no-memory>…</no-memory>`。Memhub 会在 durable capture 写入之前移除标记区间，只保留“发生过排除”的计数型 provenance，不保留被排除正文；如果整个 turn 都被排除，则该事件会被标记为已处理但不会进入 Memory Core。未闭合的 marker 采用 fail-closed：从 marker 开始到文本末尾都视为不进入记忆。这个机制用于“不要记住这一段”，不能替代账号 ACL、项目隔离或模型 provider 的隐私配置。
+
+Capture adapter 还遵循 graceful-degradation 边界：如果 durable Capture 已经成功落盘，而 Memory Core 暂时发生 timeout、429 或 5xx，HTTP Capture 可以返回 `202 accepted` 并保留待恢复状态，而不是阻塞上游 Agent。409、scope 冲突和 schema 错误仍 fail-closed，不能用“高可用”掩盖数据一致性错误。
 
 因此备份策略不能只复制索引。原始 capture、Memory Core durable DB、项目注册和账号/设备控制状态都要考虑。索引坏了可以重建；原始证据丢了则无法从索引恢复。
 
@@ -94,7 +98,7 @@ Merge 同样不会物理重写历史，它改变 canonical project 与 alias 关
 
 ## 如何验证隐私边界
 
-Local：检查 17861/3001/18960 都只在预期 loopback；确认插件连 17861。Server：检查 18960/3001 origin 只在服务器本机；公网只能通过认证域名进入。使用网络工具验证，而不是仅相信配置文件。
+Local：检查 3001/18960 都只在预期 loopback，并确认 MCP 客户端连接 3001 `/mcp`。Server：检查 18960/3001 origin 只在服务器本机；公网 `/mcp` 只能通过认证域名进入并转到同一个 runtime。使用网络工具验证，而不是仅相信配置文件。
 
 检查 User/Admin 是否在匿名请求下被拒绝；检查正常账号和 Admin role 是否区分。撤销一个 Device Token，确认该设备失效但其他设备与账号记忆仍然存在。
 
@@ -163,18 +167,18 @@ Local 的主要风险往往来自本机账号、磁盘、恶意插件和云模�
 
 ## 前置条件、命令与 UI 示例
 
-进行隐私审计前，应知道自己运行的是 Local 还是 Server、Memory Core/Gateway/Bridge 分别在哪台机器、公开 host 是什么、Harness 使用本地还是云模型、备份存在哪里。缺少这些事实时不要先下“数据都在本地”或“Cloudflare 看不到内容”之类结论。
+进行隐私审计前，应知道自己运行的是 Local 还是 Server、Memory Core 与 MCP runtime 分别在哪台机器、公开 host 是什么、Harness 使用本地还是云模型、备份存在哪里。缺少这些事实时不要先下“数据都在本地”或“Cloudflare 看不到内容”之类结论。
 
 Local/Server 都可以先检查监听边界：
 
 ```bash
-ss -ltn | grep -E '17861|3001|18960'
+ss -ltn | grep -E '3001|18960'
 ```
 
 Server 再分别检查 origin 与公网入口。UI 示例：匿名打开 `/admin` 应被认证层拒绝；合法 User 打开 `/user` 应只能看到自己的账号范围；只有 Admin role 才能进入管理页面。设备撤销后，该设备应失效，但同一账号其他设备和长期记忆仍可用。
 
 ## 失败诊断与恢复方法
 
-如果发现 18960/3001 意外直接公网监听，先停止公网暴露并恢复 loopback/认证代理，再检查访问日志和凭据是否需要轮换。若 Device Token、Service Token 或 local-admin token 疑似泄露，按各自作用域单独撤销/轮换，不要把一个 token 的泄露误当成必须删除全部记忆。
+如果发现 18960/3001 意外直接公网监听，先停止公网暴露并恢复 loopback/认证代理，再检查访问日志和凭据是否需要轮换。若 OAuth/Access token 或 local-admin token 疑似泄露，按各自作用域单独撤销/轮换，不要把一个 token 的泄露误当成必须删除全部记忆。
 
 如果跨项目出现隐私污染，先停止相关自动 job，修复 Context Router/项目绑定，再沿 L4→L3→L2→L1 provenance 确认影响范围。只有受影响 artifact 需要治理时，不要通过清空整个账号来掩盖边界问题。恢复后重新执行项目隔离测试与匿名/角色权限测试。

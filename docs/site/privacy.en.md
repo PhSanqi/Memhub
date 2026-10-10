@@ -12,21 +12,21 @@ Summaries and embeddings are still sensitive derived data. Do not treat them as 
 
 ## Local Edition
 
-Memory Core, Gateway, and Bridge remain on one machine and loopback. Plugins use Bridge. Local storage does not mean a cloud-model harness can never receive context; model processing is a separate boundary controlled by the harness/model configuration.
+Memory Core and the Memhub MCP runtime remain on one machine and loopback. MCP clients connect directly to `127.0.0.1:3001/mcp`; clients use the MCP endpoint directly. Local storage does not mean a cloud-model harness can never receive context; model processing is a separate boundary controlled by the harness/model configuration.
 
 ## Server Edition
 
-The intended topology is Internet client → authenticated HTTPS/MCP → Cloudflare Access/Tunnel → Memhub Gateway → loopback Memory Core. Gateway is the intended public ingress. Memory Core should not be published directly.
+The intended topology is Internet client → authenticated HTTPS/MCP → Cloudflare Access/Tunnel → the same loopback Memhub MCP runtime → Memory Core. The public `/mcp` route and local `/mcp` route enter the same runtime. Memory Core should not be published directly.
 
 Cloudflare provides authentication/transport, not long-term-memory storage or model inference.
 
 ## Human and machine identity
 
-Human Access JWT identity maps to a stable Memhub account. Internal roles live in Memhub. Machine Bridge clients may use both an edge Service Token and a separate revocable Memhub Device Token. These credentials should never enter prompts, TODOs, or project memory.
+Authenticated remote identity maps to a stable Memhub account. Internal roles live in Memhub. OAuth/Access credentials belong to the transport/control plane and should never enter prompts, TODOs, or project memory.
 
 ## Project isolation
 
-One account may contain many projects. Project A business facts must not automatically enter project B. Current explicit project evidence overrides stale bindings; ambiguous evidence can remain global-only.
+One account may contain many projects. Project A business facts must not automatically enter project B. Current explicit workspace/project evidence selects the business project; host conversation identity does not. Ambiguous evidence can remain global-only.
 
 L4 requires repeated evidence across project L3 artifacts. Skill is a separate capability channel and must not smuggle project facts across boundaries.
 
@@ -37,6 +37,10 @@ The connected AI harness performs semantic synthesis. Memhub owns evidence bound
 ## Capture and indexes
 
 Per-turn capture JSON is authoritative L1 evidence. `capture-index.sqlite` is rebuildable metadata used for filtering/counts/scheduling. Backups must not rely on the index alone.
+
+When a section must not enter long-term memory, mark it at the capture edge with `<private>…</private>` or `<no-memory>…</no-memory>`. Memhub removes the marked span before the durable capture is written and retains only count-style provenance that an exclusion occurred; the excluded body is not retained. If the entire turn is excluded, the event is treated as handled but is not ingested into Memory Core. An unclosed marker fails closed: everything from the marker to the end of the text is excluded. This is a “do not remember this span” mechanism, not a replacement for account ACLs, project isolation, or model-provider privacy controls.
+
+Capture adapters also follow a graceful-degradation boundary. If the durable capture is already stored but Memory Core temporarily returns a timeout, 429, or 5xx, HTTP Capture can return `202 accepted` with a recoverable pending state instead of blocking the upstream agent. 409 conflicts, scope errors, and schema errors still fail closed; availability must not hide consistency failures.
 
 ## Browser control plane
 

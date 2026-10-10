@@ -1,7 +1,6 @@
 import {
   isCaptureIngested,
   listCaptureEvents,
-  listDevices,
   readCaptureIngestIntentStatus,
   withCaptureIngestAttempt
 } from "./capture.js";
@@ -30,10 +29,7 @@ export async function recoverCaptureIngest(input: {
   if (!event.project_hint || await runtime.projects.resolve(runtime.accountId, event.project_hint) !== projectId) {
     throw new Error("capture project_hint does not match the explicitly resolved project");
   }
-  const device = (await listDevices(stateRoot, runtime.accountId)).find((item) =>
-    item.device_id === event.device_id && !item.revoked_at
-  );
-  if (!device) throw new Error("capture device missing or revoked; manual provenance review required");
+  const actor = { account_id: runtime.accountId, actor_id: event.actor_id };
   const markerExists = await isCaptureIngested(stateRoot, runtime.accountId, eventId);
   if (event.ingested && !markerExists) throw new Error("capture index/marker conflict; manual repair required");
   if (input.dryRun) {
@@ -43,11 +39,11 @@ export async function recoverCaptureIngest(input: {
       instructions: "No Memory Core write, marker change, or distillation enqueue occurred."
     };
   }
-  // Share the same per-event lock and durable intent as HTTP capture. The
+  // Share the same per-event lock and durable intent as the normal L1 path. The
   // snapshot is rechecked after lock acquisition before any Core write.
   const attempt = await withCaptureIngestAttempt({
     stateRoot, accountId: runtime.accountId, eventId, expectedEvent: event,
-    ingest: (current) => ingestCaptureIntoMemory({ event: current, device, runtime, projectId })
+    ingest: (current) => ingestCaptureIntoMemory({ event: current, actor, runtime, projectId })
   });
   if (!attempt.alreadyIngested && !attempt.result?.ingested) {
     throw new Error("capture ingestion did not complete");
@@ -58,7 +54,7 @@ export async function recoverCaptureIngest(input: {
     discovery = await discoverDistillationJobs({
       stateRoot, accountId: runtime.accountId,
       resolveProject: (hint) => runtime.projects.resolve(runtime.accountId, hint),
-      enqueue: true, conversationId: event.conversation_id
+      enqueue: true
     });
   } catch (error) {
     discovery_error = error instanceof Error ? error.message : String(error);
@@ -74,8 +70,8 @@ export async function recoverCaptureIngest(input: {
 /**
  * Automatic crash recovery is deliberately narrower than recover_ingest:
  * only captures with a matching durable ingest intent are eligible. Legacy
- * complete captures with no intent, conflicting intents, revoked devices and
- * unresolved projects remain manual-review cases.
+ * complete captures with no intent, conflicting intents, or unresolved
+ * projects remain manual-review cases.
  */
 export async function reconcileFrozenCaptureIngests(input: {
   stateRoot: string;
@@ -92,7 +88,6 @@ export async function reconcileFrozenCaptureIngests(input: {
     completeOnly: true,
     ingested: false
   });
-  const devices = await listDevices(stateRoot, runtime.accountId);
   let frozen = 0;
   let recovered = 0;
   let skipped = 0;
@@ -116,20 +111,14 @@ export async function reconcileFrozenCaptureIngests(input: {
         skipped += 1;
         continue;
       }
-      const device = devices.find((item) =>
-        item.device_id === event.device_id && !item.revoked_at
-      );
-      if (!device) {
-        skipped += 1;
-        continue;
-      }
+      const actor = { account_id: runtime.accountId, actor_id: event.actor_id };
       const attempt = await withCaptureIngestAttempt({
         stateRoot,
         accountId: runtime.accountId,
         eventId: event.event_id,
         expectedEvent: event,
         ingest: (current) => ingestCaptureIntoMemory({
-          event: current, device, runtime, projectId
+          event: current, actor, runtime, projectId
         })
       });
       if (attempt.alreadyIngested || attempt.result?.ingested) recovered += 1;

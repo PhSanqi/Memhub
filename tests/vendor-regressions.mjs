@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLlmClient } from "../vendor/memory-core/src/model/llm.js";
+import { skillMetaFromMemory } from "../vendor/memory-core/src/algorithm/plugin-algorithms.js";
 import { memoryAddKey } from "../vendor/memory-core/src/service/import/memory-import-pipeline.js";
 import { PanelReadModel } from "../vendor/memory-core/src/service/read-model/panel-read.js";
 import { RuntimeRepository } from "../vendor/memory-core/src/storage/repositories.js";
@@ -17,10 +18,27 @@ try {
   testRawTurnProjectFilter();
   testPanelItemsProjectFilterPropagation();
   testPanelItemsIncludeBody();
+  testSkillMetadataPrefersStructuredTitle();
   testConfigStatusRedactsSecrets();
   console.log("memhub-vendor-regressions: ok");
 } finally {
   await rm(root, { recursive: true, force: true });
+}
+
+function testSkillMetadataPrefersStructuredTitle() {
+  const memory = {
+    id: "skill-title-1",
+    memoryLayer: "Skill",
+    memoryKey: "skill.import:internal-key",
+    memoryValue: "Purpose: audit durable memory without mutating it.",
+    info: { title: "Memhub Long-Term Content Audit" },
+    properties: { internal_info: { skill: { status: "active", eta: 1 } } },
+    tags: [],
+    status: "activated",
+    createdAt: "2026-10-08T00:00:00.000Z",
+    updatedAt: "2026-10-08T00:00:00.000Z"
+  };
+  assert.equal(skillMetaFromMemory(memory)?.name, "Memhub Long-Term Content Audit");
 }
 
 function testConfigStatusRedactsSecrets() {
@@ -101,7 +119,7 @@ function testRawTurnProjectFilter() {
     migrate(db);
     const runtime = new RuntimeRepository(db);
     const at = "2026-09-20T00:00:00.000Z";
-    for (const projectId of ["atlas", "memhub"]) {
+    for (const projectId of ["alpha", "memhub"]) {
       const sessionId = `session-${projectId}`;
       const episodeId = `episode-${projectId}`;
       runtime.createSession({
@@ -156,7 +174,7 @@ function testRawTurnProjectFilter() {
       });
     }
     assert.equal(runtime.countRawTurns({ userId: "user-a" }), 2);
-    assert.equal(runtime.countRawTurns({ userId: "user-a", projectIds: ["atlas"] }), 1);
+    assert.equal(runtime.countRawTurns({ userId: "user-a", projectIds: ["alpha"] }), 1);
     assert.deepEqual(runtime.rawTurnStats({ userId: "user-a" }), {
       total: 2,
       succeeded: 2,
@@ -164,11 +182,11 @@ function testRawTurnProjectFilter() {
       captureManagedSucceeded: 0
     });
     assert.equal(runtime.countRawTurns({ userId: "user-a", sessionSource: "test" }), 2);
-    const atlasTurns = runtime.listRawTurns({ userId: "user-a", projectIds: ["atlas"] }, 10, 0);
-    assert.equal(atlasTurns.length, 1);
-    assert.equal(atlasTurns[0].projectId, "atlas");
-    assert.equal(atlasTurns[0].sessionSource, "test");
-    assert.equal(atlasTurns[0].userText, "user atlas");
+    const alphaTurns = runtime.listRawTurns({ userId: "user-a", projectIds: ["alpha"] }, 10, 0);
+    assert.equal(alphaTurns.length, 1);
+    assert.equal(alphaTurns[0].projectId, "alpha");
+    assert.equal(alphaTurns[0].sessionSource, "test");
+    assert.equal(alphaTurns[0].userText, "user alpha");
   } finally {
     db.close();
   }

@@ -27,24 +27,24 @@ function Get-MemhubInstallTask {
 function schtasks.exe {
   throw "No Task Scheduler mutation is allowed by this test"
 }
-$managedName = "Memhub-Server-Stack"
-$managedLauncher = Join-Path $runtime "stack-server.cmd"
+$managedName = "Memhub-Stack"
+$managedLauncher = Join-Path $runtime "stack.cmd"
 $script:fakeTasks[$managedName] = FakeTask $managedName $managedLauncher
-$matched = @(Assert-MemhubInstallTaskSet -Mode server -StateRoot $state)
+$matched = @(Assert-MemhubInstallTaskSet -StateRoot $state)
 if ($matched.Count -ne 1 -or $matched[0] -cne $managedName) {
   throw "Verified owner was not recognized"
 }
 # Exact path, principal, one action and empty arguments are mandatory.
 $script:fakeTasks[$managedName].Actions[0].Execute = Join-Path $runtime "another.cmd"
-ExpectRefusal { Assert-MemhubInstallTaskSet -Mode server -StateRoot $state } "another launcher"
+ExpectRefusal { Assert-MemhubInstallTaskSet -StateRoot $state } "another launcher"
 $script:fakeTasks[$managedName] = FakeTask $managedName $managedLauncher
 $script:fakeTasks[$managedName].Actions[0].Arguments = "/c something"
-ExpectRefusal { Assert-MemhubInstallTaskSet -Mode server -StateRoot $state } "unexpected action"
+ExpectRefusal { Assert-MemhubInstallTaskSet -StateRoot $state } "unexpected action"
 $script:fakeTasks[$managedName] = FakeTask $managedName $managedLauncher "S-1-5-18"
-ExpectRefusal { Assert-MemhubInstallTaskSet -Mode server -StateRoot $state } "another user"
+ExpectRefusal { Assert-MemhubInstallTaskSet -StateRoot $state } "another user"
 $script:fakeTasks[$managedName] = FakeTask $managedName $managedLauncher
 $script:fakeTasks["Memhub-Server"] = FakeTask "Memhub-Server" (Join-Path $runtime "gateway-server.cmd")
-ExpectRefusal { Assert-MemhubInstallTaskSet -Mode server -StateRoot $state } "Legacy Memhub tasks"
+ExpectRefusal { Assert-MemhubInstallTaskSet -StateRoot $state } "Legacy Memhub tasks"
 $script:fakeTasks.Remove("Memhub-Server")
 # Re-read immediately before removal: a modified registration must never be deleted.
 $script:fakeTasks[$managedName].Actions[0].Execute = Join-Path $runtime "changed.cmd"
@@ -62,7 +62,7 @@ if ($script:taskCalls.Count -ne 2 -or
   throw "Verified task removal did not target the exact expected registration"
 }
 $script:fakeTasks.Clear()
-$local = @(Assert-MemhubInstallTaskSet -Mode local -StateRoot $state)
+$local = @(Assert-MemhubInstallTaskSet -StateRoot $state)
 if ($local.Count -ne 0) { throw "Absent tasks unexpectedly reported as owned" }
 # v0.2.2 Complete uses memory.cmd/gateway.cmd/bridge.cmd for Local, but
 # memory-server.cmd/gateway-server.cmd for Server. Identifying a legitimate
@@ -74,8 +74,8 @@ foreach ($entry in @(
 )) {
   $script:fakeTasks[$entry.Name] = FakeTask $entry.Name (Join-Path $runtime $entry.File)
 }
-ExpectRefusal { Assert-MemhubInstallTaskSet -Mode local -StateRoot $state } "Legacy Memhub tasks"
+ExpectRefusal { Assert-MemhubInstallTaskSet -StateRoot $state } "Legacy Memhub tasks"
 $script:fakeTasks["Memhub-Local"].Actions[0].Execute = Join-Path $runtime "gateway-server.cmd"
-ExpectRefusal { Assert-MemhubInstallTaskSet -Mode local -StateRoot $state } "another launcher"
+ExpectRefusal { Assert-MemhubInstallTaskSet -StateRoot $state } "another launcher"
 $script:fakeTasks.Clear()
 Write-Output "memhub-windows-task-ownership-e2e: ok (no real scheduler changes)"

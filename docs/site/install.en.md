@@ -6,7 +6,7 @@ This page covers Local / Server × Linux / Windows and treats installation as mo
 
 ## Understand the boundaries first
 
-Memory Core is the private data plane and should remain loopback-only. Gateway is the identity/project/context boundary. Bridge is the machine/plugin entry point used by Local Edition. Do not expose Memory Core on the Internet to make an MCP client easier to configure.
+Memory Core is the private data plane and should remain loopback-only. The Memhub MCP runtime is the identity/project/context/tool boundary. Local clients connect to it directly on loopback; Server publishes that same `/mcp` endpoint through authenticated ingress. Do not expose Memory Core on the Internet to make an MCP client easier to configure.
 
 State under `MEMHUB_HOME` or the default state root is durable material. It is not just cache. Backups must consider raw capture, Memory Core durable state, project registry, account/device state, and bindings.
 
@@ -18,16 +18,15 @@ cd Memhub
 bash editions/local/linux/install.sh
 ```
 
-The installer creates systemd user units for Memory Core, local Gateway, and Bridge. Verify:
+The installer creates systemd user units for Memory Core and the local MCP runtime. Verify:
 
 ```bash
 systemctl --user status memhub-core.service
-systemctl --user status memhub-local.service
-systemctl --user status memhub-bridge.service
-ss -ltn | grep -E '17861|3001|18960'
+systemctl --user status memhub.service
+ss -ltn | grep -E '3001|18960'
 ```
 
-Plugins use `http://127.0.0.1:17861/mcp`.
+MCP clients use `http://127.0.0.1:3001/mcp` directly. Clients use the MCP endpoint directly.
 
 ## Local Windows
 
@@ -49,7 +48,7 @@ cd Memhub
 MEMHUB_PUBLIC_HOST=memory.example.com bash editions/server/linux/install.sh
 ```
 
-Verify `memhub-core.service` and `memhub-server.service`. The origin MCP is `http://127.0.0.1:3001/memhub/mcp`. Validate origin before adding Tunnel/Access.
+Verify `memhub-core.service`, `memhub.service`, and `memhub-stack.target`. The origin MCP is `http://127.0.0.1:3001/mcp`. Validate origin before adding Tunnel/Access; the public `/mcp` route should terminate at that same loopback runtime.
 
 ## Server Windows
 
@@ -65,7 +64,7 @@ Keep Gateway on the private origin and publish it through authenticated ingress.
 
 ## Cloudflare Access
 
-Cloudflare authenticates people or machines at the edge. Memhub still maps identity to a stable account and enforces internal roles. A machine Bridge may use a Cloudflare Service Token plus a separate revocable Memhub Device Token. Do not put either credential into prompts or project memory.
+Cloudflare authenticates remote clients at the edge. Memhub still maps identity to a stable account and enforces internal roles. OAuth/Access credentials must not be placed in prompts or project memory.
 
 Anonymous `/user` or `/admin` returning 401 can be correct. The security failure would be anonymous access being accepted when the deployment is intended to be protected.
 
@@ -104,7 +103,7 @@ Corporate proxy configuration should be explicit in the deployment environment. 
 
 ## Release verification
 
-Verify from the inside out: Core → Gateway/Bridge → authenticated proxy → public browser/MCP. Record status codes and the point at which behavior changes. A public landing page being 200 does not prove the MCP endpoint works, and a successful MCP handshake does not prove Admin authorization is correct.
+Verify from the inside out: Core → loopback MCP runtime → authenticated proxy → public browser/MCP. Record protocol results and the point at which behavior changes. A public landing page being 200 does not prove the MCP endpoint works, and a successful MCP handshake does not prove Admin authorization is correct.
 
 ## Platform differences
 

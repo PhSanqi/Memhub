@@ -16,18 +16,16 @@ Linux 先检查：
 
 ```bash
 systemctl --user status memhub-core.service
-systemctl --user status memhub-local.service
-systemctl --user status memhub-bridge.service
-systemctl --user status memhub-server.service
+systemctl --user status memhub.service
 ```
 
-Local 不会同时需要 server service；Server 也不需要 local/bridge 作为服务器核心。根据 Edition 选择对应 unit。再看端口：
+Local 不会同时需要 server service；Server 也不需要 local service。根据 Edition 选择对应 unit。再看端口：
 
 ```bash
-ss -ltn | grep -E '17861|3001|18960'
+ss -ltn | grep -E '3001|18960'
 ```
 
-如果 Core 不健康，先修 Core；Gateway/Bridge 依赖 Core，后面的失败可能只是连带现象。查看 journal：
+如果 Core 不健康，先修 Core；MCP runtime 依赖 Core，后面的失败可能只是连带现象。查看 journal：
 
 ```bash
 journalctl --user -u memhub-core.service -n 100 --no-pager
@@ -37,11 +35,11 @@ journalctl --user -u memhub-core.service -n 100 --no-pager
 
 ## 症状：Local MCP 连接失败
 
-Local 插件默认连 `http://127.0.0.1:17861/mcp`。先从本机验证 Bridge 是否监听，再确认 Bridge 配置指向本地 Gateway。不要把插件直接改成 18960 Memory Core。
+Local MCP 客户端直接连接 `http://127.0.0.1:3001/mcp`。先从本机验证 3001 `/mcp` 是否可用；不要把客户端直接改成 18960 Memory Core。
 
-如果本机浏览器能访问但插件不能，检查宿主 MCP 配置、代理/no_proxy 行为、插件版本和协议路径。保留用户全局代理设置，不要通过关闭代理来“修复”产品。
+如果本机浏览器能访问但 MCP 客户端不能，检查宿主 MCP 配置、代理/no_proxy 行为和协议路径。保留用户全局代理设置，不要通过关闭代理来“修复”产品。
 
-如果 17861 不存在但 3001 正常，问题在 Bridge；如果 3001 也不存在，继续向 Gateway/Core 上游定位。
+如果 3001 不存在，继续向 MCP runtime/Core 上游定位；不要额外增加代理层来绕过根因。
 
 ## 症状：Server 公网 401
 
@@ -53,9 +51,9 @@ Local loopback 管理使用独立 local-admin token。Cloudflare 请求不能伪
 
 ## 症状：404 或路径不一致
 
-Memhub 支持 base path rewrite。某些部署内部路径是 `/memhub/*`，公开 root base 可能映射为 `/`、`/user`、`/admin`、`/docs`。不要根据一个环境的 URL 猜另一个环境。
+Memhub 的网页 Control Plane 支持 base path rewrite，公开 root base 可能映射为 `/`、`/user`、`/admin`、`/docs`。不要根据一个环境的网页 URL 猜 MCP transport 路径。
 
-Server Origin MCP 路径是 `/memhub/mcp`，capture 是 `/memhub/capture`。网页和 MCP 是不同入口。确认反向代理没有把 `/mcp` 错误转到 Web UI 或反过来。
+Server Origin MCP 路径是 `/mcp`。网页和 MCP 是不同入口。确认反向代理把公网 `/mcp` 转到同一个 loopback MCP runtime，而不是 Web UI。
 
 ## 症状：账号不对
 
@@ -65,7 +63,7 @@ Server Origin MCP 路径是 `/memhub/mcp`，capture 是 `/memhub/capture`。网�
 
 ## 症状：项目上下文错误
 
-查看 Project Scope selector、当前 workspace/project evidence、Project Registry 的 slug/aliases/description，以及 conversation binding。当前轮显式项目证据应该覆盖陈旧 binding。
+查看 Project Scope selector、当前 workspace/project evidence、Project Registry 的 slug/aliases/description。宿主会话标识不参与业务项目选择。
 
 如果两个项目名称相近，补充描述与 alias 进行消歧。证据不足时接受 global-only，不要为了“体验顺滑”默认最近项目。
 
@@ -79,7 +77,7 @@ Server Origin MCP 路径是 `/memhub/mcp`，capture 是 `/memhub/capture`。网�
 
 ## 症状：L1 没有新证据
 
-沿 capture 路径检查：Harness 是否真的提交 turn、Bridge/capture endpoint 是否可达、Device Token 是否有效、事件是否已经 ingest。L1 authoritative source 是 per-turn capture JSON；索引只是可重建元数据。
+主 MCP 路径下先检查 Harness 是否真的执行了 `memmy_turn open` 与 `memmy_turn commit`，以及调用时是否给出正确的项目/workspace 证据。Legacy capture endpoint 在迁移期可以继续存在，但不是新的 Local/Remote MCP 主链。L1 authoritative source 是 per-turn evidence；索引只是可重建元数据。
 
 如果索引异常但原始 capture 在，系统可以重建索引。不要反过来把 index 当唯一事实来源。
 
@@ -163,7 +161,7 @@ Memory Core 对非 loopback 网络默认拒绝。检查是否有人把 remote mo
 
 恢复前先停止产生新写入的路径，明确备份/manifest。能修配置就不要回滚数据；能重建索引就不要覆盖 durable DB；只有 durable 数据或 schema 确认损坏时才使用 rollback snapshot。
 
-恢复后依次验证 Core integrity、Gateway、身份、项目、L1、Processing、L2/L3。不要只因为网页恢复 200 就宣布数据恢复完成。
+恢复后依次验证 Core integrity、MCP runtime、身份、项目、L1、Processing、L2/L3。不要只因为网页恢复 200 就宣布数据恢复完成。
 
 ## 最小诊断清单
 
@@ -180,7 +178,7 @@ npm test
 
 Linux 使用 systemd/journal，服务依赖关系更直观。Windows 重点检查 PowerShell installer 生成的启动路径、Node 路径、端口和用户权限。产品层诊断顺序保持一致。
 
-Local 多一层 Bridge 17861；Server 多一层远程认证代理。定位故障时把这些额外层分别加入链路，不要改变核心顺序。
+Local 直接走 loopback MCP；Server 只额外增加远程认证/Tunnel 传输层。两者最终进入同一个 MCP runtime，排错时不要人为引入第二条 MCP 链路。
 
 ## FAQ
 
@@ -194,7 +192,7 @@ Local 多一层 Bridge 17861；Server 多一层远程认证代理。定位故障
 先看失败原因和 evidence refs。删除记录会丢失诊断线索，并可能让上游问题继续产生新失败任务。
 
 ### 项目错了是不是删除项目最快？
-不是。先修 Context Router evidence/binding。逻辑删除会改变未来 routing，但不会自动修正历史 artifact。
+不是。先修当前 workspace/project evidence 与 Context Router。逻辑删除会改变未来 routing，但不会自动修正历史 artifact。
 
 ### 怎么判断修复真的成功？
 用原始失败场景重新执行，并记录状态码、账号、项目、L1/job/artifact 结果。不要用“页面看起来正常”替代链路验证。

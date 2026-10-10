@@ -9,7 +9,6 @@ if (process.platform !== "linux") {
 const suffix = `memhub-it-${process.pid}-${Date.now()}`;
 const core = `${suffix}-core.service`;
 const gateway = `${suffix}-gateway.service`;
-const bridge = `${suffix}-bridge.service`;
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: "utf8", ...options });
@@ -65,15 +64,14 @@ function launch(unit, dependencies = []) {
 function snapshot() {
   return {
     core: { pid: mainPid(core), active: active(core) },
-    gateway: { pid: mainPid(gateway), active: active(gateway) },
-    bridge: { pid: mainPid(bridge), active: active(bridge) }
+    gateway: { pid: mainPid(gateway), active: active(gateway) }
   };
 }
 
 function waitChanged(before, expectedChanged) {
   waitFor(() => {
     const current = snapshot();
-    return ["core", "gateway", "bridge"].every((name) => current[name].active) &&
+    return ["core", "gateway"].every((name) => current[name].active) &&
       expectedChanged.every((name) => current[name].pid !== before[name].pid);
   });
   return snapshot();
@@ -89,30 +87,21 @@ try {
   report.systemd = run("systemctl", ["--user", "--version"]).stdout.split(/\r?\n/)[0];
   launch(core);
   launch(gateway, [core]);
-  launch(bridge, [gateway]);
-  waitFor(() => active(core) && active(gateway) && active(bridge));
+  waitFor(() => active(core) && active(gateway));
 
   let before = snapshot();
   process.kill(before.core.pid, "SIGKILL");
-  let after = waitChanged(before, ["core", "gateway", "bridge"]);
-  report.scenarios.push({ fault: "core", before, after, expected_restarts: ["core", "gateway", "bridge"] });
+  let after = waitChanged(before, ["core", "gateway"]);
+  report.scenarios.push({ fault: "core", before, after, expected_restarts: ["core", "gateway"] });
 
   before = after;
   process.kill(before.gateway.pid, "SIGKILL");
-  after = waitChanged(before, ["gateway", "bridge"]);
+  after = waitChanged(before, ["gateway"]);
   if (after.core.pid !== before.core.pid) throw new Error("gateway failure unexpectedly restarted core");
-  report.scenarios.push({ fault: "gateway", before, after, expected_restarts: ["gateway", "bridge"] });
-
-  before = after;
-  process.kill(before.bridge.pid, "SIGKILL");
-  after = waitChanged(before, ["bridge"]);
-  if (after.core.pid !== before.core.pid || after.gateway.pid !== before.gateway.pid) {
-    throw new Error("bridge failure unexpectedly restarted an upstream service");
-  }
-  report.scenarios.push({ fault: "bridge", before, after, expected_restarts: ["bridge"] });
+  report.scenarios.push({ fault: "gateway", before, after, expected_restarts: ["gateway"] });
   report.ok = true;
   console.log(JSON.stringify(report, null, 2));
 } finally {
-  run("systemctl", ["--user", "stop", bridge, gateway, core], { allowFailure: true });
-  run("systemctl", ["--user", "reset-failed", bridge, gateway, core], { allowFailure: true });
+  run("systemctl", ["--user", "stop", gateway, core], { allowFailure: true });
+  run("systemctl", ["--user", "reset-failed", gateway, core], { allowFailure: true });
 }

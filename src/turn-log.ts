@@ -56,8 +56,6 @@ export async function upsertL1Turn(input: {
   stateRoot: string;
   runtime: MemhubRuntime;
   actorId: string;
-  actorName: string;
-  bindConversation?: boolean;
   turn: L1TurnInput;
 }): Promise<{
   turn: L1TurnView;
@@ -81,38 +79,11 @@ export async function upsertL1Turn(input: {
     throw new Error(`unknown project for account: ${event.project_hint}`);
   }
 
-  let stored = await storeCaptureEvent(input.stateRoot, {
+  const stored = await storeCaptureEvent(input.stateRoot, {
     account_id: input.runtime.accountId,
-    device_id: input.actorId
+    actor_id: input.actorId
   }, event);
-
-  const bindConversation = input.bindConversation !== false;
-  let projectId = stored.event.project_hint ??
-    (bindConversation
-      ? await input.runtime.router.currentProject(input.runtime.accountId, stored.event.conversation_id)
-      : null);
-  if (bindConversation && !stored.event.project_hint && projectId) {
-    const tagged = await storeCaptureEvent(input.stateRoot, {
-      account_id: input.runtime.accountId,
-      device_id: input.actorId
-    }, {
-      ...event,
-      project_hint: projectId
-    });
-    stored = {
-      created: stored.created,
-      updated: stored.updated || tagged.updated,
-      event: tagged.event
-    };
-  }
-  if (bindConversation && stored.event.project_hint) {
-    await input.runtime.router.bindProject(
-      input.runtime.accountId,
-      stored.event.conversation_id,
-      stored.event.project_hint
-    );
-    projectId = stored.event.project_hint;
-  }
+  const projectId = stored.event.project_hint ?? null;
 
   let ingestion: unknown;
   if (stored.event.capture_status === "complete" && captureIsFullyExcludedFromMemory(stored.event)) {
@@ -126,10 +97,9 @@ export async function upsertL1Turn(input: {
   ) {
     const result = await ingestCaptureIntoMemory({
       event: stored.event,
-      device: {
+      actor: {
         account_id: input.runtime.accountId,
-        device_id: input.actorId,
-        name: input.actorName
+        actor_id: input.actorId
       },
       runtime: input.runtime,
       projectId

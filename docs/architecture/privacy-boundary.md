@@ -43,7 +43,7 @@ egress paths and are default-denied by the core privacy boundary.
 
 ### Adapter-to-Memory transport
 
-Agent integration templates and workspace bridges may submit/recall memory through configured endpoints. Raw Memory Core remains loopback-only in supported Memhub deployments; remote hosts use the authenticated Memhub Gateway/Bridge boundary rather than exposing Memory Core directly.
+Configured MCP clients may submit and recall memory through the authenticated runtime. Raw Memory Core remains loopback-only in supported Memhub deployments; remote hosts use the authenticated Cloudflare-to-Memhub MCP boundary rather than exposing Memory Core directly.
 
 ### Installer/update traffic
 

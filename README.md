@@ -14,8 +14,8 @@ Memhub gives ChatGPT, Codex, MCP clients, and other AI harnesses a durable memor
 
 It keeps original conversation evidence, builds a chronological project history, distills durable project knowledge, maintains a carefully scoped cross-project profile, and exposes reusable Skills, project Todos, retrieval, provenance, and a browser workspace from one self-hosted runtime.
 
-- **Current release:** v0.2.6
-- **Product website and documentation:** https://service-1.example.com/
+- **Current release:** v1.0.0
+- **Public documentation:** https://phsanqi.github.io/Memhub/
 - **GitHub Pages (public, static mirror):** https://phsanqi.github.io/Memhub/
 - **Downloads:** https://github.com/PhSanqi/Memhub/releases
 
@@ -70,7 +70,7 @@ Project **Todos** live in the Project Registry. **Branches** are project-local w
 ## Runtime
 
 ```text
-AI Harness / MCP / Plugin
+AI Harness / MCP
           │
           ▼
       Memhub Gateway
@@ -139,13 +139,13 @@ See [Documentation](docs/README.md) for Server deployment, Windows, authenticati
 
 ## Connect
 
-Local Edition exposes the Bridge MCP endpoint at:
+Local Edition exposes the Memhub MCP runtime directly on loopback:
 
 ```text
-http://127.0.0.1:17861/mcp
+http://127.0.0.1:3001/mcp
 ```
 
-Server Edition exposes the authenticated MCP endpoint configured for your deployment. The bundled [Agent Plugin](adapters/plugin/README.md) provides MCP configuration plus optional lifecycle capture/recall integration for compatible hosts.
+Server Edition runs the same MCP runtime on loopback and publishes that endpoint through the configured authenticated reverse proxy, such as Cloudflare Access/Tunnel. Local and remote clients therefore use one tool schema and one Memhub state; both paths terminate at the same runtime.
 
 ## Everyday workflows
 
@@ -192,7 +192,7 @@ Architecture replacement is deliberately fail-closed: `memmy_project architectur
 
 Explicit user-authored L3/L4 changes use the same review principle. `memhub_memory plan` prepares the complete resulting L3 or L4 body. The model must show it in full, then wait for a new explicit confirmation turn. That confirmation is captured as L1 evidence before `memhub_memory execute` can commit the replacement. Existing L3/L4 state is fenced by an exact revision reference, so a stale approval cannot overwrite a newer concurrent update. This direct-authority path does not auto-promote L3 into L4.
 
-The [public product website](https://service-1.example.com/) and
+The [public documentation mirror](https://phsanqi.github.io/Memhub/) and
 [GitHub Pages mirror](https://phsanqi.github.io/Memhub/) document the
 product; neither provides a public login to another person's memory.
 Access the workspace of **your own installation** after configuring its

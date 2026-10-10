@@ -15,26 +15,26 @@ const candidate = join(repo, "scripts", "run-stack.mjs");
 const root = await mkdtemp(join(tmpdir(), "memhub-stop-timeout-"));
 const priorScripts = join(root, "previous-release", "scripts");
 const priorEntry = join(priorScripts, "run-stack.mjs");
-const lock = join(root, ".server-stack.lock");
+const lock = join(root, ".memhub-stack.lock");
 const stopFile = lock + ".stop";
 let owner;
 try {
   await mkdir(priorScripts, { recursive: true });
   await writeFile(priorEntry, "setInterval(() => {}, 1000);\n");
   const startedAt = new Date().toISOString();
-  owner = spawn(process.execPath, [priorEntry, "--mode", "server", "--home", root], {
+  owner = spawn(process.execPath, [priorEntry, "--home", root], {
     windowsHide: true, stdio: "ignore"
   });
   await new Promise((done) => setTimeout(done, 300));
   const token = "timeout-owner-" + process.pid;
   const original = JSON.stringify({
     pid: owner.pid, token, started_at: startedAt,
-    entrypoint: priorEntry, exec_path: process.execPath, home: root, mode: "server"
+    entrypoint: priorEntry, exec_path: process.execPath, home: root
   }) + "\n";
   await writeFile(lock, original);
   const before = Date.now();
   const stopper = spawn(process.execPath, [
-    candidate, "--mode", "server", "--home", root, "--action", "stop"
+    candidate, "--home", root, "--action", "stop"
   ], { cwd: repo, windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
   let error = "";
   stopper.stderr.on("data", (chunk) => { error += chunk.toString(); });

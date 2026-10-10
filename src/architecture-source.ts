@@ -223,18 +223,15 @@ export class FileProjectArchitectureSource implements ProjectArchitectureSource 
         results.push({ projectId: basename(child), dir: child, scope: "project-repo", format: "project-docs" });
       }
     }
-    // Current Linux workspaces are normally nested under
-    // <architecture-root>/codex-workspace/<project>. The old one-level scan
-    // missed those repositories entirely when architecture-root pointed at a
-    // user's home directory.
-    // Treat direct children of the known workspace container as project roots
-    // whenever they actually contain architecture docs. A repository marker is
-    // deliberately not required: the canonical project container may hold
-    // runtime/publish subtrees rather than being a Git repository itself.
-    const workspaceContainer = join(this.rootDir, "codex-workspace");
-    for (const child of await childDirs(workspaceContainer)) {
-      if (await hasProjectArchitectureDocs(child)) {
-        results.push({ projectId: basename(child), dir: child, scope: "project-repo", format: "project-docs" });
+    // Architecture roots often point at a home or shared parent directory.
+    // Discover one extra level only inside directories whose names explicitly
+    // identify them as workspace containers. This keeps nested project support
+    // without baking a host-specific container name into the runtime.
+    for (const workspaceContainer of await workspaceContainers(this.rootDir)) {
+      for (const child of await childDirs(workspaceContainer)) {
+        if (await hasProjectArchitectureDocs(child)) {
+          results.push({ projectId: basename(child), dir: child, scope: "project-repo", format: "project-docs" });
+        }
       }
     }
     const unique = new Map<string, typeof results[number]>();
@@ -254,15 +251,17 @@ export class FileProjectArchitectureSource implements ProjectArchitectureSource 
 
   private async projectWorkspaceDir(projectId: string): Promise<string | null> {
     const wanted = normalizeProjectFolder(projectId);
-    const workspaceContainer = join(this.rootDir, "codex-workspace");
     if (normalizeProjectFolder(basename(this.rootDir)) === wanted && await dirExists(this.rootDir)) {
       return this.rootDir;
     }
     // Canonical engineering workspaces take precedence over home-directory
     // state such as ~/.memhub. Never let a hidden state directory become a
     // Project Architecture write target merely because its basename matches.
-    for (const child of await childDirs(workspaceContainer)) {
-      if (normalizeProjectFolder(basename(child)) === wanted) return child;
+    for (const workspaceContainer of await workspaceContainers(this.rootDir)) {
+      for (const child of await childDirs(workspaceContainer)) {
+        if (normalizeProjectFolder(basename(child)) !== wanted) continue;
+        if (await isProjectRepositoryRoot(child) || await hasProjectArchitectureDocs(child)) return child;
+      }
     }
     for (const child of await childDirs(this.rootDir)) {
       if (basename(child).startsWith(".")) continue;
@@ -271,6 +270,16 @@ export class FileProjectArchitectureSource implements ProjectArchitectureSource 
     }
     return null;
   }
+}
+
+async function workspaceContainers(rootDir: string): Promise<string[]> {
+  const containers: string[] = [];
+  for (const child of await childDirs(rootDir)) {
+    const name = basename(child).toLowerCase();
+    if (name.startsWith(".")) continue;
+    if (/(^|[-_])workspaces?$/.test(name)) containers.push(child);
+  }
+  return containers;
 }
 
 interface ArchitectureDir {

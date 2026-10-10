@@ -6,7 +6,7 @@
 
 ## 安装前先理解三个边界
 
-第一，Memory Core 是私有数据层，默认绑定 loopback。不要把 18960 直接发布到公网。第二，Gateway 是远程访问与身份边界，Server Edition 对外只应该经过 Cloudflare Access 或其他认证反向代理。第三，Bridge 是插件与 Gateway 之间的机器入口，Local Edition 默认让插件连接 `127.0.0.1:17861`，从而避免插件直接持有内部 Memory Core 凭据。
+第一，Memory Core 是私有数据层，默认绑定 loopback，不要把 18960 直接发布到公网。第二，Memhub MCP runtime 默认监听 loopback 3001：Local 客户端直接连接它，Server 则通过 Cloudflare Access/Tunnel 等认证反向代理把公网 `/mcp` 转到同一个 runtime。Local 与 Remote 只有传输/认证路径不同，不维护第二套 MCP 实现。
 
 安装脚本会创建账号、token、状态目录和运行配置。请把 `MEMHUB_HOME` 或默认状态目录视为需要备份的数据，而不是临时缓存。Capture 原始证据、项目注册、会话绑定与 Memory Core 数据库承担不同职责，不能只备份其中一个 SQLite 文件就认为系统可恢复。
 
@@ -20,24 +20,23 @@ cd Memhub
 bash editions/local/linux/install.sh
 ```
 
-安装器默认使用 `MEMHUB_HOME=$HOME/.memhub`。它为 Memory Core 准备配置和本地 SQLite，Memory Core 监听 `127.0.0.1:18960`；Gateway 使用 3001；Bridge 使用 17861。systemd user units 包括 `memhub-core.service`、`memhub-local.service` 与 `memhub-bridge.service`。
+安装器默认使用 `MEMHUB_HOME=$HOME/.memhub`。它为 Memory Core 准备配置和本地 SQLite，Memory Core 监听 `127.0.0.1:18960`；Memhub MCP runtime 使用 3001。systemd user units 包括 `memhub-core.service`、`memhub.service` 与 `memhub-stack.target`。
 
 安装完成后依次检查：
 
 ```bash
 systemctl --user status memhub-core.service
-systemctl --user status memhub-local.service
-systemctl --user status memhub-bridge.service
-ss -ltn | grep -E '17861|3001|18960'
+systemctl --user status memhub.service
+ss -ltn | grep -E '3001|18960'
 ```
 
-成功状态不是“所有端口都对公网监听”，恰恰相反，默认应看到 loopback。插件统一使用：
+成功状态不是“所有端口都对公网监听”，恰恰相反，默认应看到 loopback。MCP 客户端使用：
 
 ```text
-http://127.0.0.1:17861/mcp
+http://127.0.0.1:3001/mcp
 ```
 
-如果 17861 正常而 3001/18960 只在本机可见，这是期望结构。不要为了让某个插件连接方便而把 18960 改到 `0.0.0.0`。
+3001 与 18960 都只在本机可见是期望结构。不要为了让客户端连接方便而把 18960 改到 `0.0.0.0`；AI 客户端只连接 3001 的 `/mcp`。
 
 ## Local Edition：Windows
 
@@ -51,13 +50,13 @@ cd Memhub
 powershell -ExecutionPolicy Bypass -File .\editions\local\windows\install.ps1
 ```
 
-Windows 安装器同样生成本地账号、Memory token 与 Device token，并准备 Gateway 与 Bridge。插件端地址仍然是：
+Windows 安装器同样生成本地账号和 Memory token，并准备 Memory Core 与 MCP runtime。客户端地址是：
 
 ```text
-http://127.0.0.1:17861/mcp
+http://127.0.0.1:3001/mcp
 ```
 
-如果系统有全局代理，不要修改用户的网络全局设置。loopback 请求应继续走本机，代理规则由系统和用户自己控制。排错时先直接验证 17861/3001 本机可达，再判断是否是宿主插件、浏览器或代理软件拦截。
+如果系统有全局代理，不要修改用户的网络全局设置。loopback 请求应继续走本机，代理规则由系统和用户自己控制。排错时先直接验证 3001 本机可达，再判断是否是宿主、浏览器或代理软件拦截。
 
 ## Server Edition：Linux
 
@@ -69,11 +68,10 @@ cd Memhub
 MEMHUB_PUBLIC_HOST=memory.example.com bash editions/server/linux/install.sh
 ```
 
-安装器创建 `memhub-core.service` 与 `memhub-server.service`。Memory Core 仍在 `127.0.0.1:18960`；Gateway origin 在：
+安装器创建与 Local 相同的 `memhub-core.service`、`memhub.service` 与 `memhub-stack.target`。Memory Core 仍在 `127.0.0.1:18960`；MCP origin 在：
 
 ```text
-http://127.0.0.1:3001/memhub/mcp
-http://127.0.0.1:3001/memhub/capture
+http://127.0.0.1:3001/mcp
 ```
 
 先在服务器上验证 origin。只有 origin 健康以后，再配置 Cloudflare Tunnel / Access。推荐排错顺序：本机进程 → loopback HTTP → Host/public-host 校验 → Tunnel → Access policy → 远程客户端 OAuth/MCP。这样任何一步失败都能明确归属。
@@ -98,7 +96,7 @@ Windows Server 的产品边界与 Linux Server 一致：Memory Core 私有、Gat
 
 Server Edition 推荐 Cloudflare Access 作为人类身份边界。Memhub 验证 Access JWT，再把外部身份映射到稳定 `account_id`。账号角色保存在 Memhub 内部，不信任浏览器随意传入的 role header。
 
-机器客户端与人类浏览器不是同一条凭据链。Bridge 可以使用 Cloudflare Service Token 通过边缘认证，同时在 origin 处使用可撤销的 Memhub Device Token 选择账号/设备。这两个凭据不应该进入 AI prompt，也不应该写入项目记忆。
+机器客户端与人类浏览器可以使用不同的认证交互，但最终都必须映射到稳定 `account_id`。远程 MCP 客户端在 Cloudflare/OAuth 边界完成认证；认证凭据不应该进入 AI prompt，也不应该写入项目记忆。
 
 匿名访问 `/user` 或 `/admin` 在受保护 Server 上返回 401 可能完全正常。判断服务是否故障，需要同时检查 origin、本地认证和 Cloudflare 边缘状态。
 
@@ -118,15 +116,15 @@ npm run state:audit
 
 ## MCP 与 Harness 连接
 
-Local 插件默认通过 Bridge：
+Local MCP 客户端直接连接 runtime：
 
 ```text
-http://127.0.0.1:17861/mcp
+http://127.0.0.1:3001/mcp
 ```
 
 Server 远程客户端使用经过认证保护的外部 MCP URL。不要把 origin `127.0.0.1:3001` 填到另一台机器上；它只对服务器本机有意义。
 
-仓库的 `adapters/plugin/` 包含 MCP 配置与 Memhub Skill。支持生命周期 Hook 的宿主可以进一步自动 recall/capture，但 Hook 能力取决于宿主版本。基础 MCP 连接和自动 Hook 是两个能力，不要在排错时混为一谈。
+客户端直接使用 MCP endpoint。Agent 每轮使用 Memhub 时应先调用 `memmy_context`，携带当前请求和显式 `project/workspace_project` 证据，再调用 `memmy_turn action=open`；最终回答前调用 `memmy_turn action=commit`。conversation/session id 仅为可选 provenance，不作为项目、Branch 或蒸馏批次的路由键。
 
 ## 升级前备份与 preflight
 
@@ -160,13 +158,13 @@ systemctl --user status memhub-core.service
 journalctl --user -u memhub-core.service -n 100 --no-pager
 ```
 
-Local 再检查 `memhub-local.service`、`memhub-bridge.service`；Server 检查 `memhub-server.service`。如果 core 失败，Gateway/Bridge 往往只是连带失败，不要先改外层 Cloudflare。
+Local 与 Server 都检查 `memhub.service`。如果 core 失败，MCP runtime 往往只是连带失败，不要先改外层 Cloudflare。
 
 如果 Node 路径、仓库路径或权限发生变化，systemd unit 仍可能引用旧位置。检查 unit 的 `ExecStart` 和环境文件，修复引用以后 `systemctl --user daemon-reload` 再重启。
 
 ## 常见失败：远程 404 / 401 / Host 拒绝
 
-404 首先检查 base path。Server Origin MCP 是 `/memhub/mcp`，网页入口是 `/memhub` 及其子路由；生产环境可能通过 base-path rewrite 映射为 `/`、`/user`、`/admin`。不要把一个环境的路径直接套到另一个环境。
+404 首先检查路径。Server Origin MCP 是 `/mcp`，网页入口仍是 `/memhub` 及其子路由；不要把浏览器页面路径与 MCP transport 路径混在一起。
 
 401 要区分匿名被拒绝和已认证仍被拒绝。匿名访问 Admin 被拒绝是正确安全行为；已登录账号没有 Admin role 时同样应该被拒绝。Host validation 失败则检查 `MEMHUB_PUBLIC_HOST` 与反向代理 Host header。
 
@@ -174,13 +172,13 @@ Local 再检查 `memhub-local.service`、`memhub-bridge.service`；Server 检查
 
 Linux 的优势是 systemd user service 与 journal 诊断明确；Windows 更依赖 PowerShell installer 和本地启动脚本。两者端口与数据语义相同。Server 与 Local 的差异主要是部署和认证，而不是 Memory Core 内部模型。
 
-如果你在 Windows 工作站上需要长期服务器记忆，也可以把 Server 放在 Linux VPS，然后让 Windows 仅作为 Bridge/客户端；没有必要为了 Windows 客户端而运行 Windows Server Edition。
+如果你在 Windows 工作站上需要长期服务器记忆，也可以把 Server 放在 Linux VPS，然后让 Windows 只作为远程 MCP 客户端；没有必要为了 Windows 客户端而运行 Windows Server Edition。
 
 ## 安全检查
 
 - Memory Core 18960 不应直接公网可达。
 - Gateway 公网入口必须经过认证层。
-- Device Token 与 Cloudflare Service Token 不应进入 AI prompt 或项目记忆。
+- OAuth/Access token 等认证凭据不应进入 AI prompt 或项目记忆。
 - Admin 高影响操作前确认当前 account/project scope。
 - 删除项目是逻辑删除，改变后续路由；不要把它当作“清空所有历史”。
 - Merge 会改变 canonical project 与 alias 关系，执行前检查 source/target ID。
@@ -196,8 +194,8 @@ Linux 的优势是 systemd user service 与 journal 诊断明确；Windows 更�
 ### Local 能以后迁移到 Server 吗？
 可以规划迁移，但应把 durable 状态、账号、项目注册与 Memory Core 一起视为迁移对象，并在迁移前后使用 preflight/fingerprint 验证。不要只复制一个数据库文件后假设全部状态已迁移。
 
-### 为什么安装器同时有 Gateway 和 Bridge？
-Gateway 负责 Memhub 的身份、项目、上下文与控制边界；Bridge 是插件侧更适合的机器入口。分层后设备凭据、代理凭据和 Memory Core token 可以保持不同作用域。
+### 为什么还要区分 Memory Core 和 MCP runtime？
+Memory Core 是私有持久化/检索数据层；MCP runtime 承担账号、项目、上下文、工具协议与远程身份边界。AI 客户端只连接 MCP runtime，Memory Core token 不暴露给客户端。
 
 ## 相关页面
 
@@ -205,7 +203,7 @@ Gateway 负责 Memhub 的身份、项目、上下文与控制边界；Bridge 是
 
 ## 安装后的发布验证清单
 
-部署完成后不要马上把地址交给所有客户端。先做一次“从内到外”的发布验证。Local 从 Memory Core 开始，确认 18960 仅 loopback；再确认 3001 Gateway；最后确认 17861 Bridge。Server 从 18960 Core 到 3001 origin，再到 Tunnel/Access，再到公网域名。每经过一层都记录状态码和响应标记，这样公网失败时能知道是哪一层开始不同。
+部署完成后不要马上把地址交给所有客户端。先做一次“从内到外”的发布验证。Local 从 Memory Core 开始，确认 18960 仅 loopback，再确认 3001 `/mcp`。Server 从 18960 Core 到 3001 `/mcp` origin，再到 Tunnel/Access 和公网 `/mcp`。每经过一层都记录协议结果，这样公网失败时能知道是哪一层开始不同。
 
 Server 的浏览器验证至少包括：首页或 Docs 公共页面返回 200；匿名 User/Admin 返回认证挑战或 401；合法 User 身份能进入 User；Admin role 才能进入 Admin；公网 MCP endpoint 能完成协议握手。不要用浏览器首页 200 代替 MCP 验证，也不要用 MCP 可用代替 Admin 权限验证。
 
@@ -213,7 +211,7 @@ Server 的浏览器验证至少包括：首页或 Docs 公共页面返回 200；
 
 ## 配置与状态目录应该怎么备份
 
-备份最少要覆盖 Memory Core durable 数据、原始 capture、账号/设备、Project Registry、conversation bindings 和迁移所需 manifest。可以重建的索引与可以重新下载的 release 文件优先级较低。每次大版本升级前先做完整 preflight，再执行文件级备份；如果只复制数据库而遗漏 Project Registry，恢复后可能出现“记忆还在但项目路由丢了”的半恢复状态。
+备份最少要覆盖 Memory Core durable 数据、L1 原始证据、账号、Project Registry、distillation state 和迁移所需 manifest。可以重建的索引与可以重新下载的 release 文件优先级较低。每次大版本升级前先做完整 preflight，再执行文件级备份；如果只复制数据库而遗漏 Project Registry，恢复后可能出现“记忆还在但项目路由丢了”的半恢复状态。
 
 备份文件本身同样包含敏感数据。Server 用户不要把备份直接放到公开对象存储；Local 用户也不要因为是“个人电脑”就忽略磁盘加密与备份权限。恢复测试应在隔离目录完成，不要拿唯一生产备份直接做实验。
 
@@ -237,7 +235,7 @@ Linux systemd user service 默认与用户 session/linger 配置相关。如果�
 
 ## 防火墙、代理与 DNS 验证
 
-Local Edition 正常情况下不需要为 17861/3001/18960 打开入站防火墙，因为客户端与服务都在本机 loopback。若安全软件阻止本机进程通信，应针对具体进程或 loopback 规则诊断，而不是把端口开放到局域网。Server Edition 同样不需要把 18960/3001 直接开放给公网；外部只需要到达认证反向代理/Tunnel。
+Local Edition 正常情况下不需要为 3001/18960 打开入站防火墙，因为客户端与服务都在本机 loopback。若安全软件阻止本机进程通信，应针对具体进程或 loopback 规则诊断，而不是把端口开放到局域网。Server Edition 同样不需要把 18960/3001 直接开放给公网；外部只需要到达认证反向代理/Tunnel。
 
 配置域名后，先确认 DNS 指向预期 Tunnel/代理，再确认 TLS 证书与 Access policy。公网域名能解析但 origin Host 不匹配时，Gateway 可能拒绝请求，这是安全校验正常工作。使用 `curl` 分别测试 origin 与 public URL，记录状态码差异。企业代理环境中如需 `HTTP_PROXY/HTTPS_PROXY/NO_PROXY`，应由部署环境明确设置；不要让安装脚本擅自重写用户全局代理。
 

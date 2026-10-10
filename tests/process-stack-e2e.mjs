@@ -22,7 +22,7 @@ const server=http.createServer((req,res)=>{
   if(Date.now()-started<readinessDelay){res.writeHead(503).end();return}
   res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify(kind==='core'
     ? {ok:true,serviceVersion:'test',protocolVersion:1,storage:{ready:true}}
-    : {ok:true,service:kind==='gateway'?'memhub':'memhub-bridge'}));
+    : {ok:true,service:'memhub'}));
 });
 server.listen(Number(port),'127.0.0.1');
 process.on('SIGTERM',()=>server.close(()=>process.exit(0)));
@@ -35,8 +35,8 @@ async function freePort() {
   await new Promise((resolveClosed) => server.close(resolveClosed));
   return port;
 }
-// Recovery stops three owned children serially (up to 3 s each), then starts
-// three services serially (up to 4 s each), in addition to restart backoff.
+// Recovery stops owned children serially, then starts services serially, in
+// addition to restart backoff.
 // A six-second assertion deadline is shorter than that supervised bound.
 async function until(predicate, timeoutMs = 25_000) {
   const deadline = Date.now() + timeoutMs;
@@ -52,8 +52,8 @@ async function until(predicate, timeoutMs = 25_000) {
 const events = [];
 let stack;
 try {
-  const ports = await Promise.all([freePort(), freePort(), freePort()]);
-  const specs = ["core", "gateway", "bridge"].map((kind, i) => ({
+  const ports = await Promise.all([freePort(), freePort()]);
+  const specs = ["core", "gateway"].map((kind, i) => ({
     name: kind,
     kind,
     entrypoint: fixture,
@@ -75,15 +75,15 @@ try {
   await Promise.all([stack.start(), stack.start()]);
   assert.equal(stack.status.ready, true);
   const firstPids = stack.status.pids;
-  assert.equal(Object.keys(firstPids).length, 3);
-  assert.deepEqual(events.filter((event) => event.type === "started").map((event) => event.service), ["core", "gateway", "bridge"]);
+  assert.equal(Object.keys(firstPids).length, 2);
+  assert.deepEqual(events.filter((event) => event.type === "started").map((event) => event.service), ["core", "gateway"]);
   for (const spec of specs) assert.equal((await probeService(spec.healthUrl, spec.kind)).ok, true);
 
   // A child crash restarts only the owned group, in dependency order.
   process.kill(firstPids.core, "SIGTERM");
   await until(() => stack.status.ready && stack.status.pids.core !== firstPids.core);
   const secondPids = stack.status.pids;
-  for (const kind of ["core", "gateway", "bridge"]) assert.notEqual(firstPids[kind], secondPids[kind]);
+  for (const kind of ["core", "gateway"]) assert.notEqual(firstPids[kind], secondPids[kind]);
   assert.ok(events.some((event) => event.type === "restart_scheduled"));
   assert.equal(stack.status.fatalReason, undefined);
   // Repeated crashes must eventually stop rather than create an endless

@@ -1,26 +1,25 @@
 // Isolated real-Core crash fixture. Exit after Core commit but before the marker.
 import { createMemhubRuntime } from "../dist/runtime.js";
 import { recoverCaptureIngest } from "../dist/capture-recovery.js";
-import { listCaptureEvents, listDevices, withCaptureIngestAttempt } from "../dist/capture.js";
+import { listCaptureEvents, withCaptureIngestAttempt } from "../dist/capture.js";
 import { ingestCaptureIntoMemory } from "../dist/capture-ingest.js";
 
-const [stateRoot, accountId, eventId, coreEndpoint, token, projectRegistryPath, bindingsPath, mode = "after-core"] = process.argv.slice(2);
-if (![stateRoot, accountId, eventId, coreEndpoint, token, projectRegistryPath, bindingsPath].every(Boolean)) {
-  throw new Error("isolated Core crash fixture requires seven positional arguments");
+const [stateRoot, accountId, eventId, coreEndpoint, token, projectRegistryPath, mode = "after-core"] = process.argv.slice(2);
+if (![stateRoot, accountId, eventId, coreEndpoint, token, projectRegistryPath].every(Boolean)) {
+  throw new Error("isolated Core crash fixture requires six positional arguments");
 }
 const runtime = createMemhubRuntime({
   accountId, ownerAccountId: accountId, ownerUserId: "local-user",
-  memoryEndpoint: coreEndpoint, memoryToken: token, projectRegistryPath, bindingsPath
+  memoryEndpoint: coreEndpoint, memoryToken: token, projectRegistryPath, controlRoot: stateRoot
 });
 if (mode === "after-marker") {
   const event = (await listCaptureEvents(stateRoot, accountId, { eventId }))[0];
-  const device = (await listDevices(stateRoot, accountId)).find((item) =>
-    item.device_id === event?.device_id && !item.revoked_at);
-  if (!event || !device) throw new Error("capture or device unavailable for marker crash fixture");
+  if (!event) throw new Error("L1 event unavailable for marker crash fixture");
+  const actor = { account_id: accountId, actor_id: event.actor_id };
   const attempt = await withCaptureIngestAttempt({
     stateRoot, accountId, eventId, expectedEvent: event,
     ingest: (current) => ingestCaptureIntoMemory({
-      event: current, device, runtime, projectId: "stack-smoke"
+      event: current, actor, runtime, projectId: "stack-smoke"
     })
   });
   if (attempt.alreadyIngested || !attempt.result?.ingested) throw new Error("expected first successful Core ingestion");

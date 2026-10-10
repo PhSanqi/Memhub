@@ -1,20 +1,23 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { captureIngestedAt, createDevice, isCaptureIngested, markCaptureIngested, readCaptureIngestIntentStatus, storeCaptureEvent, withCaptureIngestAttempt } from "../dist/capture.js";
+import { captureIngestedAt, isCaptureIngested, markCaptureIngested, readCaptureIngestIntentStatus, storeCaptureEvent, withCaptureIngestAttempt } from "../dist/capture.js";
 import { ingestCaptureIntoMemory } from "../dist/capture-ingest.js";
 import { recoverCaptureIngest } from "../dist/capture-recovery.js";
 import { auditDistillationPipeline } from "../dist/distillation-audit.js";
 import { discoverDistillationJobs } from "../dist/distillation-discovery.js";
 import { enqueueDistillationJob, getDistillationConfig, listDistillationJobs, setDistillationConfig } from "../dist/distillation-jobs.js";
-import { MemhubBridgeQueue } from "../dist/bridge.js";
 
 const root = await mkdtemp(join(tmpdir(), "memhub-discovery-"));
+
+function testActor(accountId, name) {
+  return { account_id: accountId, actor_id: `actor:${name}`, name };
+}
 try {
-  const { device } = await createDevice(root, "acct-discovery", "test harness");
+  const device = testActor("acct-discovery", "test-harness");
   async function capture(id, project = "alpha", status = "complete") {
     const stored = await storeCaptureEvent(root, device, {
       event_id: id, host: "test", conversation_id: project === "beta" ? "beta-chat" : "alpha-chat",
@@ -98,7 +101,7 @@ try {
   // failure before enqueue; a later scan recovers it once, without replaying
   // historical captures or creating duplicate jobs.
   const recoveryRoot = join(root, "recovery");
-  const { device: recoveryDevice } = await createDevice(recoveryRoot, "acct-recovery", "recovery harness");
+  const recoveryDevice = testActor("acct-recovery", "recovery-harness");
   await setDistillationConfig(recoveryRoot, { auto_enabled: true, turn_threshold: 2 });
   for (const id of ["recovery-1", "recovery-2"]) {
     await storeCaptureEvent(recoveryRoot, recoveryDevice, {
@@ -132,7 +135,7 @@ try {
   // The durable capture remains unmarked; retry must use the exact same Core
   // request IDs, mark ingestion once, and reconcile one downstream job.
   const coreRoot = join(root, "lost-core-response");
-  const { device: coreDevice } = await createDevice(coreRoot, "acct-core-retry", "core retry harness");
+  const coreDevice = testActor("acct-core-retry", "core-retry-harness");
   await setDistillationConfig(coreRoot, { auto_enabled: true, turn_threshold: 1 });
   const coreCapture = (await storeCaptureEvent(coreRoot, coreDevice, {
     event_id: "lost-response", host: "test", conversation_id: "core-retry-chat",
@@ -171,7 +174,7 @@ try {
     }
   };
   const ingestCore = () => ingestCaptureIntoMemory({
-    event: coreCapture, device: coreDevice, runtime: fakeRuntime, projectId: "alpha"
+    event: coreCapture, actor: coreDevice, runtime: fakeRuntime, projectId: "alpha"
   });
   await assert.rejects(ingestCore(), /injected response lost/);
   assert.equal(await isCaptureIngested(coreRoot, coreDevice.account_id, coreCapture.event_id), false);
@@ -199,7 +202,7 @@ try {
   // Competing scans with different batch boundaries must not double-consume
   // the same L1 turn simply because their batch hashes differ.
   const overlapRoot = join(root, "overlap");
-  const { device: overlapDevice } = await createDevice(overlapRoot, "acct-overlap", "concurrent harness");
+  const overlapDevice = testActor("acct-overlap", "concurrent-harness");
   await setDistillationConfig(overlapRoot, { auto_enabled: true, turn_threshold: 2 });
   const overlappingCaptures = [];
   for (const id of ["a", "b", "c"]) {
@@ -214,7 +217,7 @@ try {
   }
   const enqueueOverlap = (captures) => enqueueDistillationJob({
     stateRoot: overlapRoot, accountId: overlapDevice.account_id,
-    projectId: "alpha", conversationId: "overlap-chat", captures, reason: "turn_threshold"
+    projectId: "alpha", captures, reason: "turn_threshold"
   });
   const overlapResults = await Promise.all([
     enqueueOverlap(overlappingCaptures.slice(0, 2)),
@@ -230,11 +233,38 @@ try {
     "an unclaimed turn from the losing batch must be recovered by discovery");
   const overlapJobs = await listDistillationJobs(overlapRoot, overlapDevice.account_id);
   assert.deepEqual(overlapJobs.flatMap((job) => job.evidence_refs).sort(), ["l1:a", "l1:b", "l1:c"]);
+
+  // Host chat windows are provenance only. Complete L1 turns from different
+  // conversations but the same canonical project must share one project-level
+  // distillation threshold/batch.
+  const projectBatchRoot = join(root, "project-batch-across-conversations");
+  const projectBatchDevice = testActor("acct-project-batch", "project-batch-harness");
+  await setDistillationConfig(projectBatchRoot, { auto_enabled: true, turn_threshold: 2 });
+  for (const [id, conversation] of [["p1", "chat-one"], ["p2", "chat-two"]]) {
+    await storeCaptureEvent(projectBatchRoot, projectBatchDevice, {
+      event_id: id, host: "test", conversation_id: conversation,
+      continuity_id: conversation, timestamp: new Date().toISOString(),
+      project_hint: "alpha", user_text: `user ${id}`, assistant_text: `assistant ${id}`,
+      capture_status: "complete"
+    });
+    await markCaptureIngested(projectBatchRoot, projectBatchDevice.account_id, id);
+  }
+  const projectBatchReport = await discoverDistillationJobs({
+    stateRoot: projectBatchRoot, accountId: projectBatchDevice.account_id,
+    enqueue: true, resolveProject: async () => "alpha"
+  });
+  assert.equal(projectBatchReport.queued, 1);
+  const projectBatchJobs = await listDistillationJobs(projectBatchRoot, projectBatchDevice.account_id);
+  assert.equal(projectBatchJobs.length, 1);
+  assert.equal(projectBatchJobs[0].conversation_id, undefined);
+  assert.deepEqual(projectBatchJobs[0].evidence_refs.sort(), ["l1:p1", "l1:p2"]);
+  assert.deepEqual(projectBatchJobs[0].evidence.map((item) => item.conversation_id).sort(), ["chat-one", "chat-two"],
+    "conversation IDs remain evidence provenance but not the batch key");
   // Multiple discover consumers can race after seeing the same marker backlog.
   // Their in-memory snapshots are advisory; only the durable queue lock can
   // establish which L1 references have already been claimed.
   const concurrentRoot = join(root, "concurrent-reconciliation");
-  const { device: concurrentDevice } = await createDevice(concurrentRoot, "acct-concurrent-reconcile", "reconcile harness");
+  const concurrentDevice = testActor("acct-concurrent-reconcile", "reconcile-harness");
   await setDistillationConfig(concurrentRoot, { auto_enabled: true, turn_threshold: 2 });
   for (const id of ["r1", "r2", "r3", "r4"]) {
     await storeCaptureEvent(concurrentRoot, concurrentDevice, {
@@ -274,7 +304,7 @@ try {
   // A concurrent HTTP update must not change the Core request payload after
   // recover_ingest has begun, even before the durable .ingested marker exists.
   const raceRoot = join(root, "ingest-intent-race");
-  const { device: raceDevice } = await createDevice(raceRoot, "acct-race", "race harness");
+  const raceDevice = testActor("acct-race", "race-harness");
   const raceEvent = {
     event_id: "race-event", host: "test", conversation_id: "race-conversation",
     continuity_id: "race-conversation", timestamp: new Date().toISOString(),
@@ -346,8 +376,7 @@ try {
     "the unchanged payload must remain replayable using the same Core idempotency key");
 
   const auditRoot = join(root, "audit");
-  const auditBridgeRoot = join(root, "audit-bridge");
-  const { device: auditDevice } = await createDevice(auditRoot, "acct-audit", "audit harness");
+  const auditDevice = testActor("acct-audit", "audit-harness");
   await setDistillationConfig(auditRoot, { auto_enabled: true, turn_threshold: 2 });
   const auditCapture = async (id, { project = "alpha", ingested = true, complete = true } = {}) => {
     const stored = await storeCaptureEvent(auditRoot, auditDevice, {
@@ -368,18 +397,11 @@ try {
     stateRoot: auditRoot, accountId: auditDevice.account_id, projectId: "alpha",
     conversationId: "audit-chat", captures: [queuedAudit], reason: "manual"
   });
-  await new MemhubBridgeQueue(auditBridgeRoot).enqueue({
-    event_id: "bridge-backlog", host: "test", conversation_id: "bridge-chat",
-    continuity_id: "bridge-chat", timestamp: new Date().toISOString(),
-    project_hint: "alpha", user_text: "bridge user", assistant_text: "bridge assistant",
-    capture_status: "complete"
-  });
   const indexPath = join(auditRoot, "capture-index.sqlite");
   const beforeReadOnlyAudit = await stat(indexPath);
   const audit = await auditDistillationPipeline({
     stateRoot: auditRoot, accountId: auditDevice.account_id,
-    resolveProject: async (hint) => hint === "alpha" ? "alpha" : null,
-    bridgeRoot: auditBridgeRoot
+    resolveProject: async (hint) => hint === "alpha" ? "alpha" : null
   });
   assert.equal(audit.source, "read_only_durable_state");
   assert.equal(audit.capture.total, 5);
@@ -390,27 +412,6 @@ try {
   assert.equal(audit.evidence.ready_to_enqueue, 0);
   assert.equal(audit.evidence.waiting_for_idle_or_threshold, 1);
   assert.equal(audit.evidence.already_queued, 1);
-  assert.equal(audit.bridge.pending, 1);
-  assert.equal(audit.bridge.inspected, true);
-  // An upload may have already renamed a queued event to a .sending claim.
-  // Read-only production audits must count that claim as pending WITHOUT
-  // stealing it, rewriting its content or trying to flush it.
-  const queuedName = createHash("sha256").update("bridge-backlog").digest("hex");
-  const canonicalQueue = join(auditBridgeRoot, "queue", queuedName + ".json");
-  const claimedQueue = join(auditBridgeRoot, "queue",
-    queuedName + ".sending-1790400000000-12345-11111111-1111-4111-8111-111111111111.json");
-  await rename(canonicalQueue, claimedQueue);
-  const claimBeforeAudit = await stat(claimedQueue);
-  const claimedAudit = await auditDistillationPipeline({
-    stateRoot: auditRoot, accountId: auditDevice.account_id,
-    resolveProject: async (hint) => hint === "alpha" ? "alpha" : null,
-    bridgeRoot: auditBridgeRoot
-  });
-  assert.deepEqual(claimedAudit.bridge, { pending: 1, inspected: true },
-    "inflight Bridge claims are still durable backlog");
-  assert.equal((await stat(claimedQueue)).mtimeMs, claimBeforeAudit.mtimeMs,
-    "audit must not reclaim or mutate a Bridge claim");
-  await rename(claimedQueue, canonicalQueue);
   assert.equal(audit.recovery.complete_uningested_requires_review, 1);
   assert.deepEqual(audit.review_samples.complete_uningested, [{
     event_id: "audit-uningested", project_hint: "alpha", intent_status: "absent"
@@ -425,16 +426,15 @@ try {
   const afterIdle = await auditDistillationPipeline({
     stateRoot: auditRoot, accountId: auditDevice.account_id,
     resolveProject: async (hint) => hint === "alpha" ? "alpha" : null,
-    bridgeRoot: null, now: new Date(Date.now() + 31 * 60_000)
+    now: new Date(Date.now() + 31 * 60_000)
   });
   assert.equal(afterIdle.evidence.ready_to_enqueue, 1);
-  assert.deepEqual(afterIdle.bridge, { pending: null, inspected: false },
-    "omitting Bridge root must not silently inspect an unrelated default queue");
   assert.equal(afterIdle.evidence.waiting_for_idle_or_threshold, 0);
   assert.equal(afterIdle.recovery.durable_ingested_reconcilable, 1);
   assert.ok(afterIdle.warnings.some((warning) => warning.includes("enqueue threshold or idle cutoff")));
   assert.ok(audit.warnings.some((item) => item.includes("complete_uningested")));
-  assert.ok(audit.warnings.some((item) => item.includes("offline capture backlog")));
+  assert.equal(audit.warnings.some((item) => item.includes("offline capture backlog")), false,
+    "canonical distillation audit must not depend on retired side-channel queue state");
   assert.equal((await stat(indexPath)).mtimeMs, beforeReadOnlyAudit.mtimeMs,
     "a read-only audit must not run capture index migration/rebuild/write");
   const dirtyIndex = new Database(indexPath);
@@ -446,7 +446,7 @@ try {
   }
   await assert.rejects(auditDistillationPipeline({
     stateRoot: auditRoot, accountId: auditDevice.account_id,
-    resolveProject: async () => "alpha", bridgeRoot: null
+    resolveProject: async () => "alpha"
   }), /existing clean index; repair separately/,
   "read-only audit must refuse a dirty index instead of silently rebuilding it");
   const cleanIndex = new Database(indexPath);
@@ -460,13 +460,13 @@ try {
   await rm(join(auditRoot, "captures", sha(auditDevice.account_id), `${sha("audit-unqueued")}.json.ingested`));
   await assert.rejects(auditDistillationPipeline({
     stateRoot: auditRoot, accountId: auditDevice.account_id,
-    resolveProject: async () => "alpha", bridgeRoot: null
+    resolveProject: async () => "alpha"
   }), /index\/marker mismatch; repair separately/,
   "read-only audit must flag a missing durable marker rather than trusting stale index rows");
   const uninitializedRoot = join(root, "audit-without-index");
   const emptyAudit = await auditDistillationPipeline({
     stateRoot: uninitializedRoot, accountId: auditDevice.account_id,
-    resolveProject: async () => "alpha", bridgeRoot: null
+    resolveProject: async () => "alpha"
   });
   assert.equal(emptyAudit.capture.total, 0, "new account with no captures is an empty read-only audit");
   await assert.rejects(stat(join(uninitializedRoot, "capture-index.sqlite")), { code: "ENOENT" });
@@ -479,12 +479,12 @@ try {
   await rm(join(uninitializedRoot, "capture-index.sqlite"));
   await assert.rejects(auditDistillationPipeline({
     stateRoot: uninitializedRoot, accountId: auditDevice.account_id,
-    resolveProject: async () => "alpha", bridgeRoot: null
+    resolveProject: async () => "alpha"
   }), /existing clean index; repair separately/,
   "missing index alongside durable captures must fail closed rather than reindex during audit");
   await assert.rejects(stat(join(uninitializedRoot, "capture-index.sqlite")), { code: "ENOENT" });
   const intentAuditRoot = join(root, "audit-frozen-intents");
-  const { device: intentDevice } = await createDevice(intentAuditRoot, "acct-frozen", "frozen-intent-harness");
+  const intentDevice = testActor("acct-frozen", "frozen-intent-harness");
   const makeIntentEvent = async (id) => (await storeCaptureEvent(intentAuditRoot, intentDevice, {
     event_id: id, host: "test", conversation_id: "intent-chat", continuity_id: "intent-chat",
     timestamp: new Date().toISOString(), project_hint: "alpha",
@@ -512,8 +512,7 @@ try {
   const intentAudit = await auditDistillationPipeline({
     stateRoot: intentAuditRoot, accountId: intentDevice.account_id,
     resolveProject: async (hint) => hint === "alpha" ? "alpha" : null,
-    bridgeRoot: null
-  });
+      });
   assert.equal(intentAudit.recovery.complete_uningested_requires_review, 3);
   assert.equal(intentAudit.recovery.frozen_intent_without_marker, 1);
   assert.equal(intentAudit.recovery.legacy_without_intent, 1);
@@ -530,7 +529,7 @@ try {
     `${captureHash("legacy-without-intent")}.json`));
   await assert.rejects(auditDistillationPipeline({
     stateRoot: intentAuditRoot, accountId: intentDevice.account_id,
-    resolveProject: async () => "alpha", bridgeRoot: null
+    resolveProject: async () => "alpha"
   }), /ENOENT/,
   "an indexed capture with missing durable raw content must not be reported as safely recoverable");
   assert.equal((await stat(intentIndexPath)).mtimeMs, indexBeforeIntentAudit.mtimeMs);

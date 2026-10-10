@@ -34,11 +34,19 @@ const commonPaths = [
   "src",
   "scripts",
   "web-assets",
-  "deploy",
-  "adapters",
+  "deploy/cloudflared-memhub.service.d.conf.example",
+  "deploy/cloudflared-memhub.yml.example",
+  "deploy/install-tunnel-watchdog.sh",
+  "deploy/install-user-service.sh",
+  "deploy/memhub-core.service.in",
+  "deploy/memhub-stack.target.in",
+  "deploy/memhub-tunnel-watchdog.service.in",
+  "deploy/memhub-tunnel-watchdog.timer",
+  "deploy/memhub.service.in",
   "docs",
   "vendor",
   "editions/README.md",
+  "editions/common",
   "install-complete.sh",
   "install-complete.ps1"
 ];
@@ -46,8 +54,6 @@ const commonPaths = [
 const packageJson = JSON.parse(sourceText("package.json"));
 const version = String(packageJson.version ?? "").trim();
 if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`invalid package version: ${version || "<empty>"}`);
-const pluginJson = JSON.parse(sourceText("adapters/plugin/plugin.json"));
-if (pluginJson.version !== version) throw new Error(`version mismatch: package=${version}, plugin=${pluginJson.version}`);
 
 for (const path of [...commonPaths, "scripts/complete-runtime-smoke.cjs"]) assertSource(path);
 // These installer helpers are indirect PowerShell dot-sources; a missing
@@ -58,8 +64,6 @@ for (const path of [
   "scripts/windows-task-ownership.ps1",
   "scripts/windows-stack-owner.ps1",
   "scripts/windows-memory-credentials.ps1",
-  "scripts/windows-legacy-migration-audit.ps1",
-  "scripts/windows-legacy-migration-plan.ps1"
 ]) assertSource(path);
 for (const target of targets) {
   for (const edition of ["local", "server"]) {
@@ -222,23 +226,25 @@ async function installWindowsBetterSqlite(stage) {
 }
 
 async function validateWindowsStage(stage) {
+  const sharpPackage = JSON.parse(await readFile(
+    join(stage, "node_modules", "@img", "sharp-win32-x64", "package.json"),
+    "utf8"
+  ));
+  const sharpBinary = `node_modules/@img/sharp-win32-x64/lib/sharp-win32-x64-${sharpPackage.version}.node`;
   const required = [
     "runtime/node/node.exe",
     "scripts/run-stack.mjs",
     "scripts/windows-task-ownership.ps1",
     "scripts/windows-stack-owner.ps1",
     "scripts/windows-memory-credentials.ps1",
-    "scripts/windows-legacy-migration-audit.ps1",
-    "scripts/windows-legacy-migration-plan.ps1",
     "editions/local/windows/install.ps1",
     "editions/server/windows/install.ps1",
     "editions/local/windows/uninstall.ps1",
     "editions/server/windows/uninstall.ps1",
     "dist/mcp.js",
-    "dist/bridge.js",
     "node_modules/better-sqlite3/build/Release/better_sqlite3.node",
     "node_modules/sqlite-vec-windows-x64/vec0.dll",
-    "node_modules/@img/sharp-win32-x64/lib/sharp-win32-x64-0.35.4.node",
+    sharpBinary,
     "node_modules/onnxruntime-node/bin/napi-v6/win32/x64/onnxruntime_binding.node",
     "node_modules/onnxruntime-node/bin/napi-v6/win32/x64/onnxruntime.dll"
   ];
@@ -246,6 +252,7 @@ async function validateWindowsStage(stage) {
   for (const relative of [
     "runtime/node/node.exe",
     "node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+    sharpBinary,
     "node_modules/onnxruntime-node/bin/napi-v6/win32/x64/onnxruntime_binding.node"
   ]) {
     await assertPe32PlusX64(join(stage, relative));

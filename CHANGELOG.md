@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.0.0 — 2026-10-10
+
+Memhub 1.0 is the architecture-convergence release. It replaces the historical Plugin/Bridge side channel with one MCP runtime and one durable memory core, while keeping Local and Server deployments as two network views of the same runtime.
+
+### One runtime, two network entries
+
+- Local clients connect directly to the loopback MCP endpoint (default `127.0.0.1:3001/mcp`).
+- Server deployments expose that same MCP runtime through Cloudflare Access/Tunnel or another authenticated reverse proxy; there is no second MCP implementation.
+- The legacy Agent Plugin, Bridge process, port 17861, device-token ingress, and standalone `/capture`, `/memhub/context`, and `/memhub/lifecycle` side-channel endpoints are retired.
+- Local and Server installers now share one stack implementation. Server is Local plus authenticated public ingress, not a parallel runtime.
+
+### Explicit memory and project state
+
+- `conversation_id` is no longer a project-routing, Branch-binding, Todo, or L1→L2 grouping key. Project/workspace evidence is explicit and Branches are explicit project-local workstreams.
+- The L1 contract is `memmy_context → memmy_turn open → work → memmy_turn commit`; new L1 events use durable `actor_id` provenance and one deterministic Core session per event.
+- Existing historical L1 records using `device_id` remain readable without an eager data migration.
+- L2/L3/L4 exact evidence references, governed Project Architecture writes, explicit-user-authorized L3/L4 replacement, progressive result transport, hydration telemetry, consolidation, and project-state visualization are part of the unified runtime.
+
+### Runtime, release, and recovery
+
+- Linux and Windows Local/Server packages use the same Core + MCP process model and common installer logic.
+- Release builds clean `dist/` before compilation so removed runtime modules cannot survive as stale JavaScript artifacts.
+- Immutable runtime releases and fail-closed cutover checks keep the Memory Core and Gateway independently recoverable.
+- Crash recovery, distillation idempotency, privacy filtering, project isolation, installer ownership, and Cloudflare boundary checks remain covered by the current test matrix.
+
+### Breaking changes
+
+- Remove any client configuration that points to port 17861 or depends on the retired Plugin/Bridge lifecycle hooks.
+- Local MCP clients should connect directly to the loopback MCP runtime; remote clients should use the authenticated public MCP URL.
+- Automation that depended on the retired HTTP capture/context/lifecycle endpoints must move to MCP tools, primarily `memmy_context` and `memmy_turn`.
+
 ## v0.2.6 — 2026-09-27
 
 This release consolidates the L1 Capture → Core ingestion → distillation queue
@@ -16,7 +47,7 @@ and existing account/project identity boundaries remain unchanged.
 - Add fault-injection and real-Core integration regressions for Core/marker/
   enqueue crash windows, concurrent discovery and lease handling, L3/L4
   continuation and recovery, plus HTTP/MCP error classification.
-- Keep external active-writer guards fail-closed when the lock or owner
+- Keep external-writer safety guards fail-closed when the lock or owner
   cannot be confidently reconciled. No release script clears a writer lock.
 
 ### Install, recovery and cross-platform QA
@@ -34,7 +65,8 @@ and existing account/project identity boundaries remain unchanged.
   before adoption. Actual PowerShell installer refusal is exercised on Windows
   with a Task Scheduler shim. Real legacy task migration remains gated on
   exact target identity, backup and independent cutover verification.
-- Keep release evidence separate from deployment evidence. A package or code
+- Document release versus deployment evidence in
+  `docs/operations/release-acceptance-2026-09-27.md`. A package or code
   passing tests does not by itself certify a production cutover.
 
 ## v0.2.5 — 2026-09-25
@@ -50,7 +82,7 @@ Memhub 0.2.5 is a release-hygiene pass over the current v0.2 runtime. It does no
 
 ### Production and release alignment
 
-- The public documentation site is published through the repository's GitHub Pages deployment.
+- Server deployments expose the configured public host through the authenticated Tunnel boundary.
 - Linux systemd deployments use `memhub-stack.target` to own the Core → Gateway → optional Bridge lifecycle.
 - Release metadata and package manifests are regenerated from the clean public release tree.
 - GitHub repository metadata, documentation navigation, release notes, and downloadable artifacts are aligned to the same release.
@@ -106,9 +138,9 @@ Memhub 0.2.2 is the first release where the L1–L4 memory model, project routin
 ### Documentation and public project surface
 
 - GitHub README has been rewritten around the current product: project-aware memory, L1–L4, Project Registry/Todos, Branch, Retrieval, Skill and the Local/Server deployment choice.
-- Public documentation is now grouped under `docs/architecture/`, `docs/operations/`, `docs/maintainers/`, `docs/site/` and `docs/skills/`, with `docs/README.md` as the navigation source of truth.
-- Superseded repair/simplification documents are retained in Git history instead of the active documentation tree so historical implementation notes are not confused with Current Truth.
-- Public product documentation is mirrored through GitHub Pages; self-hosted instances use their own operator-chosen hostname.
+- Public documentation is now grouped under `docs/architecture/`, `docs/operations/`, `docs/maintainers/`, `docs/internal/` and `docs/archive/`, with `docs/README.md` as the navigation source of truth.
+- Superseded repair/simplification documents are retained only under `docs/archive/` so historical implementation notes are not confused with current architecture.
+- Server deployments use the configured public host; the historical plugin-prefixed route is retired.
 
 ## v0.2.0 — 2026-09-20
 

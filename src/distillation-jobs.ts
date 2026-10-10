@@ -5,6 +5,10 @@ import type { StoredCaptureEvent } from "./capture.js";
 import { withFileMutationLock } from "./file-mutation-lock.js";
 
 export type DistillationTarget = "l2" | "l3" | "l4" | "skill";
+export type DistillationFailureKind =
+  | "core_error"
+  | "ambiguous_core_commit"
+  | "invalid_legacy_evidence";
 
 export interface DistillationConfig {
   auto_enabled: boolean;
@@ -43,7 +47,7 @@ export interface DistillationJob {
   lease_token?: string;
   completed_at?: string;
   failure?: string;
-  failure_kind?: "core_error" | "ambiguous_core_commit";
+  failure_kind?: DistillationFailureKind;
   failed_at?: string;
   attempts?: number;
   result_kind?: DistillationTarget | "noop";
@@ -86,10 +90,36 @@ export async function setDistillationConfig(stateRoot: string, patch: Partial<Di
   });
 }
 
+export function effectiveDistillationFailureKind(
+  job: Pick<DistillationJob, "status" | "failure" | "failure_kind">
+): DistillationFailureKind | undefined {
+  if (job.failure_kind) return job.failure_kind;
+  if (job.status === "failed" && job.failure?.startsWith("invalid legacy rebuild evidence:")) {
+    return "invalid_legacy_evidence";
+  }
+  return undefined;
+}
+
+export function distillationJobIsRetryable(
+  job: Pick<DistillationJob, "status" | "failure" | "failure_kind">
+): boolean {
+  if (job.status !== "failed") return false;
+  const kind = effectiveDistillationFailureKind(job);
+  return kind !== "ambiguous_core_commit" && kind !== "invalid_legacy_evidence";
+}
+
+function withFailureClassification(job: DistillationJob): DistillationJob {
+  const failureKind = effectiveDistillationFailureKind(job);
+  return failureKind && failureKind !== job.failure_kind
+    ? { ...job, failure_kind: failureKind }
+    : job;
+}
+
 export async function listDistillationJobs(stateRoot: string, accountId?: string): Promise<DistillationJob[]> {
   const store = await loadStore(stateRoot);
   return store.jobs
     .filter((job) => !accountId || job.account_id === accountId)
+    .map(withFailureClassification)
     .sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 
@@ -135,7 +165,6 @@ export async function enqueueDistillationJob(input: {
   stateRoot: string;
   accountId: string;
   projectId: string | null;
-  conversationId: string;
   captures: StoredCaptureEvent[];
   reason: "manual" | "turn_threshold" | "idle";
 }): Promise<{ created: boolean; job: DistillationJob }> {
@@ -143,7 +172,6 @@ export async function enqueueDistillationJob(input: {
   const evidence: DistillationEvidenceItem[] = input.captures
     .filter((item) =>
       item.account_id === input.accountId &&
-      item.conversation_id === input.conversationId &&
       item.capture_status === "complete" &&
       item.user_text?.trim() &&
       item.assistant_text?.trim()
@@ -166,7 +194,6 @@ export async function enqueueDistillationJob(input: {
     accountId: input.accountId,
     target: "l2",
     projectId: input.projectId,
-    conversationId: input.conversationId,
     evidence,
     reason: input.reason
   });
@@ -579,8 +606,12 @@ export async function retryDistillationJob(stateRoot: string, accountId: string,
   let retried!: DistillationJob;
   await mutateJob(stateRoot, accountId, jobId, (job) => {
     if (job.status !== "failed") throw new Error("only failed distillation jobs can be retried");
-    if (job.failure_kind === "ambiguous_core_commit") {
+    const failureKind = effectiveDistillationFailureKind(job);
+    if (failureKind === "ambiguous_core_commit") {
       throw new Error("ambiguous Core commit requires manual reconciliation; ordinary retry is disabled");
+    }
+    if (failureKind === "invalid_legacy_evidence") {
+      throw new Error("invalid legacy migration evidence is superseded and cannot be retried; rebuild from current project-scoped evidence instead");
     }
     job.status = "pending";
     job.updated_at = new Date().toISOString();
@@ -627,7 +658,6 @@ async function enqueueJob(input: {
         job.account_id === input.accountId &&
         job.target === "l2" &&
         job.project_id === input.projectId &&
-        job.conversation_id === input.conversationId &&
         job.evidence_refs.some((ref) => refs.has(ref))
       );
       if (overlap) return { created: false, job: structuredClone(overlap) };
@@ -740,7 +770,7 @@ function migrateV1Job(item: Record<string, unknown>): DistillationJob {
     status: (["pending", "leased", "completed", "failed"].includes(String(item.status))
       ? item.status
       : "failed") as DistillationJob["status"],
-    reason: (["manual", "turn_threshold", "idle"].includes(String(item.reason))
+    reason: (["manual", "turn_threshold", "idle", "upstream", "migration"].includes(String(item.reason))
       ? item.reason
       : "manual") as DistillationJob["reason"],
     created_at: String(item.created_at ?? new Date(0).toISOString()),
@@ -750,7 +780,7 @@ function migrateV1Job(item: Record<string, unknown>): DistillationJob {
     ...(typeof item.lease_token === "string" ? { lease_token: item.lease_token } : {}),
     ...(typeof item.completed_at === "string" ? { completed_at: item.completed_at } : {}),
     ...(typeof item.failure === "string" ? { failure: item.failure } : {}),
-    ...(["core_error", "ambiguous_core_commit"].includes(String(item.failure_kind))
+    ...(["core_error", "ambiguous_core_commit", "invalid_legacy_evidence"].includes(String(item.failure_kind))
       ? { failure_kind: item.failure_kind as DistillationJob["failure_kind"] }
       : {}),
     ...(typeof item.failed_at === "string" ? { failed_at: item.failed_at } : {}),

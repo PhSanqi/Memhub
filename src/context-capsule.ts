@@ -2,7 +2,7 @@ import type { ProjectScopeResolution } from "./project-scope.js";
 import type { ContextRecallDiagnostics } from "./memory-source.js";
 
 export type ContextAuthority = "remembered" | "authoritative" | "observed";
-export type ContextScope = "global" | "project" | "conversation" | "capability";
+export type ContextScope = "global" | "project" | "capability";
 
 export interface ContextItem {
   id: string;
@@ -31,13 +31,12 @@ export interface ContextCapsuleInput {
   projectMemory?: readonly ContextItem[];
   reusableSkills?: readonly ContextItem[];
   projectArchitecture?: readonly ContextItem[];
-  recentSession?: readonly ContextItem[];
   retrievalDiagnostics?: ContextRecallDiagnostics;
   branchContext?: {
     branchId: string;
     name: string;
     goal: string;
-    source: "explicit" | "conversation_binding";
+    source: "explicit";
   } | null;
   maxContentBytes?: number;
   maxItemContentBytes?: number;
@@ -53,7 +52,6 @@ export interface ContextCapsule {
   projectMemory: ContextItem[];
   reusableSkills: ContextItem[];
   projectArchitecture: ContextItem[];
-  recentSession: ContextItem[];
   ambiguities: string[];
   contextBudget: {
     maxContentBytes: number;
@@ -67,7 +65,7 @@ export interface ContextCapsule {
     branchId: string;
     name: string;
     goal: string;
-    source: "explicit" | "conversation_binding";
+    source: "explicit";
   } | null;
 }
 
@@ -87,7 +85,6 @@ export function buildContextCapsule(input: ContextCapsuleInput): ContextCapsule 
   const resolvedProjectId = input.resolution.projectId;
 
   const globalMemory = filterItems(input.globalMemory, (item) => item.scope === "global");
-  const recentSession = filterItems(input.recentSession, (item) => item.scope === "conversation");
   const reusableSkills = filterItems(input.reusableSkills, (item) =>
     item.scope === "capability" && item.authority === "remembered");
 
@@ -105,8 +102,7 @@ export function buildContextCapsule(input: ContextCapsuleInput): ContextCapsule 
     globalMemory,
     projectMemory,
     reusableSkills,
-    projectArchitecture,
-    recentSession
+    projectArchitecture
   }, {
     maxContentBytes: normalizeBudget(input.maxContentBytes, DEFAULT_CONTEXT_CONTENT_BYTES, 16_000, 512_000),
     maxItemContentBytes: normalizeBudget(input.maxItemContentBytes, DEFAULT_CONTEXT_ITEM_BYTES, 4_000, 128_000)
@@ -122,7 +118,6 @@ export function buildContextCapsule(input: ContextCapsuleInput): ContextCapsule 
     projectMemory: budgeted.items.projectMemory,
     reusableSkills: budgeted.items.reusableSkills,
     projectArchitecture: budgeted.items.projectArchitecture,
-    recentSession: budgeted.items.recentSession,
     ambiguities: input.resolution.source === "ambiguous"
       ? [...input.resolution.candidates]
       : [],
@@ -133,19 +128,18 @@ export function buildContextCapsule(input: ContextCapsuleInput): ContextCapsule 
 }
 
 type ContextCollections = Pick<ContextCapsule,
-  "globalMemory" | "projectMemory" | "reusableSkills" | "projectArchitecture" | "recentSession">;
+  "globalMemory" | "projectMemory" | "reusableSkills" | "projectArchitecture">;
 
 function applyContextBudget(
   input: ContextCollections,
   options: { maxContentBytes: number; maxItemContentBytes: number }
 ): { items: ContextCollections; budget: ContextCapsule["contextBudget"] } {
-  const keys = ["globalMemory", "projectMemory", "reusableSkills", "projectArchitecture", "recentSession"] as const;
+  const keys = ["globalMemory", "projectMemory", "reusableSkills", "projectArchitecture"] as const;
   const output: ContextCollections = {
     globalMemory: [],
     projectMemory: [],
     reusableSkills: [],
-    projectArchitecture: [],
-    recentSession: []
+    projectArchitecture: []
   };
   const cursor = new Map<(typeof keys)[number], number>(keys.map((key) => [key, 0]));
   let remaining = options.maxContentBytes;

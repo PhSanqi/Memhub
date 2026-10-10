@@ -21,14 +21,12 @@ import type { MemhubRuntime } from "./runtime.js";
 export async function auditDistillationControl(input: {
   stateRoot: string;
   runtime: MemhubRuntime;
-  bridgeRoot: string | null;
 }) {
-  const { stateRoot, runtime, bridgeRoot } = input;
+  const { stateRoot, runtime } = input;
   return auditDistillationPipeline({
     stateRoot,
     accountId: runtime.accountId,
-    resolveProject: (hint) => runtime.projects.resolve(runtime.accountId, hint),
-    bridgeRoot
+    resolveProject: (hint) => runtime.projects.resolve(runtime.accountId, hint)
   });
 }
 
@@ -46,19 +44,17 @@ export async function discoverDistillationControl(input: {
   stateRoot: string;
   runtime: MemhubRuntime;
   dryRun: boolean;
-  conversationId?: string;
 }) {
-  const { stateRoot, runtime, conversationId, dryRun } = input;
+  const { stateRoot, runtime, dryRun } = input;
   const report = await discoverDistillationJobs({
     stateRoot,
     accountId: runtime.accountId,
     resolveProject: (hint) => runtime.projects.resolve(runtime.accountId, hint),
-    enqueue: !dryRun,
-    ...(conversationId ? { conversationId } : {})
+    enqueue: !dryRun
   });
   return {
     ...report,
-    instructions: "Discover scans only completed, ingested, project-resolved captures. It cannot read uncaptured ChatGPT history or invoke a model."
+    instructions: "Discover scans completed, ingested, project-resolved captures and batches them by project, not by host conversation. It cannot read uncaptured ChatGPT history or invoke a model."
   };
 }
 
@@ -72,7 +68,6 @@ export async function nextDistillationControl(input: {
   scope?: string;
   project?: string;
   workspaceProject?: string;
-  conversationId?: string;
   evidenceOffset: number;
   evidenceChunkChars: number;
   leaseSeconds?: number;
@@ -80,7 +75,6 @@ export async function nextDistillationControl(input: {
   resolveProjectScope: (scope: {
     project?: string;
     workspaceProject?: string;
-    conversationId?: string;
   }) => Promise<string | null>;
   renderNext: (
     job: DistillationJob, evidenceOffset: number, evidenceChunkChars: number
@@ -110,8 +104,7 @@ export async function nextDistillationControl(input: {
   else if (input.scope === "project") {
     projectFilter = await input.resolveProjectScope({
       project: input.project,
-      workspaceProject: input.workspaceProject,
-      conversationId: input.conversationId
+      workspaceProject: input.workspaceProject
     });
   }
   const leaseInput = {

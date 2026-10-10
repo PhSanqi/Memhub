@@ -122,7 +122,7 @@ bash "$INSTALLER"
 echo "[memhub] installation complete"
 echo "[memhub] app files: $TARGET"
 if [[ "$EDITION" == "local" ]]; then
-  echo "[memhub] MCP: http://127.0.0.1:17861/mcp"
+  echo "[memhub] MCP: http://127.0.0.1:3001/mcp"
 else
-  echo "[memhub] Origin MCP: http://127.0.0.1:3001/memhub/mcp"
+  echo "[memhub] Origin MCP: http://127.0.0.1:3001/mcp"
 fi

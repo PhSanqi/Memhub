@@ -14,8 +14,8 @@ Memhub 为 ChatGPT、Codex、MCP 客户端和其他 AI Harness 提供跨对话�
 
 它从原始对话证据出发，构建项目时间线、长期项目知识和跨项目稳定画像，并把 Skill、Todo、检索、来源追踪与浏览器工作区统一到一个可自托管运行时中。
 
-- **当前版本：** v0.2.6
-- **产品官网与文档：** https://service-1.example.com/
+- **当前版本：** v1.0.0
+- **公开文档：** https://phsanqi.github.io/Memhub/
 - **GitHub Pages 静态展示镜像：** https://phsanqi.github.io/Memhub/
 - **下载：** https://github.com/PhSanqi/Memhub/releases
 
@@ -69,7 +69,7 @@ Skill  ─────────────── 与 L1–L4 正交的可复
 ## 运行结构
 
 ```text
-AI Harness / MCP / Plugin
+AI Harness / MCP
           │
           ▼
       Memhub Gateway
@@ -137,13 +137,13 @@ Server、Windows、认证、Cloudflare、迁移和架构说明统一从 [文档�
 
 ## 连接 AI 客户端
 
-Local Edition 默认 Bridge MCP：
+Local Edition 直接使用 Memhub runtime 的 loopback MCP：
 
 ```text
-http://127.0.0.1:17861/mcp
+http://127.0.0.1:3001/mcp
 ```
 
-Server Edition 使用部署时配置的认证 MCP 地址。仓库内置的 [Agent Plugin](adapters/plugin/README.md) 提供 MCP 配置，并可在兼容 Host 上接入对话生命周期 capture / recall。
+Server Edition 在本机运行同一个 MCP runtime，再通过 Cloudflare Access/Tunnel 等认证反向代理发布。Local 与 Remote 因此共享同一套工具 schema 和 Memhub 状态，两条路径最终进入同一个 runtime。
 
 ## 日常使用
 
@@ -190,7 +190,7 @@ Architecture 替换采用 fail-closed 流程：`memmy_project architecture_plan`
 
 用户明确提出新增或修改 L3/L4 规则时，使用同样的全文确认原则。`memhub_memory plan` 先生成合并后的完整 L3/L4 正文，模型必须逐字完整展示，再等待用户在新的对话回合明确确认；这个确认回合会先作为 L1 证据保存，然后 `memhub_memory execute` 才能提交。已有 L3/L4 会用 exact revision 做并发 fencing，因此旧授权不能覆盖后来发生的新修改。这条用户直接 authority 路径也不会自动把 L3 推升为 L4。
 
-[公开产品官网](https://service-1.example.com/)与
+[公开文档镜像](https://phsanqi.github.io/Memhub/)与
 [GitHub Pages 静态镜像](https://phsanqi.github.io/Memhub/)提供产品介绍和文档，
 不提供其他用户的记忆登录入口。请在完成自己的实例部署与身份认证后，
 访问该实例的工作区。

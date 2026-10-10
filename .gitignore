@@ -5,6 +5,9 @@ release/
 .playwright-mcp/
 .review-runtime/
 _public-site/
+runtime-releases/
+.protected-backups/
+.migration-snapshot/
 *.log
 *.sqlite
 *.sqlite-shm

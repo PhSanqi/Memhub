@@ -11,17 +11,14 @@ fi
 BASE_PATH="${BASE_PATH:-/memhub}"
 if [[ "$BASE_PATH" == "/" ]]; then
   DEFAULT_HTTP_PATH="/mcp"
-  DEFAULT_CAPTURE_PATH="/capture"
   HEALTH_PATH="/health"
 else
   BASE_PATH="/${BASE_PATH#/}"
   BASE_PATH="${BASE_PATH%/}"
   DEFAULT_HTTP_PATH="$BASE_PATH/mcp"
-  DEFAULT_CAPTURE_PATH="$BASE_PATH/capture"
   HEALTH_PATH="$BASE_PATH/health"
 fi
 HTTP_PATH="${MEMHUB_HTTP_PATH:-$DEFAULT_HTTP_PATH}"
-CAPTURE_PATH="${MEMHUB_CAPTURE_PATH:-$DEFAULT_CAPTURE_PATH}"
 
 if [[ -z "$NODE" ]]; then
   echo "node was not found" >&2
@@ -55,7 +52,6 @@ sed \
   -e "s|@NODE@|$(escape_sed "$NODE")|g" \
   -e "s|@ARCHITECTURE_ROOT@|$(escape_sed "$ARCHITECTURE_ROOT")|g" \
   -e "s|@HTTP_PATH@|$(escape_sed "$HTTP_PATH")|g" \
-  -e "s|@CAPTURE_PATH@|$(escape_sed "$CAPTURE_PATH")|g" \
   -e "s|@HEALTH_PATH@|$(escape_sed "$HEALTH_PATH")|g" \
   "$MEMHUB_DIR/deploy/memhub.service.in" \
   > "$HOME/.config/systemd/user/memhub.service"

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { DeviceRecord, StoredCaptureEvent } from "./capture.js";
+import type { CaptureActor, StoredCaptureEvent } from "./capture.js";
 import type { MemhubRuntime } from "./runtime.js";
 
 export interface CaptureIngestResult {
@@ -13,17 +13,17 @@ export interface CaptureIngestResult {
 /**
  * Promote a completed capture event into Memory Core.
  *
- * Partial hook events remain in Memhub raw capture storage until the same
- * event_id is completed by a later hook. Capture never triggers recall:
- * automatic upload is a write path, not a context-request path.
+ * Partial L1 events remain in Memhub raw turn storage until the same event_id
+ * is completed. Ingestion never triggers recall: this is a write path, not a
+ * context-request path.
  */
 export async function ingestCaptureIntoMemory(input: {
   event: StoredCaptureEvent;
-  device: Pick<DeviceRecord, "device_id" | "account_id" | "name">;
+  actor: CaptureActor;
   runtime: MemhubRuntime;
   projectId: string | null;
 }): Promise<CaptureIngestResult> {
-  const { event, device, runtime, projectId } = input;
+  const { event, actor, runtime, projectId } = input;
   const userText = event.user_text?.trim();
   const assistantText = event.assistant_text?.trim();
   if (!userText || !assistantText || event.capture_status !== "complete") {
@@ -34,10 +34,10 @@ export async function ingestCaptureIntoMemory(input: {
     };
   }
 
-  // Memory sessions are project-scoped. A host conversation that switches
-  // projects therefore gets a new Memory session while retaining its host
-  // conversation_id in provenance/bindings.
-  const sessionId = captureSessionId(runtime.accountId, event.host, event.continuity_id, projectId);
+  // Memory Core requires a session envelope, but Memhub does not use host
+  // conversation/session identity as durable routing state. Give each L1
+  // event its own deterministic Core session so replay remains idempotent.
+  const sessionId = captureSessionId(runtime.accountId, event.event_id);
   const turnId = deterministicId(
     "mhcap_turn",
     `${runtime.accountId}\0${event.host}\0${event.event_id}`
@@ -47,7 +47,7 @@ export async function ingestCaptureIntoMemory(input: {
     profileId: "default",
     userId: runtime.userId,
     tenantId: runtime.accountId,
-    sessionKey: `${event.host}:${event.continuity_id}`,
+    sessionKey: `event:${event.event_id}`,
     ...(projectId ? { projectId } : {}),
     ...(event.workspace_id ? { workspaceId: event.workspace_id } : {}),
     ...(event.workspace_path ? { workspacePath: event.workspace_path } : {})
@@ -72,8 +72,8 @@ export async function ingestCaptureIntoMemory(input: {
     ...(event.workspace_id ? { workspaceId: event.workspace_id } : {}),
     ...(event.workspace_path ? { workspacePath: event.workspace_path } : {}),
     meta: {
-      device_id: device.device_id,
-      device_name: device.name,
+      actor_id: actor.actor_id,
+      actor_name: event.host,
       host: event.host,
       conversation_id: event.conversation_id,
       continuity_id: event.continuity_id
@@ -100,7 +100,7 @@ export async function ingestCaptureIntoMemory(input: {
     artifacts: [{
       type: "memhub_capture",
       event_id: event.event_id,
-      device_id: device.device_id,
+      actor_id: actor.actor_id,
       ...(event.host_version ? { host_version: event.host_version } : {}),
       ...(event.turn_id ? { original_turn_id: event.turn_id } : {}),
       continuity_id: event.continuity_id,
@@ -126,8 +126,8 @@ function deterministicId(prefix: string, source: string): string {
   return `${prefix}_${createHash("sha256").update(source, "utf8").digest("hex").slice(0, 40)}`;
 }
 
-export function captureSessionId(accountId: string, host: string, continuityId: string, projectId: string | null): string {
-  return deterministicId("mhcap_session", `${accountId}\0${host}\0${continuityId}\0${projectId ?? "global"}`);
+export function captureSessionId(accountId: string, eventId: string): string {
+  return deterministicId("mhcap_session", `${accountId}\0${eventId}`);
 }
 
 function unique(values: readonly string[]): string[] {

@@ -2,13 +2,13 @@
 
 **For first-time users:** choose Local or Server and install it on your own device or server before connecting an AI client. This public site and the GitHub Pages mirror explain the product; they do not provide a shared memory account. Your workspace lives only in your own authenticated installation. The homepage preview is fictional.
 
-This page takes the shortest path from a clean machine to one verified continuity loop. The goal is not to study every internal component first. Choose Local or Server Edition, start Memhub, connect an MCP/Bridge-capable harness, produce real project evidence, then open a new chat or device and confirm that project scope, follow-up, chronology, and evidence remain available.
+This page takes the shortest path from a clean machine to one verified continuity loop. Choose Local or Server Edition, start Memhub, connect an MCP-capable harness, produce real project evidence, then open a new chat or device and confirm that project scope, follow-up, chronology, and evidence remain available.
 
 ## Choose Local or Server
 
-Use Local Edition when one workstation is enough and you want the entire runtime on that machine. Memory Core, Gateway, and Bridge stay on loopback; plugins normally connect to `http://127.0.0.1:17861/mcp`. Local is the best first installation because it removes the reverse-proxy and remote-auth layers from the initial problem.
+Use Local Edition when one workstation is enough and you want the entire runtime on that machine. Memory Core and the Memhub MCP runtime stay on loopback; MCP clients connect directly to `http://127.0.0.1:3001/mcp`. Local is the best first installation because it removes the reverse-proxy and remote-auth layers from the initial problem.
 
-Use Server Edition when several devices or hosted MCP clients need one durable source of truth. Memory Core and Gateway still run on server loopback. Publish the Gateway only through an authenticated reverse proxy such as Cloudflare Access. Cloudflare is an identity/transport boundary, not the long-term-memory database.
+Use Server Edition when several devices or hosted MCP clients need one durable source of truth. Memory Core and the same MCP runtime still run on server loopback. Publish `/mcp` only through an authenticated reverse proxy such as Cloudflare Access/Tunnel. Cloudflare is an identity/transport boundary, not a second Memhub implementation.
 
 Release builds provide two installation paths. **Complete** packages bundle Node.js, production dependencies, and prebuilt output for one target OS, so Node/npm do not need to be preinstalled. The repository `install.sh` / `install.ps1` scripts remain the **convenience/source** path and may install dependencies or build on the target host.
 
@@ -46,7 +46,7 @@ cd Memhub
 powershell -ExecutionPolicy Bypass -File .\editions\local\windows\install.ps1
 ```
 
-On Linux, verify `memhub-core.service`, `memhub-local.service`, and `memhub-bridge.service`. Memory Core normally listens on 18960, the internal Gateway on 3001, and Bridge on 17861. Your plugin should use Bridge rather than exposing Memory Core directly.
+On Linux, verify `memhub-core.service`, `memhub.service`, and `memhub-stack.target`. Memory Core normally listens on 18960 and the MCP runtime on 3001. The AI client connects to the MCP runtime, never directly to Memory Core.
 
 ## Install Server Edition
 
@@ -66,7 +66,7 @@ cd Memhub
 powershell -ExecutionPolicy Bypass -File .\editions\server\windows\install.ps1 -PublicHost memory.example.com
 ```
 
-Verify the loopback origin before configuring Cloudflare. The origin MCP path is `http://127.0.0.1:3001/memhub/mcp`; capture is `/memhub/capture`. A remote client should use the authenticated public URL, not the loopback origin.
+Verify the loopback origin before configuring Cloudflare. The origin MCP path is `http://127.0.0.1:3001/mcp`. A remote client should use the authenticated public `/mcp` URL, which terminates at that same loopback runtime.
 
 ## Open the User workspace
 
@@ -76,11 +76,11 @@ When Project Scope is “All projects,” the workspace should show a portfolio 
 
 ## Connect an AI harness
 
-Connect an MCP-capable client to the appropriate endpoint. The repository also provides `adapters/plugin/` with MCP configuration, Memhub Skill support, and lifecycle integration for hosts that support it. Start with a small real project and a few turns. Do not import a large legacy history before the basic scope/capture path is proven.
+Connect an MCP-capable client directly to the appropriate endpoint. Clients use the MCP endpoint directly. The model-facing contract is simple: at the start of each Memhub turn call `memmy_context` with the current request and explicit `project`/`workspace_project` evidence, then call `memmy_turn action=open`; before the final answer call `memmy_turn action=commit`. Host conversation/session IDs are optional provenance, not routing keys. Start with a small real project and a few turns before importing a large history.
 
 ## Verify project routing
 
-Current-turn explicit project/workspace evidence takes precedence over a stale conversation binding. Switch between two test projects and confirm business memory does not cross the boundary. If evidence is ambiguous, global-only behavior is safer than guessing a project.
+Current-turn explicit project/workspace evidence is authoritative. Switch between two test projects and confirm business memory does not cross the boundary. Host conversation identity does not select projects; if current evidence is ambiguous, global-only behavior is safer than guessing.
 
 A reusable Skill may be explicitly used across projects, but it must not carry the source project's business facts with it.
 
@@ -99,7 +99,7 @@ This is the real acceptance test. A 200 response from the web UI alone does not 
 ## Success checklist
 
 - Expected Local or Server services are running.
-- MCP client uses the correct Bridge/public endpoint.
+- MCP client uses `127.0.0.1:3001/mcp` locally or the authenticated public `/mcp` endpoint remotely.
 - The User workspace resolves the intended account.
 - All-project scope shows multiple project records when multiple projects exist.
 - L1 contains real source evidence.
@@ -109,7 +109,7 @@ This is the real acceptance test. A 200 response from the web UI alone does not 
 
 ## Common failures
 
-A 401 on protected Server pages may be expected for anonymous requests. Diagnose identity before weakening access control. Wrong project context usually requires checking current project evidence, aliases/descriptions, and stale bindings—not deleting all memory. L1 missing points to the capture/Bridge path; L1 present with no L2/L3 points to Processing.
+A 401 on protected Server pages may be expected for anonymous requests. Diagnose identity before weakening access control. Wrong project context usually requires checking current project/workspace evidence and aliases/descriptions—not deleting all memory. Missing L1 usually means the Agent did not execute the `memmy_turn open/commit` contract; L1 present with no L2/L3 points to Processing.
 
 Before a schema-changing upgrade, use the migration preflight/verify/preserved flow rather than copying only a rebuildable index.
 

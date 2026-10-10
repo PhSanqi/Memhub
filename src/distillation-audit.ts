@@ -1,17 +1,18 @@
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
 import {
   captureIngestedAt,
+  captureIsFullyExcludedFromMemory,
   readCaptureIngestIntentStatus,
   readCaptureAuditSnapshot
 } from "./capture.js";
-import { MemhubBridgeQueue } from "./bridge.js";
 import {
   distillationResultTimestamp,
+  effectiveDistillationFailureKind,
   getDistillationConfig,
   latestCompletedL3ByProject,
   listDistillationJobs
 } from "./distillation-jobs.js";
+import { inspectDerivedL3Claims } from "./distillation-derived-provenance.js";
+import { resolveCaptureProject } from "./capture-project-resolution.js";
 
 export interface DistillationPipelineAudit {
   source: "read_only_durable_state";
@@ -28,6 +29,8 @@ export interface DistillationPipelineAudit {
     scanned_ingested_complete: number;
     before_cutover: number;
     unresolved_project: number;
+    privacy_excluded: number;
+    workspace_resolved: number;
     eligible_unqueued: number;
     ready_to_enqueue: number;
     waiting_for_idle_or_threshold: number;
@@ -38,13 +41,12 @@ export interface DistillationPipelineAudit {
     leased: number;
     completed: number;
     failed: number;
-  };
-  bridge: {
-    pending: number | null;
-    inspected: boolean;
+    actionable_failed: number;
+    historical_failed: number;
   };
   recovery: {
     complete_uningested_requires_review: number;
+    synthetic_complete_uningested_excluded: number;
     frozen_intent_without_marker: number;
     legacy_without_intent: number;
     conflicting_intent: number;
@@ -78,15 +80,19 @@ export interface DistillationPipelineAudit {
   warnings: string[];
 }
 
+function isLegacySyntheticCaptureEntry(event: { event_id: string; conversation_id: string }): boolean {
+  return event.event_id.includes("memhub-plugin-e2e-") &&
+    event.conversation_id.includes("memhub-plugin-e2e-");
+}
+
 /**
  * Read-only diagnosis of durable evidence. It deliberately does not call
- * discover(enqueue=true), recover bridge claims, write Core, or mutate jobs.
+ * discover(enqueue=true), write Core, or mutate jobs.
  */
 export async function auditDistillationPipeline(input: {
   stateRoot: string;
   accountId: string;
   resolveProject: (projectHint: string) => Promise<string | null>;
-  bridgeRoot?: string | null;
   now?: Date;
 }): Promise<DistillationPipelineAudit> {
   const config = await getDistillationConfig(input.stateRoot);
@@ -95,6 +101,8 @@ export async function auditDistillationPipeline(input: {
     listDistillationJobs(input.stateRoot, input.accountId)
   ]);
   const { stats, completeUningested, ingestedComplete: captures } = captureSnapshot;
+  const reviewableCompleteUningested = completeUningested.filter((event) => !isLegacySyntheticCaptureEntry(event));
+  const syntheticCompleteUningestedExcluded = completeUningested.length - reviewableCompleteUningested.length;
   const completedL2 = jobs.filter((job) =>
     job.status === "completed" &&
     job.result_kind === "l2" &&
@@ -103,38 +111,13 @@ export async function auditDistillationPipeline(input: {
   const missingDerivedL3: typeof completedL2 = [];
   const conflictingDerivedL3: Array<{ source: typeof completedL2[number]; reason: string }> = [];
   for (const source of completedL2) {
-    const evidenceRef = `l2:${source.result_id}:${source.job_id}`;
-    const matches = jobs.filter((job) =>
-      job.target === "l3" && job.evidence_refs.includes(evidenceRef)
-    );
-    if (matches.length === 0) {
+    const claim = inspectDerivedL3Claims(jobs, source);
+    if (claim.state === "missing") {
       missingDerivedL3.push(source);
       continue;
     }
-    if (matches.length > 1) {
-      conflictingDerivedL3.push({ source, reason: "multiple_l3_claims" });
-      continue;
-    }
-    const child = matches[0]!;
-    const exactEvidence = child.scope === "project" &&
-      child.evidence_refs.length === 1 &&
-      child.evidence_refs[0] === evidenceRef &&
-      child.evidence.length === 1 &&
-      child.evidence.some((item) =>
-      item.ref === evidenceRef &&
-      item.kind === "artifact" &&
-      item.layer === "L2" &&
-      item.project_id === source.project_id &&
-      item.content === source.result_content &&
-      item.timestamp === distillationResultTimestamp(source)
-      );
-    if (child.project_id !== source.project_id || !exactEvidence) {
-      conflictingDerivedL3.push({
-        source,
-        reason: child.project_id !== source.project_id
-          ? "project_mismatch"
-          : "evidence_mismatch"
-      });
+    if (claim.state === "conflict") {
+      conflictingDerivedL3.push({ source, reason: claim.reason });
     }
   }
   const currentL3 = latestCompletedL3ByProject(jobs);
@@ -195,7 +178,7 @@ export async function auditDistillationPipeline(input: {
   let conflictingIntent = 0;
   const completeUningestedSamples: DistillationPipelineAudit["review_samples"]["complete_uningested"] = [];
   const unresolvedProjectSamples: DistillationPipelineAudit["review_samples"]["unresolved_project"] = [];
-  for (const event of completeUningested) {
+  for (const event of reviewableCompleteUningested) {
     const intent = await readCaptureIngestIntentStatus(input.stateRoot, input.accountId, event.event_id);
     if (completeUningestedSamples.length < 20) completeUningestedSamples.push({
       event_id: event.event_id,
@@ -207,11 +190,13 @@ export async function auditDistillationPipeline(input: {
     else conflictingIntent++;
   }
   const used = new Set(jobs.filter((job) => job.target === "l2").flatMap((job) =>
-    job.evidence_refs.map((ref) => `${job.project_id ?? ""}\0${job.conversation_id ?? ""}\0${ref}`)
+    job.evidence_refs.map((ref) => `${job.project_id ?? ""}\0${ref}`)
   ));
   const resolved = new Map<string, string | null>();
   let beforeCutover = 0;
   let unresolvedProject = 0;
+  let privacyExcluded = 0;
+  let workspaceResolved = 0;
   let eligibleUnqueued = 0;
   let alreadyQueued = 0;
   const unqueuedGroups = new Map<string, Array<{ timestamp: string; eventId: string; ingestedAt: string }>>();
@@ -221,33 +206,39 @@ export async function auditDistillationPipeline(input: {
       beforeCutover += 1;
       continue;
     }
-    if (!event.project_hint || !event.user_text?.trim() || !event.assistant_text?.trim()) {
+    if (captureIsFullyExcludedFromMemory(event)) {
+      privacyExcluded += 1;
+      continue;
+    }
+    if (!event.user_text?.trim() || !event.assistant_text?.trim()) {
       unresolvedProject += 1;
       if (unresolvedProjectSamples.length < 20) unresolvedProjectSamples.push({
         event_id: event.event_id,
         project_hint: event.project_hint ?? null,
-        reason: !event.project_hint ? "missing_project_hint" : "incomplete_turn_content"
+        reason: "incomplete_turn_content"
       });
       continue;
     }
-    if (!resolved.has(event.project_hint)) {
-      resolved.set(event.project_hint, await input.resolveProject(event.project_hint));
-    }
-    const projectId = resolved.get(event.project_hint);
+    const resolution = await resolveCaptureProject(event, async (hint) => {
+      if (!resolved.has(hint)) resolved.set(hint, await input.resolveProject(hint));
+      return resolved.get(hint) ?? null;
+    });
+    const projectId = resolution.projectId;
     if (!projectId) {
       unresolvedProject += 1;
       if (unresolvedProjectSamples.length < 20) unresolvedProjectSamples.push({
         event_id: event.event_id,
         project_hint: event.project_hint ?? null,
-        reason: "unknown_project"
+        reason: event.project_hint ? "unknown_project" : "missing_project_hint"
       });
       continue;
     }
-    if (used.has(`${projectId}\0${event.conversation_id}\0l1:${event.event_id}`)) {
+    if (resolution.source === "workspace_path") workspaceResolved += 1;
+    if (used.has(`${projectId}\0l1:${event.event_id}`)) {
       alreadyQueued += 1;
     } else {
       eligibleUnqueued += 1;
-      const key = `${projectId}\0${event.conversation_id}`;
+      const key = projectId;
       const group = unqueuedGroups.get(key) ?? [];
       group.push({ timestamp: event.timestamp, eventId: event.event_id, ingestedAt: ingestedAt! });
       unqueuedGroups.set(key, group);
@@ -273,15 +264,8 @@ export async function auditDistillationPipeline(input: {
     waitingForIdleOrThreshold = eligibleUnqueued;
   }
 
-  let bridgePending: number | null = null;
-  let bridgeInspected = false;
-  if (input.bridgeRoot !== null) {
-    const bridgeRoot = resolve(input.bridgeRoot ?? process.env.MEMHUB_BRIDGE_HOME ?? join(homedir(), ".memhub"));
-    bridgePending = await new MemhubBridgeQueue(bridgeRoot).pending();
-    bridgeInspected = true;
-  }
   const warnings: string[] = [];
-  if (completeUningested.length > 0) {
+  if (reviewableCompleteUningested.length > 0) {
     warnings.push("complete_uningested captures require per-event provenance/Core outcome review before recover_ingest");
   }
   if (frozenIntent > 0) {
@@ -298,7 +282,6 @@ export async function auditDistillationPipeline(input: {
   }
   if (!config.auto_enabled) warnings.push("automatic distillation is disabled");
   if (config.auto_enabled && !config.auto_since) warnings.push("automatic distillation cutover is missing");
-  if (bridgePending && bridgePending > 0) warnings.push("bridge has durable offline capture backlog");
   if (missingDerivedL3.length > 0) {
     warnings.push("completed L2 artifacts lack their derived L3 queue claim; review exact job provenance before recovery, never replay the completed Core write");
   }
@@ -327,6 +310,8 @@ export async function auditDistillationPipeline(input: {
       scanned_ingested_complete: captures.length,
       before_cutover: beforeCutover,
       unresolved_project: unresolvedProject,
+      privacy_excluded: privacyExcluded,
+      workspace_resolved: workspaceResolved,
       eligible_unqueued: eligibleUnqueued,
       ready_to_enqueue: readyToEnqueue,
       waiting_for_idle_or_threshold: waitingForIdleOrThreshold,
@@ -336,11 +321,17 @@ export async function auditDistillationPipeline(input: {
       pending: jobs.filter((job) => job.status === "pending").length,
       leased: jobs.filter((job) => job.status === "leased").length,
       completed: jobs.filter((job) => job.status === "completed").length,
-      failed: jobs.filter((job) => job.status === "failed").length
+      failed: jobs.filter((job) => job.status === "failed").length,
+      actionable_failed: jobs.filter((job) =>
+        job.status === "failed" && effectiveDistillationFailureKind(job) !== "invalid_legacy_evidence"
+      ).length,
+      historical_failed: jobs.filter((job) =>
+        job.status === "failed" && effectiveDistillationFailureKind(job) === "invalid_legacy_evidence"
+      ).length
     },
-    bridge: { pending: bridgePending, inspected: bridgeInspected },
     recovery: {
-      complete_uningested_requires_review: completeUningested.length,
+      complete_uningested_requires_review: reviewableCompleteUningested.length,
+      synthetic_complete_uningested_excluded: syntheticCompleteUningestedExcluded,
       frozen_intent_without_marker: frozenIntent,
       legacy_without_intent: legacyWithoutIntent,
       conflicting_intent: conflictingIntent,

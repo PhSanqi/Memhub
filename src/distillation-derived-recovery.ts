@@ -5,6 +5,12 @@ import {
   listDistillationJobs,
   type DistillationJob
 } from "./distillation-jobs.js";
+import {
+  completedL2EvidenceRef,
+  exactCompletedL2Evidence,
+  inspectDerivedL3Claims,
+  validL3EvidenceBatch
+} from "./distillation-derived-provenance.js";
 
 /**
  * Rebuild only a missing L3 queue claim from an already completed L2 job.
@@ -21,28 +27,18 @@ export async function reconcileCompletedL2DerivedJob(input: {
   const { stateRoot, accountId, jobId, projectId } = input;
   const jobs = await listDistillationJobs(stateRoot, accountId);
   const source = checkedSource(jobs.find((item) => item.job_id === jobId), projectId);
-  const evidenceRef = `l2:${source.result_id}:${source.job_id}`;
-  const matches = jobs.filter((item) =>
-    item.target === "l3" && item.evidence_refs.includes(evidenceRef)
-  );
-  if (matches.length > 1) {
-    throw new Error("multiple L3 queue claims contain the same source; manual review required");
-  }
-  const existing = matches[0];
-  if (existing && existing.project_id !== projectId) {
-    throw new Error("derived L3 evidence already exists under another project; manual review required");
-  }
-  if (existing && (existing.scope !== "project" ||
-      existing.evidence_refs.length !== 1 ||
-      existing.evidence_refs[0] !== evidenceRef ||
-      existing.evidence.length !== 1 ||
-      !existing.evidence.some((item) =>
-        item.ref === evidenceRef && item.kind === "artifact" && item.layer === "L2" &&
-        item.project_id === projectId && item.content === source.result_content &&
-        item.timestamp === distillationResultTimestamp(source)
-      ))) {
+  const evidenceRef = completedL2EvidenceRef(source);
+  const claim = inspectDerivedL3Claims(jobs, source);
+  if (claim.state === "conflict") {
+    if (claim.reason === "multiple_l3_claims") {
+      throw new Error("multiple L3 queue claims contain the same source; manual review required");
+    }
+    if (claim.reason === "project_mismatch") {
+      throw new Error("derived L3 evidence already exists under another project; manual review required");
+    }
     throw new Error("derived L3 evidence differs from completed L2 provenance; manual review required");
   }
+  const existing = claim.state === "valid" ? claim.representative : undefined;
   if (existing || input.dryRun) {
     return {
       ok: true, dry_run: input.dryRun,
@@ -76,15 +72,8 @@ export async function reconcileCompletedL2DerivedJob(input: {
     }]
   });
   if (queued.job.project_id !== projectId ||
-      queued.job.scope !== "project" ||
-      queued.job.evidence_refs.length !== 1 ||
-      queued.job.evidence_refs[0] !== evidenceRef ||
-      queued.job.evidence.length !== 1 ||
-      !queued.job.evidence.some((item) =>
-        item.ref === evidenceRef && item.kind === "artifact" && item.layer === "L2" &&
-        item.project_id === projectId && item.content === source.result_content &&
-        item.timestamp === distillationResultTimestamp(source)
-      )) {
+      !validL3EvidenceBatch(queued.job, [...jobs, queued.job]) ||
+      !queued.job.evidence.some((item) => exactCompletedL2Evidence(item, source))) {
     throw new Error("derived queue claim conflicts with source evidence; manual review required");
   }
   return {

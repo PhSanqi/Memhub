@@ -8,7 +8,6 @@ if (!Number.isInteger(major) || major < 20) throw new Error(`Node.js 20+ require
 
 for (const relative of [
   "dist/mcp.js",
-  "dist/bridge.js",
   "vendor/memory-core/src/server/index.js",
   "web-assets/logo-mark.png",
   "web-assets/logo-lockup.png"

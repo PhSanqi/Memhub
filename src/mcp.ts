@@ -16,26 +16,17 @@ import { createMcpHandler, fromJsonSchema, McpServer } from "@modelcontextprotoc
 import type { JsonSchemaType } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import {
-  addAccount,
-  bindCloudflareEmail,
-  deleteAccount,
   ensureLocalAdminToken,
   listAccounts,
   resolveCloudflareAccount,
-  setAccountRole,
   verifyLocalAdminToken
 } from "./auth.js";
+import { runAccountCommand, runAdminTokenCommand } from "./cli-admin.js";
 import { verifyCloudflareAccessJwt } from "./cloudflare.js";
 import {
-  authenticateDevice,
   listCaptureIndexEntries,
-  createDevice,
-  listCaptureEvents,
-  listDevices,
-  revokeDevice
+  listCaptureEvents
 } from "./capture.js";
-import { captureSessionId } from "./capture-ingest.js";
-import { handleCaptureHttpRequest } from "./capture-http.js";
 import { hydrateMemoryEvidence, recordMemoryHydration } from "./memory-hydration.js";
 import { reconcileFrozenCaptureIngests } from "./capture-recovery.js";
 import {
@@ -54,7 +45,7 @@ import {
   type DistillationEvidenceItem,
   type DistillationJob
 } from "./distillation-jobs.js";
-import { createMemhubRuntime, type MemhubRuntime, type MemhubRuntimeOptions } from "./runtime.js";
+import { createMemhubRuntime, resolveLocalAccountId, type MemhubRuntime, type MemhubRuntimeOptions } from "./runtime.js";
 import type { ContextItem } from "./context-capsule.js";
 import type { ProjectDescriptor, ProjectTodo } from "./project-registry.js";
 import {
@@ -67,7 +58,7 @@ import {
 } from "./memory-control-http.js";
 import { handleMemoryControlAction } from "./memory-control-actions.js";
 import { recentL1Continuity, upsertL1Turn } from "./turn-log.js";
-import { asHttpJsonBodyError, readJsonBody } from "./http-json.js";
+import { asHttpJsonBodyError } from "./http-json.js";
 import {
   readSkillExecution,
   recordSkillExecutionEvent,
@@ -80,6 +71,14 @@ import { assertNextSkillVersion } from "./skill-version.js";
 import { tokenizeRetrievalText } from "./retrieval-ranker.js";
 import { JsonResultTransport } from "./result-transport.js";
 import { renderConsole, renderDocs, renderLanding, renderUnprovisionedAccount } from "./web-ui.js";
+import {
+  basicPassword,
+  isLocalControlRequest,
+  normalizeBasePath,
+  rewriteHtmlForBasePath,
+  singleHeader,
+  webSecurityHeaders
+} from "./gateway-http.js";
 import { distillationNextPayload } from "./distillation-transport.js";
 import { submitDistillationControl } from "./distillation-submit.js";
 import {
@@ -136,7 +135,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   const server = new McpServer({
     name: "memhub",
     version: VERSION,
-    description: "Private account/project-scoped long-term memory and project routing. Whenever Memhub is explicitly mentioned or invoked, first call memmy_context with the current request and the current workspace_project/project evidence; include a stable conversation_id when the Harness exposes one. Project-scoped tools should carry workspace_project or project from the current turn. A conversation binding is only a fallback when current-turn workspace/project evidence is unavailable. If explicit project and workspace_project disagree after canonical resolution, Memhub rejects the operation instead of guessing. If the transport does not expose a stable conversation_id, do not invent one. If a project name is unknown, case-variant, or merely similar, call memmy_project_list and compare canonical slug, aliases, and description before creating/binding. Project Registry mutations use memmy_project_manage plan -> explicit user authorization -> execute. Project Architecture replacements use memmy_project architecture_plan -> full-text user review -> architecture_execute. Explicit user-authored L3/L4 changes use memhub_memory plan -> full-text user review -> capture the confirmation as L1 -> execute. Project todos are first-class state. Before the final answer, persist only genuinely durable new facts/decisions/preferences/corrections rather than raw chat noise."
+    description: "Private account/project-scoped long-term memory and project routing. Each Memhub turn should call memmy_context with the current request plus explicit workspace_project/project evidence, then memmy_turn action=open before work and action=commit before the final answer. Host conversation/session IDs are optional provenance only: they do not select projects, branches, or distillation batches. Project-scoped tools must carry workspace_project or project from the current turn. If explicit project and workspace_project disagree after canonical resolution, Memhub rejects the operation instead of guessing. If a project name is unknown, case-variant, or merely similar, call memmy_project_list and compare canonical slug, aliases, and description before creating anything. Project Registry mutations use memmy_project_manage plan -> explicit user authorization -> execute. Project Architecture replacements use memmy_project architecture_plan -> full-text user review -> architecture_execute. Explicit user-authored L3/L4 changes use memhub_memory plan -> full-text user review -> capture the confirmation as L1 -> execute. Project todos are first-class state."
   });
   const resultTransport = new JsonResultTransport(stateRoot, runtime.accountId);
   const jsonResult = (value: unknown) => inlineJsonResult(resultTransport.wrap(value));
@@ -160,17 +159,17 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   )));
 
   server.registerTool("memmy_turn", {
-    description: "L1 原始对话日志。Harness/Chat 在收到用户消息后先 action=open；需要时 action=checkpoint 写入简短、可公开审计的 reasoning/tool summary；最终回答前 action=commit 写入 assistant final。失败或截断用 failed/truncated。Harness 若没有稳定 conversation_id，不要伪造：Memhub 会为该单轮生成 event-scoped 内部 storage key，并禁止写 conversation binding；跨轮 resume 只有在提供稳定 continuity_id 或 conversation_id 时才可用。不要写隐藏 chain-of-thought。",
+    description: "L1 原始 turn 日志。Harness/Chat 每轮收到用户消息后先 action=open，最终回答前 action=commit；需要时 checkpoint 写简短可公开审计摘要。conversation_id/continuity_id 仅用于可选 provenance 或显式 resume，不参与 project/branch routing，也不建立新的 conversation binding。没有稳定会话 ID 时直接省略，Memhub 使用 event-scoped 内部 storage key。不要写隐藏 chain-of-thought。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
         action: { type: "string", enum: ["open", "checkpoint", "commit", "failed", "truncated", "resume"] },
         event_id: { type: "string", description: "open 返回的稳定 L1 event id；后续 checkpoint/commit 推荐原样回传" },
-        conversation_id: { type: "string", description: "当前 transport 会话/线程稳定 ID；transport 无法提供时省略，不要伪造" },
-        continuity_id: { type: "string", description: "逻辑连续对话 ID；跨 Chat 续接时保持不变。省略则退化为 conversation_id。" },
+        conversation_id: { type: "string", description: "可选 transport provenance；不用于 project/branch routing" },
+        continuity_id: { type: "string", description: "可选显式 resume key；不用于 project/branch routing" },
         turn_id: { type: "string", description: "Harness 原生 turn id；有稳定 turn id 时可替代 event_id 做幂等定位" },
         previous_event_id: { type: "string", description: "显式前序 L1 event id" },
-        project: { type: "string", description: "明确 canonical project；省略时使用 conversation binding" },
+        project: { type: "string", description: "明确 canonical project；项目级 turn 建议始终与 workspace_project 一起显式提供" },
         workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 不一致时拒绝写入" },
         user_text: { type: "string" },
         assistant_text: { type: "string" },
@@ -248,8 +247,6 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       stateRoot,
       runtime,
       actorId: `mcp:${runtime.source.transport}`,
-      actorName: runtime.source.platform,
-      bindConversation: Boolean(transportConversationId),
       turn: {
         ...(stableEventId ? { event_id: stableEventId } : {}),
         host: runtime.source.platform,
@@ -268,8 +265,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
           transport: runtime.source.transport,
           principal: runtime.source.principalId,
           connection: runtime.source.connectionId,
-          transport_conversation_id_available: Boolean(transportConversationId),
-          conversation_binding: Boolean(transportConversationId)
+          transport_conversation_id_available: Boolean(transportConversationId)
         }
       }
     });
@@ -280,8 +276,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         distillation = await maybeQueueThresholdDistillation({
           stateRoot,
           accountId: runtime.accountId,
-          projectId: result.project_id,
-          conversationId
+          projectId: result.project_id
         });
       } catch (error) {
         distillation_queue_error = error instanceof Error ? error.message : String(error);
@@ -292,26 +287,25 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       ...result,
       ...(distillation ? { distillation } : {}),
       ...(distillation_queue_error ? { distillation_queue_error } : {}),
-      binding_available: Boolean(transportConversationId),
       transport_conversation_id: transportConversationId ?? null
     });
   });
 
   server.registerTool("memmy_context", {
-    description: "当 Memhub 被提及或调用时，先用本工具结合当前请求读取相关长期记忆。Harness 若能提供稳定 conversation_id 就传入，并可随后用 memmy_project action=current 核对持久 conversation binding；若 transport 没有稳定 conversation_id，不要伪造，直接使用本工具返回的 resolvedProjectId 与本轮显式 project/workspace 证据。若项目未唯一解析或名称相近，先调用 memmy_project_list 比较 canonical slug、aliases 与 description；不要尝试另一个大小写或盲目新建。当前轮的显式项目、workspace、项目名和 semantic_projects 优先于旧会话绑定；会话绑定只作为无本轮证据时的 fallback。业务记忆/架构只来自唯一 primary project；可复用 Skill 可从其他项目单独召回，不带入其业务 Current Truth。对能够证明当前 revision 的 L2/L3/L4 Memory，返回 item.evidenceRef；下游蒸馏必须原样回传该 exact ref，不要从稳定 Memory id 自行拼接或解析 latest。",
+    description: "每轮使用 Memhub 时先调用本工具，结合当前请求和显式 project/workspace 证据读取长期记忆。conversation_id/continuity_id 仅为可选 provenance/continuity 信息，不参与项目选择。项目解析顺序只使用当前轮显式 project/workspace、精确 registry alias 和唯一 semantic candidate；无法唯一解析时保持 global-only。业务记忆/架构只来自唯一 primary project；可复用 Skill 可跨项目单独召回。对能够证明当前 revision 的 L2/L3/L4 Memory 返回 exact evidenceRef，下游蒸馏必须原样回传。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
         query: { type: "string", description: "当前用户请求或需要补充上下文的问题" },
-        conversation_id: { type: "string", description: "当前 AI 会话/线程稳定 ID；用于保持项目绑定" },
-        continuity_id: { type: "string", description: "逻辑连续对话 ID；跨 Chat 续接时保持不变。用于读取最近 L1 原始对话。" },
+        conversation_id: { type: "string", description: "可选 transport provenance；不参与项目选择" },
+        continuity_id: { type: "string", description: "可选 continuity provenance；不参与项目选择" },
         project: { type: "string", description: "明确项目 slug；用户未明确时不要猜" },
         workspace_project: { type: "string", description: "由工作区/仓库确定的项目 slug" },
         branch: { type: "string", description: "可选项目内 Branch id/name；只收窄当前任务 retrieval，不建立新的记忆层。" },
         semantic_projects: {
           type: "array",
           items: { type: "string" },
-          description: "当前 Harness/分类器对本轮 primary project 的候选。唯一候选可覆盖旧 conversation binding；多个冲突候选触发 global-only。"
+          description: "当前 Harness/分类器对本轮 primary project 的候选。唯一候选可解析项目；多个冲突候选触发 global-only。"
         },
         capability_projects: {
           type: "array",
@@ -369,54 +363,6 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
           : item;
       }));
     }
-    const continuityId = optionalString(args.continuity_id) ?? optionalString(args.conversation_id);
-    const recentTurns = continuityId
-      ? await recentL1Continuity({
-          stateRoot,
-          accountId: runtime.accountId,
-          continuityId,
-          limit: Math.min(12, optionalInteger(args.limit) ?? 12)
-        })
-      : [];
-    const branchTerms = capsule.branchContext
-      ? new Set(tokenizeRetrievalText(`${capsule.branchContext.name} ${capsule.branchContext.goal}`))
-      : null;
-    const branchScopedRecentTurns = branchTerms
-      ? recentTurns.filter((turn) => {
-          const turnTerms = tokenizeRetrievalText([
-            turn.user_text,
-            turn.assistant_text,
-            turn.reasoning_summary,
-            turn.tool_summary
-          ].filter((value): value is string => Boolean(value)).join("\n"));
-          const overlap = turnTerms.reduce((count, term) => count + Number(branchTerms.has(term)), 0);
-          return overlap >= Math.min(2, branchTerms.size);
-        })
-      : recentTurns;
-    const recentSession = branchScopedRecentTurns
-      .filter((turn) => !capsule.resolvedProjectId || !turn.project_hint || turn.project_hint === capsule.resolvedProjectId)
-      .map((turn) => ({
-        id: turn.event_id,
-        content: [
-          `status: ${turn.status}`,
-          `user: ${turn.user_text ?? ""}`,
-          ...(turn.assistant_text ? [`assistant: ${turn.assistant_text}`] : []),
-          ...(turn.reasoning_summary ? [`reasoning_summary: ${turn.reasoning_summary}`] : []),
-          ...(turn.tool_summary ? [`tool_summary: ${turn.tool_summary}`] : [])
-        ].join("\n"),
-        authority: "observed" as const,
-        scope: "conversation" as const,
-        source: "l1-turn-log",
-        ...(turn.project_hint ? { projectId: turn.project_hint } : {}),
-        createdAt: turn.timestamp,
-        provenance: {
-          layer: "L1",
-          continuity_id: turn.continuity_id,
-          conversation_id: turn.conversation_id,
-          status: turn.status,
-          ingested: turn.ingested
-        }
-      }));
     const candidateQuery = optionalString(args.project) ?? optionalString(args.workspace_project) ?? query;
     const projectCandidates = capsule.resolvedProjectId === null || optionalString(args.project) || optionalString(args.workspace_project)
       ? await runtime.projects.suggest(runtime.accountId, candidateQuery, 8)
@@ -426,7 +372,6 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       : query;
     return jsonResult({
       ...capsule,
-      recentSession,
       progressiveDisclosure: {
         version: "progressive-disclosure-v1",
         discover: "memmy_context",
@@ -521,15 +466,14 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   });
 
   server.registerTool("memhub_branch", {
-    description: "项目内 Branch Context。用于同一 project 并行多个 task/workstream 时收窄 retrieval；不新增 L1/L2/L3/L4，也不复制原始对话。create/list 管理 Branch 元数据；switch 将稳定 conversation_id 绑定到 active Branch；current 查看当前绑定；close 会关闭 Branch 并解除其 conversation bindings；reopen 可恢复；unbind 仅解除当前 conversation 的 Branch。",
+    description: "项目内 Branch Context。Branch 是显式 task/workstream scope，不绑定 host conversation。create/list/close/reopen 管理 Branch 元数据；检索时由 memmy_context 显式传 branch。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
-        action: { type: "string", enum: ["list", "create", "current", "switch", "unbind", "close", "reopen"] },
+        action: { type: "string", enum: ["list", "create", "close", "reopen"] },
         project: { type: "string", description: "项目 slug/name/alias" },
         workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 不一致时拒绝" },
-        conversation_id: { type: "string", description: "switch/current/unbind 使用稳定 conversation_id" },
-        branch: { type: "string", description: "Branch id/name；switch/close/reopen 必填" },
+        branch: { type: "string", description: "Branch id/name；close/reopen 必填" },
         name: { type: "string", description: "create 时的 Branch 名称" },
         goal: { type: "string", description: "create 时明确当前 workstream 要完成什么；用于 retrieval filtering" },
         include_closed: { type: "boolean", description: "list 时是否包含 closed Branch；默认 false" }
@@ -539,33 +483,11 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     } as JsonSchemaType)
   }, async (args) => {
     const action = requiredString(args.action, "action");
-    const conversationId = optionalString(args.conversation_id);
-    if (action === "unbind") {
-      if (!conversationId) throw new TypeError("conversation_id is required for branch unbind");
-      return jsonResult({ ok: true, removed: await runtime.branches.unbind(runtime.accountId, conversationId) });
-    }
-    if (action === "current") {
-      if (!conversationId) throw new TypeError("conversation_id is required for branch current");
-      const explicit = await resolveExplicitProjectEvidence(runtime, {
-        project: optionalString(args.project),
-        workspaceProject: optionalString(args.workspace_project)
-      });
-      const projectId = explicit.projectId ?? await runtime.router.currentProject(runtime.accountId, conversationId);
-      if (!projectId) return jsonResult({ project: null, branch: null, conversation_id: conversationId });
-      return jsonResult({
-        project: projectId,
-        branch: await runtime.branches.current(runtime.accountId, conversationId, projectId),
-        conversation_id: conversationId
-      });
-    }
-
     const explicit = await resolveExplicitProjectEvidence(runtime, {
       project: optionalString(args.project),
       workspaceProject: optionalString(args.workspace_project)
     });
-    const projectId = explicit.projectId ?? (conversationId
-      ? await runtime.router.currentProject(runtime.accountId, conversationId)
-      : null);
+    const projectId = explicit.projectId;
     if (!projectId) throw new TypeError(`${action} requires one resolved project`);
 
     if (action === "list") {
@@ -582,21 +504,6 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         goal: requiredString(args.goal, "goal")
       });
       return jsonResult({ ok: true, project: projectId, branch });
-    }
-    if (action === "switch") {
-      if (!conversationId) throw new TypeError("conversation_id is required for branch switch");
-      const binding = await runtime.branches.bind(
-        runtime.accountId,
-        conversationId,
-        projectId,
-        requiredString(args.branch, "branch")
-      );
-      return jsonResult({
-        ok: true,
-        project: projectId,
-        conversation_id: conversationId,
-        branch: await runtime.branches.resolve(runtime.accountId, projectId, binding.branchId)
-      });
     }
     if (action === "close") {
       return jsonResult({
@@ -616,7 +523,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   });
 
   server.registerTool("memhub_skill", {
-    description: "Skill Router / Execution Bridge。memmy_context 返回精简候选；action=load 加载 Skill 与 execution_id，真正执行后 action=record 记录 invoked、success/failure、user_correction；status 查看 telemetry。修订或退役现有 Skill 必须 action=plan（operation=revise/retire）并向用户展示精确影响，取得针对该计划的明确批准后才 action=execute；保留稳定 source_skill_id，版本替换归档旧 memory id，不创建同名并行现行 Skill。",
+    description: "Skill Router / Execution Lifecycle。memmy_context 返回精简候选；action=load 加载 Skill 与 execution_id，真正执行后 action=record 记录 invoked、success/failure、user_correction；status 查看 telemetry。修订或退役现有 Skill 必须 action=plan（operation=revise/retire）并向用户展示精确影响，取得针对该计划的明确批准后才 action=execute；保留稳定 source_skill_id，版本替换归档旧 memory id，不创建同名并行现行 Skill。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
@@ -819,7 +726,6 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         scope: { type: "string", enum: ["account", "project"], description: "L2/L3 必须 project；L4 必须 account；Skill 可两者。" },
         project: { type: "string", description: "project scope 的明确项目 slug" },
         workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 不一致时拒绝项目级操作" },
-        conversation_id: { type: "string", description: "可继承已绑定项目；不会跨项目猜测" },
         title: { type: "string", description: "可选标题；Skill 必填" },
         tags: { type: "array", items: { type: "string" } },
         source_harness: { type: "string", description: "产生该沉淀的 Harness，例如 codex / claude-code" },
@@ -849,8 +755,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     if (action === "audit") {
       return jsonResult(await auditDistillationControl({
         stateRoot,
-        runtime,
-        bridgeRoot: process.env.MEMHUB_BRIDGE_HOME ?? null
+        runtime
       }));
     }
     if (action === "consolidate") {
@@ -903,8 +808,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       return jsonResult(await discoverDistillationControl({
         stateRoot,
         runtime,
-        dryRun: args.dry_run === true,
-        ...(optionalString(args.conversation_id) ? { conversationId: optionalString(args.conversation_id) } : {})
+        dryRun: args.dry_run === true
       }));
     }
     if (action === "next") {
@@ -918,7 +822,6 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         scope: optionalString(args.scope),
         project: optionalString(args.project),
         workspaceProject: optionalString(args.workspace_project),
-        conversationId: optionalString(args.conversation_id),
         evidenceOffset: optionalInteger(args.evidence_offset) ?? 0,
         evidenceChunkChars: optionalInteger(args.evidence_chunk_chars) ?? 120_000,
         leaseSeconds: optionalInteger(args.lease_seconds),
@@ -986,14 +889,13 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   });
 
   server.registerTool("memhub_todo", {
-    description: "项目待办的一等 MCP 工具。使用 Project Registry 作为唯一事实源，支持 list/add/complete/reopen；不要把待办写进 Project Architecture、项目 description 或 L2/L3 来代替 Todo 状态。list 默认只返回 pending；不指定 project/conversation_id 时列出账号下所有 active project 的待办。add/complete/reopen 必须能解析到一个明确项目。",
+    description: "项目待办的一等 MCP 工具。使用 Project Registry 作为唯一事实源，支持 list/add/complete/reopen；不要把待办写进 Project Architecture、项目 description 或 L2/L3。list 在未指定 project/workspace_project 时列出账号下所有 active project 的待办；项目级写操作必须显式提供 project 或 workspace_project。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
         action: { type: "string", enum: ["list", "add", "complete", "reopen"] },
         project: { type: "string", description: "明确项目 slug/name/alias；写操作建议显式提供。" },
         workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 不一致时拒绝项目级操作。" },
-        conversation_id: { type: "string", description: "可选稳定会话 ID；project 省略时可使用其持久项目 binding。" },
         text: { type: "string", description: "add 时必填的待办内容，最长 2000 字符。" },
         todo_id: { type: "string", description: "complete/reopen 时必填。" },
         status: { type: "string", enum: ["pending", "done", "all"], description: "list 过滤；默认 pending。" }
@@ -1006,7 +908,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     if (!["list", "add", "complete", "reopen"].includes(action)) throw new TypeError("unsupported todo action");
     await knownProjectRecords(runtime);
 
-    if (action === "list" && !optionalString(args.project) && !optionalString(args.workspace_project) && !optionalString(args.conversation_id)) {
+    if (action === "list" && !optionalString(args.project) && !optionalString(args.workspace_project)) {
       const status = optionalString(args.status) ?? "pending";
       if (!["pending", "done", "all"].includes(status)) throw new TypeError("todo list status must be pending, done, or all");
       const projects = await runtime.projects.list(runtime.accountId);
@@ -1031,8 +933,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     const { projectId } = await resolveToolScope(runtime, {
       scope: "project",
       project: optionalString(args.project),
-      workspaceProject: optionalString(args.workspace_project),
-      conversationId: optionalString(args.conversation_id)
+      workspaceProject: optionalString(args.workspace_project)
     });
     if (!projectId) throw new Error("todo operation requires a resolved project");
 
@@ -1286,12 +1187,11 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   });
 
   server.registerTool("memmy_project", {
-    description: "项目上下文 + Project Architecture。action=current 在没有 conversation_id 时不会报错或伪造会话身份；本轮明确 project/workspace 优先。list/current/bind/unbind 管项目解析；architecture 只读当前架构；architecture_plan 准备完整 canonical Architecture replacement，必须把 proposed_content 全文展示给用户并取得明确授权后才能 architecture_execute；architecture_history 读取本地审计/回滚历史。Architecture 只承载稳定结构、ownership、SOT、接口与硬约束；动态进度放 L2，Todo 放 memhub_todo，项目 metadata 用 memmy_project_manage。Legacy normify-* 永远只读。",
+    description: "项目上下文 + Project Architecture。Project 只由当前调用的显式 project/workspace_project、exact alias 或唯一 semantic evidence 解析，不保存 host conversation binding。current 读取当前显式项目；architecture 只读当前架构；architecture_plan/execute 为受控完整替换；architecture_history 读取审计历史。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
-        action: { type: "string", enum: ["list", "current", "bind", "unbind", "architecture", "architecture_plan", "architecture_execute", "architecture_history"] },
-        conversation_id: { type: "string" },
+        action: { type: "string", enum: ["list", "current", "architecture", "architecture_plan", "architecture_execute", "architecture_history"] },
         project: { type: "string" },
         workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 不一致时拒绝操作" },
         query: { type: "string", description: "architecture 时用于选择最相关的架构模块" },
@@ -1308,7 +1208,6 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       const details = await knownProjectRecords(runtime);
       return jsonResult({ projects: details.map((project) => project.projectId), projectDetails: details.map(projectForModel) });
     }
-    const conversationId = optionalString(args.conversation_id);
     if (action === "current") {
       await knownProjectRecords(runtime);
       const explicitEvidence = await resolveExplicitProjectEvidence(runtime, {
@@ -1318,44 +1217,16 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       if (explicitEvidence.projectId) {
         return jsonResult({
           project: explicitEvidence.projectId,
-          conversation_id: conversationId ?? null,
-          binding_available: Boolean(conversationId),
           resolution_source: explicitEvidence.resolutionSource,
-          persisted: false,
-          note: "Current-turn project/workspace evidence takes priority over an older conversation binding."
-        });
-      }
-      if (conversationId) {
-        return jsonResult({
-          project: await runtime.router.currentProject(runtime.accountId, conversationId),
-          conversation_id: conversationId,
-          binding_available: true,
-          resolution_source: "conversation_binding"
+          persisted: false
         });
       }
       return jsonResult({
         project: null,
-        conversation_id: null,
-        binding_available: false,
-        resolution_source: "conversation_id_unavailable",
+        resolution_source: "no_current_turn_project",
         persisted: false,
-        note: "Transport did not provide a stable conversation_id. Use memmy_context.resolvedProjectId or explicit current-turn project/workspace evidence; do not invent a conversation id."
+        note: "Pass project or workspace_project from the current turn; host conversation identity is not project state."
       });
-    }
-    if (action === "bind") {
-      if (!conversationId) throw new TypeError("conversation_id is required for bind");
-      const projectId = requiredString(args.project, "project");
-      const explicitEvidence = await resolveExplicitProjectEvidence(runtime, {
-        project: projectId,
-        workspaceProject: optionalString(args.workspace_project)
-      });
-      const canonical = explicitEvidence.projectId!;
-      await runtime.router.bindProject(runtime.accountId, conversationId, canonical);
-      return jsonResult({ ok: true, project: canonical, requested: projectId });
-    }
-    if (action === "unbind") {
-      if (!conversationId) throw new TypeError("conversation_id is required for unbind");
-      return jsonResult({ ok: true, removed: await runtime.router.unbindProject(runtime.accountId, conversationId) });
     }
     if (action === "architecture") {
       const explicitEvidence = await resolveExplicitProjectEvidence(runtime, {
@@ -1499,7 +1370,6 @@ interface CliOptions extends MemhubRuntimeOptions {
   stateRoot?: string;
   httpPort?: number;
   httpPath?: string;
-  capturePath?: string;
   basePath?: string;
   publicHost?: string;
   allowJit?: boolean;
@@ -1518,7 +1388,6 @@ function parseArgs(argv: string[]): CliOptions {
     else if (arg === "--state-root") options.stateRoot = value();
     else if (arg === "--memory-url") options.memoryEndpoint = value();
     else if (arg === "--memory-token") options.memoryToken = value();
-    else if (arg === "--bindings") options.bindingsPath = value();
     else if (arg === "--architecture-root") options.architectureRoot = value();
     else if (arg === "--no-architecture") options.disableArchitecture = true;
     else if (arg === "--normify-root") options.architectureRoot = value(); // deprecated alias
@@ -1538,13 +1407,6 @@ function parseArgs(argv: string[]): CliOptions {
       }
       options.httpPath = path.length > 1 ? path.replace(/\/+$/, "") : path;
     }
-    else if (arg === "--capture-path") {
-      const path = value();
-      if (!path.startsWith("/") || path.includes("?") || path.includes("#")) {
-        throw new Error("--capture-path must start with / and contain no query/fragment");
-      }
-      options.capturePath = path.length > 1 ? path.replace(/\/+$/, "") : path;
-    }
     else if (arg === "--base-path") options.basePath = normalizeBasePath(value());
     else if (arg === "--public-host") {
       const host = value().trim().toLowerCase();
@@ -1556,7 +1418,6 @@ function parseArgs(argv: string[]): CliOptions {
       process.stdout.write([
         "Usage: memhub-mcp [options]",
         "       memhub-mcp account list|add|bind-email|delete ...",
-        "       memhub-mcp device list|add|revoke ...",
         "       memhub-mcp admin-token show|rotate [--state-root PATH]",
         "",
         "Default transport: stdio.",
@@ -1577,10 +1438,6 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     await runAccountCommand(argv.slice(1));
     return;
   }
-  if (argv[0] === "device") {
-    await runDeviceCommand(argv.slice(1));
-    return;
-  }
   if (argv[0] === "admin-token") {
     await runAdminTokenCommand(argv.slice(1));
     return;
@@ -1590,34 +1447,21 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     stateRoot = defaultStateRoot(),
     httpPort,
     httpPath = "/mcp",
-    capturePath = process.env.MEMHUB_CAPTURE_PATH?.trim() || "/memhub/capture",
     basePath = normalizeBasePath(process.env.MEMHUB_BASE_PATH?.trim() || "/memhub"),
     publicHost = process.env.MEMHUB_PUBLIC_HOST?.trim() || undefined,
     allowJit = process.env.MEMHUB_ALLOW_JIT === "1",
     ...runtimeOptions
   } = options;
+  const effectiveRuntimeOptions: MemhubRuntimeOptions = {
+    ...runtimeOptions,
+    controlRoot: runtimeOptions.controlRoot ?? stateRoot
+  };
   if (httpPort !== undefined) {
-    await serveHttp(runtimeOptions, { stateRoot, port: httpPort, path: httpPath, capturePath, basePath, publicHost, allowJit });
+    await serveHttp(effectiveRuntimeOptions, { stateRoot, port: httpPort, path: httpPath, basePath, publicHost, allowJit });
     return;
   }
-  console.error(`[memhub] serving stdio account=${runtimeOptions.accountId ?? process.env.MEMHUB_ACCOUNT_ID ?? "local"}`);
-  await serveStdio(() => createMemhubMcpServerForRuntime(createMemhubRuntime(runtimeOptions), stateRoot));
-}
-
-function normalizeBasePath(value: string): string {
-  const path = value.trim() || "/";
-  if (!path.startsWith("/") || path.includes("?") || path.includes("#")) {
-    throw new Error("base path must start with / and contain no query/fragment");
-  }
-  return path === "/" ? "/" : path.replace(/\/+$/, "");
-}
-
-function rewriteHtmlForBasePath(html: string, basePath: string): string {
-  if (basePath !== "/") return html;
-  return html
-    .replaceAll('"/memhub"', '"/"')
-    .replaceAll("'/memhub'", "'/'")
-    .replaceAll("/memhub/", "/");
+  console.error(`[memhub] serving stdio account=${resolveLocalAccountId(effectiveRuntimeOptions)}`);
+  await serveStdio(() => createMemhubMcpServerForRuntime(createMemhubRuntime(effectiveRuntimeOptions), stateRoot));
 }
 
 const WEB_ASSETS = {
@@ -1627,7 +1471,7 @@ const WEB_ASSETS = {
 
 async function serveHttp(
   runtimeOptions: MemhubRuntimeOptions,
-  options: { stateRoot: string; port: number; path: string; capturePath: string; basePath: string; publicHost?: string; allowJit: boolean }
+  options: { stateRoot: string; port: number; path: string; basePath: string; publicHost?: string; allowJit: boolean }
 ): Promise<void> {
   await ensureLocalAdminToken(options.stateRoot);
   const handlers = new Map<string, ReturnType<typeof toNodeHandler>>();
@@ -1706,7 +1550,7 @@ async function serveHttp(
         response.end(request.method === "HEAD" ? undefined : JSON.stringify({ ok: true, service: "memhub", uptime_seconds: Math.floor(process.uptime()) }));
         return;
       }
-      if (options.basePath === "/" && url.pathname !== options.path && url.pathname !== options.capturePath) {
+      if (options.basePath === "/" && url.pathname !== options.path) {
         url.pathname = url.pathname === "/" ? "/memhub" : `/memhub${url.pathname}`;
       }
       if (url.pathname === "/") {
@@ -1758,152 +1602,6 @@ async function serveHttp(
         response.end(request.method === "HEAD" ? undefined : rewriteHtmlForBasePath(renderDocs(url.pathname), options.basePath));
         return;
       }
-      if (url.pathname === "/memhub/context") {
-        if (request.method !== "POST") {
-          response.writeHead(405, { allow: "POST" }).end();
-          return;
-        }
-        const deviceToken = bearerToken(request.headers.authorization) ?? singleHeader(request.headers["x-memhub-device-token"]);
-        if (!deviceToken) {
-          response.writeHead(401, { "content-type": "application/json", "cache-control": "no-store" });
-          response.end(JSON.stringify({ error: "missing_device_token" }));
-          return;
-        }
-        const device = await authenticateDevice(options.stateRoot, deviceToken);
-        if (!device) {
-          response.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
-          response.end(JSON.stringify({ error: "invalid_or_revoked_device" }));
-          return;
-        }
-        const body = await readJsonBody(request) as Record<string, unknown>;
-        const runtime = runtimeFor(device.account_id, {
-          platform: device.name || "device",
-          transport: "device-context",
-          principalId: `device:${device.device_id}`,
-          connectionId: device.device_id
-        });
-        const knownProjects = await knownProjectIds(runtime);
-        const requestedCapabilityProjects = stringArray(body.capability_projects) ?? [];
-        const crossProjectSkills = optionalBoolean(body.cross_project_skills) ?? true;
-        const capsule = await runtime.router.context({
-          accountId: runtime.accountId,
-          userId: runtime.userId,
-          query: requiredString(body.query, "query"),
-          conversationId: optionalString(body.conversation_id),
-          projectId: optionalString(body.project),
-          workspaceProjectId: optionalString(body.workspace_project),
-          semanticProjectIds: stringArray(body.semantic_projects),
-          knownProjectIds: knownProjects,
-          reusableSkillProjectIds: crossProjectSkills
-            ? (requestedCapabilityProjects.length > 0 ? requestedCapabilityProjects : knownProjects)
-            : [],
-          limit: optionalInteger(body.limit)
-        });
-        response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-        response.end(JSON.stringify(capsule));
-        return;
-      }
-      if (url.pathname === "/memhub/lifecycle") {
-        if (request.method !== "POST") {
-          response.writeHead(405, { allow: "POST" }).end();
-          return;
-        }
-        const deviceToken = bearerToken(request.headers.authorization) ?? singleHeader(request.headers["x-memhub-device-token"]);
-        if (!deviceToken) {
-          response.writeHead(401, { "content-type": "application/json", "cache-control": "no-store" });
-          response.end(JSON.stringify({ error: "missing_device_token" }));
-          return;
-        }
-        const device = await authenticateDevice(options.stateRoot, deviceToken);
-        if (!device) {
-          response.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
-          response.end(JSON.stringify({ error: "invalid_or_revoked_device" }));
-          return;
-        }
-        const body = await readJsonBody(request) as Record<string, unknown>;
-        const event = requiredString(body.event, "event").toLowerCase();
-        if (!new Set(["sessionstart", "postcompact", "sessionend"]).has(event)) {
-          response.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
-          response.end(JSON.stringify({ error: "unsupported_lifecycle_event" }));
-          return;
-        }
-        const conversationId = requiredString(body.conversation_id, "conversation_id");
-        const host = optionalString(body.host) ?? "codex";
-        const projectHint = optionalString(body.project_hint);
-        const workspacePath = optionalString(body.workspace_path);
-        const runtime = runtimeFor(device.account_id, {
-          platform: device.name || host,
-          transport: "device-lifecycle",
-          principalId: `device:${device.device_id}`,
-          connectionId: device.device_id
-        });
-        let projectId = await runtime.router.currentProject(device.account_id, conversationId);
-        if (projectHint) {
-          await runtime.router.bindProject(device.account_id, conversationId, projectHint);
-          projectId = projectHint;
-        }
-        const sessionId = captureSessionId(runtime.accountId, host, conversationId, projectId);
-        const namespace = {
-          source: "memhub-lifecycle",
-          profileId: "default",
-          userId: runtime.userId,
-          tenantId: runtime.accountId,
-          sessionKey: `${host}:${conversationId}`,
-          ...(projectId ? { projectId } : {}),
-          ...(workspacePath ? { workspacePath } : {})
-        };
-        const common = {
-          adapterId: "memhub-lifecycle",
-          namespace,
-          source: "memhub-lifecycle"
-        };
-        if (event === "sessionend") {
-          try {
-            await runtime.memoryClient.closeSession(sessionId, {
-              ...common,
-              requestId: `memhub-lifecycle-close:${sessionId}`
-            });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            if (!/404|not found|session/i.test(message)) throw error;
-          }
-          response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-          response.end(JSON.stringify({ ok: true, event, session_id: sessionId, project_id: projectId }));
-          return;
-        }
-        await runtime.memoryClient.openSession({
-          ...common,
-          requestId: `memhub-lifecycle-open:${sessionId}`,
-          sessionId,
-          ...(projectId ? { projectId } : {}),
-          ...(workspacePath ? { workspacePath } : {}),
-          meta: { host, conversation_id: conversationId }
-        });
-        const capsule = await runtime.router.context({
-          accountId: runtime.accountId,
-          userId: runtime.userId,
-          query: event === "postcompact"
-            ? "Restore the current project state, durable decisions, constraints, preferences and active context after compaction."
-            : "Load current durable project state, decisions, constraints, preferences and relevant long-term context for this session.",
-          conversationId,
-          ...(projectId ? { projectId } : {}),
-          limit: 12
-        });
-        response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-        response.end(JSON.stringify({ ok: true, event, session_id: sessionId, project_id: projectId, context: capsule }));
-        return;
-      }
-      if (url.pathname === options.capturePath) {
-        await handleCaptureHttpRequest({
-          request,
-          response,
-          stateRoot: options.stateRoot,
-          runtimeFor,
-          queueDistillation: maybeQueueThresholdDistillation
-        });
-        return;
-      }
-
       if (url.pathname.startsWith("/memhub/user") || url.pathname.startsWith("/memhub/admin")) {
         let accounts = await listAccounts(options.stateRoot);
         const localControl = isLocalControlRequest(request);
@@ -1918,7 +1616,10 @@ async function serveHttp(
             }).end("Local administrator token required");
             return;
           }
-          summary = localAdminAccount(accounts, runtimeOptions.accountId ?? process.env.MEMHUB_LOCAL_ADMIN_ACCOUNT);
+          summary = localAdminAccount(
+            accounts,
+            runtimeOptions.accountId ?? process.env.MEMHUB_LOCAL_ADMIN_ACCOUNT ?? process.env.MEMHUB_OWNER_ACCOUNT_ID
+          );
         } else {
           if (options.publicHost === undefined) {
             response.writeHead(404).end();
@@ -2002,25 +1703,8 @@ async function serveHttp(
         return;
       }
 
-      if (options.publicHost === undefined) {
-        handlerFor(runtimeOptions.accountId ?? "local")(request, response);
-        return;
-      }
-
-      const mcpDeviceToken = singleHeader(request.headers["x-memhub-device-token"]);
-      if (mcpDeviceToken) {
-        const device = await authenticateDevice(options.stateRoot, mcpDeviceToken);
-        if (!device) {
-          response.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
-          response.end(JSON.stringify({ error: "invalid_or_revoked_device" }));
-          return;
-        }
-        handlerFor(device.account_id, {
-          platform: device.name || "device",
-          transport: "device-token",
-          principalId: `device:${device.device_id}`,
-          connectionId: device.device_id
-        })(request, response);
+      if (options.publicHost === undefined || isLocalControlRequest(request)) {
+        handlerFor(resolveLocalAccountId(runtimeOptions))(request, response);
         return;
       }
 
@@ -2034,7 +1718,7 @@ async function serveHttp(
         const identity = await verifyCloudflareAccessJwt(options.stateRoot, options.publicHost, assertion);
         const account = await resolveCloudflareAccount(options.stateRoot, identity, { allowJit: options.allowJit });
         handlerFor(account.account_id, {
-          platform: "chatgpt",
+          platform: "remote-mcp",
           transport: "mcp",
           principalId: identity.sub ? `cloudflare:${identity.sub}` : `cloudflare-email:${identity.email}`,
           connectionId: "cloudflare-managed-oauth",
@@ -2079,7 +1763,6 @@ async function serveHttp(
   const address = http.address();
   const actualPort = typeof address === "object" && address !== null ? address.port : options.port;
   console.error(`[memhub] listening on http://127.0.0.1:${actualPort}${options.path}`);
-  console.error(`[memhub] capture endpoint http://127.0.0.1:${actualPort}${options.capturePath} (device token required)`);
   if (options.publicHost) {
     console.error(`[memhub] Cloudflare Access allowlist enabled for https://${options.publicHost}${options.path}`);
   }
@@ -2110,14 +1793,12 @@ async function maybeQueueThresholdDistillation(input: {
   stateRoot: string;
   accountId: string;
   projectId: string | null;
-  conversationId: string;
 }): Promise<unknown | null> {
   const config = await getDistillationConfig(input.stateRoot);
   if (!config.auto_enabled || !input.projectId) return null;
   return discoverDistillationJobs({
     stateRoot: input.stateRoot,
     accountId: input.accountId,
-    conversationId: input.conversationId,
     resolveProject: async (hint) => hint === input.projectId ? input.projectId : null,
     enqueue: true
   });
@@ -2151,153 +1832,8 @@ async function queueIdleDistillation(
   if (failures.length) throw new AggregateError(failures, "distillation discovery failed for one or more accounts");
 }
 
-async function runDeviceCommand(argv: string[]): Promise<void> {
-  let stateRoot = process.env.MEMHUB_STATE_ROOT ?? defaultStateRoot();
-  const args = [...argv];
-  for (let i = 0; i < args.length;) {
-    if (args[i] === "--state-root") {
-      const value = args[i + 1];
-      if (!value) throw new Error("--state-root requires a value");
-      stateRoot = value;
-      args.splice(i, 2);
-      continue;
-    }
-    i += 1;
-  }
-  const action = args[0];
-  if (action === "list") {
-    const account = args[1];
-    process.stdout.write(JSON.stringify(await listDevices(stateRoot, account), null, 2) + "\n");
-    return;
-  }
-  if (action === "add") {
-    const accountRef = args[1];
-    const name = args[2];
-    if (!accountRef || !name) throw new Error("device add requires account username/account_id and device name");
-    const accounts = await listAccounts(stateRoot);
-    const account = accounts.find((item) => item.username === accountRef || item.account_id === accountRef);
-    if (!account) throw new Error(`account not found: ${accountRef}`);
-    const created = await createDevice(stateRoot, account.account_id, name);
-    process.stdout.write(JSON.stringify(created, null, 2) + "\n");
-    return;
-  }
-  if (action === "revoke") {
-    const deviceId = args[1];
-    if (!deviceId) throw new Error("device revoke requires device_id");
-    process.stdout.write(JSON.stringify({ revoked: await revokeDevice(stateRoot, deviceId) }, null, 2) + "\n");
-    return;
-  }
-  throw new Error(`unknown device action: ${action ?? "<missing>"}`);
-}
-
-async function runAdminTokenCommand(argv: string[]): Promise<void> {
-  let stateRoot = process.env.MEMHUB_STATE_ROOT ?? defaultStateRoot();
-  const args = [...argv];
-  for (let i = 0; i < args.length;) {
-    if (args[i] === "--state-root") {
-      const value = args[i + 1];
-      if (!value) throw new Error("--state-root requires a value");
-      stateRoot = value;
-      args.splice(i, 2);
-      continue;
-    }
-    i += 1;
-  }
-  const action = args[0] ?? "show";
-  if (action !== "show" && action !== "rotate") throw new Error("admin-token supports show or rotate");
-  process.stdout.write(await ensureLocalAdminToken(stateRoot, action === "rotate") + "\n");
-}
-
-async function runAccountCommand(argv: string[]): Promise<void> {
-  let stateRoot = process.env.MEMHUB_STATE_ROOT ?? defaultStateRoot();
-  const args = [...argv];
-  for (let i = 0; i < args.length;) {
-    if (args[i] === "--state-root") {
-      const value = args[i + 1];
-      if (!value) throw new Error("--state-root requires a value");
-      stateRoot = value;
-      args.splice(i, 2);
-      continue;
-    }
-    i += 1;
-  }
-  const action = args[0];
-  if (action === "list") {
-    process.stdout.write(JSON.stringify(await listAccounts(stateRoot), null, 2) + "\n");
-    return;
-  }
-  if (action === "add") {
-    const username = args[1];
-    if (!username) throw new Error("account add requires username");
-    process.stdout.write(JSON.stringify(await addAccount(stateRoot, username, args[2]), null, 2) + "\n");
-    return;
-  }
-  if (action === "bind-email") {
-    if (!args[1] || !args[2]) throw new Error("account bind-email requires username and email");
-    await bindCloudflareEmail(stateRoot, args[1], args[2]);
-    process.stdout.write("email bound\n");
-    return;
-  }
-  if (action === "role") {
-    if (!args[1] || (args[2] !== "admin" && args[2] !== "user")) throw new Error("account role requires username/account_id/email and admin|user");
-    await setAccountRole(stateRoot, args[1], args[2]);
-    process.stdout.write("account role updated\n");
-    return;
-  }
-  if (action === "delete") {
-    if (!args[1]) throw new Error("account delete requires username");
-    await deleteAccount(stateRoot, args[1]);
-    process.stdout.write("account deleted; memory/project data preserved\n");
-    return;
-  }
-  throw new Error(`unknown account action: ${action ?? "<missing>"}`);
-}
-
 function defaultStateRoot(): string {
   return resolve(process.env.MEMHUB_STATE_ROOT ?? join(homedir(), ".memmy", "memhub"));
-}
-
-function webSecurityHeaders(): Record<string, string> {
-  return {
-    "x-content-type-options": "nosniff",
-    "x-frame-options": "DENY",
-    "referrer-policy": "no-referrer",
-    "content-security-policy": "frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
-  };
-}
-
-function bearerToken(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  const match = /^Bearer\s+(.+)$/i.exec(value.trim());
-  return match?.[1]?.trim() || undefined;
-}
-
-function singleHeader(value: string | string[] | undefined): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function basicPassword(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  const match = /^Basic\s+(.+)$/i.exec(value.trim());
-  if (!match?.[1]) return undefined;
-  try {
-    const decoded = Buffer.from(match[1], "base64").toString("utf8");
-    const separator = decoded.indexOf(":");
-    return separator >= 0 ? decoded.slice(separator + 1) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function isLocalControlRequest(request: import("node:http").IncomingMessage): boolean {
-  const remote = request.socket.remoteAddress ?? "";
-  const loopbackPeer = remote === "127.0.0.1" || remote === "::1" || remote.startsWith("::ffff:127.");
-  if (!loopbackPeer) return false;
-  const host = (singleHeader(request.headers.host) ?? "").toLowerCase();
-  const hostName = host.startsWith("[") ? host.slice(1, host.indexOf("]")) : host.split(":", 1)[0];
-  if (hostName !== "localhost" && hostName !== "127.0.0.1" && hostName !== "::1") return false;
-  if (singleHeader(request.headers["cf-access-jwt-assertion"]) || singleHeader(request.headers["cf-ray"]) || singleHeader(request.headers["cf-connecting-ip"])) return false;
-  return true;
 }
 
 function localAdminAccount(
@@ -2797,10 +2333,6 @@ function requireMemoryResultId(value: unknown): string {
   return id;
 }
 
-async function knownProjectIds(runtime: MemhubRuntime): Promise<string[]> {
-  return (await knownProjectRecords(runtime)).map((project) => project.projectId);
-}
-
 async function knownProjectRecords(runtime: MemhubRuntime): Promise<ProjectDescriptor[]> {
   return runtime.projects.list(runtime.accountId);
 }
@@ -2838,15 +2370,14 @@ function optionalBoolean(value: unknown): boolean | undefined {
 
 async function resolveToolScope(
   runtime: MemhubRuntime,
-  input: { scope: string; project?: string; workspaceProject?: string; conversationId?: string }
-): Promise<{ projectId: string | null; conversationId?: string; resolutionSource: string }> {
+  input: { scope: string; project?: string; workspaceProject?: string }
+): Promise<{ projectId: string | null; resolutionSource: string }> {
   if (input.scope !== "global" && input.scope !== "project") {
     throw new TypeError("scope must be global or project");
   }
   if (input.scope === "global") {
     return {
       projectId: null,
-      ...(input.conversationId ? { conversationId: input.conversationId } : {}),
       resolutionSource: "global"
     };
   }
@@ -2854,18 +2385,13 @@ async function resolveToolScope(
     project: input.project,
     workspaceProject: input.workspaceProject
   });
-  let projectId = explicitEvidence.projectId;
-  let resolutionSource = explicitEvidence.resolutionSource ?? "unresolved";
-  if (input.scope === "project" && projectId === null && input.conversationId) {
-    projectId = await runtime.router.currentProject(runtime.accountId, input.conversationId);
-    if (projectId) resolutionSource = "conversation_binding";
-  }
+  const projectId = explicitEvidence.projectId;
+  const resolutionSource = explicitEvidence.resolutionSource ?? "unresolved";
   if (input.scope === "project" && projectId === null) {
-    throw new Error("project scope requires current workspace_project/project evidence or a stable conversation-bound project");
+    throw new Error("project scope requires explicit current workspace_project or project evidence");
   }
   return {
     projectId,
-    ...(input.conversationId ? { conversationId: input.conversationId } : {}),
     resolutionSource
   };
 }

@@ -1,23 +1,25 @@
 {
   "name": "memhub",
-  "version": "0.2.6",
+  "version": "1.0.0",
   "description": "Self-hosted, project-aware AI memory with provenance, temporal continuity and MCP integration.",
   "homepage": "https://phsanqi.github.io/Memhub/",
-  "repository": { "type": "git", "url": "https://github.com/PhSanqi/Memhub.git" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PhSanqi/Memhub.git"
+  },
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
     "memhub": "./dist/mcp.js",
-    "memhub-mcp": "./dist/mcp.js",
-    "memhub-bridge": "./dist/bridge.js"
+    "memhub-mcp": "./dist/mcp.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node tests/core-e2e.mjs && npm run context:check && node tests/process-stack-e2e.mjs && node tests/stack-runtime-smoke.mjs && node tests/network-report-e2e.mjs && node tests/deploy-systemd-e2e.mjs && node tests/linux-upgrade-preflight.mjs && node tests/linux-upgrade-backup-rehearsal.mjs && node tests/openai-adapter-e2e.mjs && node tests/vendor-regressions.mjs && node tests/edition-regressions.mjs && node --test tests/cloudflare-watchdog.mjs",
-    "context:check": "node tests/retrieval-ranker-e2e.mjs && node tests/memory-source-retrieval-e2e.mjs && node tests/skill-router-e2e.mjs && node tests/skill-telemetry-e2e.mjs && node tests/skill-version-scope-e2e.mjs && node tests/distillation-discovery-e2e.mjs && node tests/distillation-secondary-failure-e2e.mjs && node tests/distillation-l4-recovery-e2e.mjs && node tests/file-mutation-lock-e2e.mjs && node tests/asset-hygiene-e2e.mjs && node tests/stability-state-e2e.mjs && node tests/vendor-manifest-e2e.mjs && node tests/windows-installer-credential-e2e.mjs && node tests/mcp-e2e.mjs",
+    "test": "npm run build && node tests/core-e2e.mjs && npm run context:check && node tests/process-stack-e2e.mjs && node tests/stack-runtime-smoke.mjs && node tests/network-report-e2e.mjs && node tests/deploy-systemd-e2e.mjs && node tests/linux-upgrade-preflight.mjs && node tests/linux-upgrade-backup-rehearsal.mjs && node tests/vendor-regressions.mjs && node tests/edition-regressions.mjs && node --test tests/cloudflare-watchdog.mjs",
+    "context:check": "node tests/retrieval-ranker-e2e.mjs && node tests/memory-source-retrieval-e2e.mjs && node tests/memory-hydration-e2e.mjs && node tests/skill-router-e2e.mjs && node tests/skill-telemetry-e2e.mjs && node tests/skill-version-scope-e2e.mjs && node tests/distillation-discovery-e2e.mjs && node tests/distillation-consolidation-e2e.mjs && node tests/distillation-secondary-failure-e2e.mjs && node tests/distillation-anomaly-governance-e2e.mjs && node tests/distillation-l4-recovery-e2e.mjs && node tests/capture-privacy-graceful-e2e.mjs && node tests/memory-visualization-e2e.mjs && node tests/file-mutation-lock-e2e.mjs && node tests/asset-hygiene-e2e.mjs && node tests/stability-state-e2e.mjs && node tests/vendor-manifest-e2e.mjs && node tests/windows-installer-credential-e2e.mjs && node tests/mcp-e2e.mjs",
     "core:check": "node scripts/core-migration.mjs check",
     "core:preflight": "node scripts/core-migration.mjs preflight",
     "core:verify": "node scripts/core-migration.mjs verify",
@@ -34,10 +36,7 @@
     "process:check": "npm run build && node tests/process-stack-e2e.mjs",
     "process:smoke": "npm run build && node tests/stack-runtime-smoke.mjs",
     "process:systemd-smoke": "node scripts/systemd-stack-smoke.mjs",
-    "qa:linux:cross-version": "node tests/linux-real-cross-version-rehearsal.mjs",
-    "qa:windows:early-legacy-guard": "powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows-installer-early-legacy-guard-e2e.ps1",
     "qa:windows:installer-lifecycle": "powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows-installer-lifecycle-e2e.ps1 -Edition local && powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows-installer-lifecycle-e2e.ps1 -Edition server",
-    "qa:windows:legacy-source-lineage": "node tests/windows-legacy-source-lineage-e2e.mjs",
     "release:complete": "node scripts/package-complete-release.mjs --worktree",
     "release:all": "node scripts/package-all-release.mjs --worktree",
     "review:web": "node scripts/render-web-review.mjs",

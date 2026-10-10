@@ -1,6 +1,6 @@
 import { connect } from "node:net";
 
-export type MemhubServiceKind = "core" | "gateway" | "bridge";
+export type MemhubServiceKind = "core" | "gateway";
 
 export interface ServiceProbe {
   ok: boolean;
@@ -22,7 +22,7 @@ export async function probeService(url: string, kind: MemhubServiceKind, timeout
   try {
     const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) return { ok: false, status: response.status, reason: `http_${response.status}` };
-    if (kind === "gateway" || kind === "bridge" || kind === "core") {
+    if (kind === "gateway" || kind === "core") {
       const data: unknown = await response.json();
       if (!data || typeof data !== "object" || Array.isArray(data)) {
         return { ok: false, status: response.status, reason: "invalid_health_payload" };
@@ -38,8 +38,7 @@ export async function probeService(url: string, kind: MemhubServiceKind, timeout
         }
         return { ok: true, status: response.status, reason: "ready" };
       }
-      const expectedService = kind === "gateway" ? "memhub" : "memhub-bridge";
-      if (object.ok !== true || object.service !== expectedService) {
+      if (object.ok !== true || object.service !== "memhub") {
         return { ok: false, status: response.status, reason: "unexpected_service" };
       }
     }

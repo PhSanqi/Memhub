@@ -5,7 +5,6 @@ import { cp, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { saveBridgeConfig } from "../dist/bridge.js";
 import { waitForService } from "../dist/service-readiness.js";
 
 const repo = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -36,7 +35,7 @@ async function waitFor(predicate, timeoutMs = 12_000) {
 async function cleanUpIsolatedOwner(home, owner) {
   if (!owner || owner.exitCode !== null || owner.signalCode !== null) return;
   const exited = new Promise((done) => owner.once("exit", done));
-  const stopper = spawn(process.execPath, [entry, "--mode", "server", "--home", home,
+  const stopper = spawn(process.execPath, [entry, "--home", home,
     "--action", "stop"], { cwd: repo, stdio: "ignore" });
   const code = await new Promise((done) => stopper.once("exit", done));
   if (code === 0) await exited;
@@ -53,7 +52,7 @@ function stackEvents() {
   });
 }
 try {
-  const [corePort, gatewayPort, bridgePort] = await Promise.all([freePort(), freePort(), freePort()]);
+  const [corePort, gatewayPort] = await Promise.all([freePort(), freePort()]);
   await mkdir(serverState, { recursive: true });
   await mkdir(memoryDir, { recursive: true });
   await writeFile(join(root, "memory-config.yaml"), JSON.stringify({
@@ -69,26 +68,26 @@ try {
   // Core may rewrite the first instance's initial JSON config as YAML.
   // Preserve the source fixture before launching either process.
   const initialMemoryConfig = JSON.parse(await readFile(join(root, "memory-config.yaml"), "utf8"));
-  await writeFile(join(root, "server.env"), [
+  await writeFile(join(root, "memhub.env"), [
     "MEMHUB_OWNER_ACCOUNT_ID=stack-smoke-account", "MEMHUB_OWNER_USER_ID=local-user",
     `MEMHUB_MEMORY_TOKEN=${token}`, `MEMHUB_MEMORY_URL=http://127.0.0.1:${corePort}`,
-    `MEMHUB_STATE_ROOT=${serverState}`, `MEMHUB_BINDINGS=${join(root, "bindings.json")}`
+    `MEMHUB_STATE_ROOT=${serverState}`
   ].join("\n") + "\n");
-  child = spawn(process.execPath, [entry, "--mode", "server", "--home", root,
-    "--core-port", String(corePort), "--gateway-port", String(gatewayPort), "--bridge-port", String(bridgePort)],
+  child = spawn(process.execPath, [entry, "--home", root,
+    "--core-port", String(corePort), "--gateway-port", String(gatewayPort)],
   { cwd: repo, env: { ...process.env, MEMHUB_HOME: root }, stdio: ["ignore", "ignore", "pipe"] });
   child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
   await waitForService({ url: `http://127.0.0.1:${gatewayPort}/memhub/health`, kind: "gateway", timeoutMs: 30_000 });
-  const first = JSON.parse(await readFile(join(root, ".server-stack.lock"), "utf8"));
+  const first = JSON.parse(await readFile(join(root, ".memhub-stack.lock"), "utf8"));
   assert.equal(first.pid, child.pid);
   await assert.rejects(async () => {
-    const duplicate = spawn(process.execPath, [entry, "--mode", "server", "--home", root,
-      "--core-port", String(corePort), "--gateway-port", String(gatewayPort), "--bridge-port", String(bridgePort)],
+    const duplicate = spawn(process.execPath, [entry, "--home", root,
+      "--core-port", String(corePort), "--gateway-port", String(gatewayPort)],
     { cwd: repo, stdio: "ignore" });
     const code = await new Promise((done) => duplicate.once("exit", done));
     if (code !== 0) throw new Error("duplicate stack rejected");
   }, /duplicate stack rejected/);
-  const status = spawn(process.execPath, [entry, "--mode", "server", "--home", root, "--action", "status"], { cwd: repo, stdio: ["ignore", "pipe", "pipe"] });
+  const status = spawn(process.execPath, [entry, "--home", root, "--action", "status"], { cwd: repo, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   status.stdout.on("data", (chunk) => { output += chunk.toString(); });
   assert.equal(await new Promise((done) => status.once("exit", done)), 0);
@@ -105,7 +104,7 @@ try {
   assert.notEqual(recoveredCore, originalCore);
   assert.notEqual(recoveredGateway, originalGateway);
   assert.ok(stackEvents().some((event) => event.type === "restart_scheduled"));
-  assert.equal(JSON.parse(await readFile(join(root, ".server-stack.lock"), "utf8")).pid, child.pid);
+  assert.equal(JSON.parse(await readFile(join(root, ".memhub-stack.lock"), "utf8")).pid, child.pid);
   await waitForService({ url: `http://127.0.0.1:${gatewayPort}/memhub/health`, kind: "gateway", timeoutMs: 10_000 });
 
   // Two independent stacks use the same run-stack.mjs entrypoint. Stopping
@@ -113,7 +112,6 @@ try {
   const otherHome = join(root, "other-instance");
   const otherCorePort = await freePort();
   const otherGatewayPort = await freePort();
-  const otherBridgePort = await freePort();
   const otherMemoryDir = join(otherHome, "memory");
   const otherState = join(otherHome, "server");
   await mkdir(otherMemoryDir, { recursive: true });
@@ -122,35 +120,33 @@ try {
   otherConfig.memmyMemory.storage.sqlitePath = join(otherMemoryDir, "memory.sqlite");
   otherConfig.memmyMemory.storage.endpoint = `http://127.0.0.1:${otherCorePort}`;
   await writeFile(join(otherHome, "memory-config.yaml"), JSON.stringify(otherConfig) + "\n");
-  await writeFile(join(otherHome, "server.env"), [
+  await writeFile(join(otherHome, "memhub.env"), [
     "MEMHUB_OWNER_ACCOUNT_ID=other-stack-account", "MEMHUB_OWNER_USER_ID=local-user",
     `MEMHUB_MEMORY_TOKEN=${token}`,
     `MEMHUB_MEMORY_URL=http://127.0.0.1:${otherCorePort}`,
-    `MEMHUB_STATE_ROOT=${otherState}`,
-    `MEMHUB_BINDINGS=${join(otherHome, "bindings.json")}`
+    `MEMHUB_STATE_ROOT=${otherState}`
   ].join("\n") + "\n");
-  otherChild = spawn(process.execPath, [entry, "--mode", "server", "--home", otherHome,
-    "--core-port", String(otherCorePort), "--gateway-port", String(otherGatewayPort),
-    "--bridge-port", String(otherBridgePort)],
+  otherChild = spawn(process.execPath, [entry, "--home", otherHome,
+    "--core-port", String(otherCorePort), "--gateway-port", String(otherGatewayPort)],
   { cwd: repo, env: { ...process.env, MEMHUB_HOME: otherHome }, stdio: ["ignore", "ignore", "pipe"] });
   let otherStderr = "";
   otherChild.stderr.on("data", (chunk) => { otherStderr += chunk.toString(); });
   await waitForService({ url: `http://127.0.0.1:${otherGatewayPort}/memhub/health`,
     kind: "gateway", timeoutMs: 30_000 });
-  assert.equal(JSON.parse(await readFile(join(otherHome, ".server-stack.lock"), "utf8")).pid, otherChild.pid);
+  assert.equal(JSON.parse(await readFile(join(otherHome, ".memhub-stack.lock"), "utf8")).pid, otherChild.pid);
   // The second StateRoot is nested under the first: substring matching of
   // --home would have treated the second stack as the first stack's owner.
-  const firstLockPath = join(root, ".server-stack.lock");
+  const firstLockPath = join(root, ".memhub-stack.lock");
   const firstLockBytes = await readFile(firstLockPath);
-  const otherLock = JSON.parse(await readFile(join(otherHome, ".server-stack.lock"), "utf8"));
+  const otherLock = JSON.parse(await readFile(join(otherHome, ".memhub-stack.lock"), "utf8"));
   await writeFile(firstLockPath, JSON.stringify({
     ...first, pid: otherChild.pid, token: "forged-prefix-owner",
     started_at: otherLock.started_at, exec_path: otherLock.exec_path,
-    entrypoint: otherLock.entrypoint, home: root, mode: "server"
+    entrypoint: otherLock.entrypoint, home: root
   }) + "\n");
   try {
     const prefixStatus = spawn(process.execPath, [
-      entry, "--mode", "server", "--home", root, "--action", "status"
+      entry, "--home", root, "--action", "status"
     ], { cwd: repo, stdio: ["ignore", "pipe", "pipe"] });
     let prefixOutput = "";
     prefixStatus.stdout.on("data", (chunk) => { prefixOutput += chunk.toString(); });
@@ -158,7 +154,7 @@ try {
     assert.equal(JSON.parse(prefixOutput).owner_verified, false,
       "nested StateRoot prefix is not exact process ownership");
     const prefixStop = spawn(process.execPath, [
-      entry, "--mode", "server", "--home", root, "--action", "stop"
+      entry, "--home", root, "--action", "stop"
     ], { cwd: repo, stdio: ["ignore", "ignore", "pipe"] });
     let prefixError = "";
     prefixStop.stderr.on("data", (chunk) => { prefixError += chunk.toString(); });
@@ -184,14 +180,14 @@ try {
   await cp(join(repo, "dist"), join(newRelease, "dist"), { recursive: true });
   await cp(entry, newEntry);
   const crossReleaseStatus = spawn(process.execPath, [
-    newEntry, "--mode", "server", "--home", root, "--action", "status"
+    newEntry, "--home", root, "--action", "status"
   ], { cwd: repo, stdio: ["ignore", "pipe", "pipe"] });
   let crossStatusOutput = "";
   crossReleaseStatus.stdout.on("data", (chunk) => { crossStatusOutput += chunk.toString(); });
   assert.equal(await new Promise((done) => crossReleaseStatus.once("exit", done)), 0);
   assert.equal(JSON.parse(crossStatusOutput).owner_verified, true,
     "new release must verify previous release owner using live process identity");
-  const stopper = spawn(process.execPath, [newEntry, "--mode", "server", "--home", root,
+  const stopper = spawn(process.execPath, [newEntry, "--home", root,
     "--action", "stop"], { cwd: repo, stdio: ["ignore", "pipe", "pipe"] });
   let stopError = "";
   stopper.stderr.on("data", (chunk) => { stopError += chunk.toString(); });
@@ -202,7 +198,7 @@ try {
   assert.equal(code, 0, stderr.slice(-1600));
   child = undefined;
   await waitFor(async () => {
-    try { await readFile(join(root, ".server-stack.lock")); return false; }
+    try { await readFile(join(root, ".memhub-stack.lock")); return false; }
     catch (error) { return error.code === "ENOENT"; }
   });
   for (const port of [corePort, gatewayPort]) {
@@ -214,7 +210,7 @@ try {
   assert.equal(alive(otherChild.pid), true, "unrelated same-entrypoint stack must survive the first stop");
   assert.equal((await fetch(`http://127.0.0.1:${otherGatewayPort}/memhub/health`)).status, 200);
   const otherExit = new Promise((done) => otherChild.once("exit", done));
-  const otherStopper = spawn(process.execPath, [entry, "--mode", "server", "--home", otherHome,
+  const otherStopper = spawn(process.execPath, [entry, "--home", otherHome,
     "--action", "stop"], { cwd: repo, stdio: ["ignore", "ignore", "pipe"] });
   let otherStopError = "";
   otherStopper.stderr.on("data", (chunk) => { otherStopError += chunk.toString(); });
@@ -228,7 +224,7 @@ try {
   const unrelatedOwner = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], {
     cwd: repo, stdio: "ignore", windowsHide: true
   });
-  const forgedLockPath = join(root, ".server-stack.lock");
+  const forgedLockPath = join(root, ".memhub-stack.lock");
   try {
     await writeFile(forgedLockPath, JSON.stringify({
       pid: unrelatedOwner.pid,
@@ -236,18 +232,17 @@ try {
       started_at: new Date().toISOString(),
       entrypoint: entry,
       exec_path: process.execPath,
-      home: root,
-      mode: "server"
+      home: root
     }) + "\n");
     const forgedStatus = spawn(process.execPath, [
-      entry, "--mode", "server", "--home", root, "--action", "status"
+      entry, "--home", root, "--action", "status"
     ], { cwd: repo, stdio: ["ignore", "pipe", "pipe"] });
     let forgedOutput = "";
     forgedStatus.stdout.on("data", (chunk) => { forgedOutput += chunk.toString(); });
     assert.equal(await new Promise((done) => forgedStatus.once("exit", done)), 0);
     assert.equal(JSON.parse(forgedOutput).running, false);
     const forgedStop = spawn(process.execPath, [
-      entry, "--mode", "server", "--home", root, "--action", "stop"
+      entry, "--home", root, "--action", "stop"
     ], { cwd: repo, stdio: ["ignore", "ignore", "pipe"] });
     let forgedError = "";
     forgedStop.stderr.on("data", (chunk) => { forgedError += chunk.toString(); });
@@ -270,20 +265,18 @@ try {
     started_at: "2026-01-01T00:00:00.000Z",
     entrypoint: entry,
     exec_path: process.execPath,
-    home: root,
-    mode: "server"
+    home: root
   };
   await writeFile(forgedLockPath, JSON.stringify(staleLock) + "\n");
   const staleStop = spawn(process.execPath, [
-    entry, "--mode", "server", "--home", root, "--action", "stop"
+    entry, "--home", root, "--action", "stop"
   ], { cwd: repo, stdio: ["ignore", "ignore", "pipe"] });
   assert.notEqual(await new Promise((done) => staleStop.once("exit", done)), 0);
   assert.equal(JSON.parse(await readFile(forgedLockPath, "utf8")).token, "stale-owner");
   const staleBytes = await readFile(forgedLockPath);
   const directServe = spawn(process.execPath, [
-    entry, "--mode", "server", "--home", root,
-    "--core-port", String(corePort), "--gateway-port", String(gatewayPort),
-    "--bridge-port", String(bridgePort)
+    entry, "--home", root,
+    "--core-port", String(corePort), "--gateway-port", String(gatewayPort)
   ], { cwd: repo, stdio: ["ignore", "ignore", "pipe"] });
   let directError = "";
   directServe.stderr.on("data", (part) => { directError += part.toString(); });

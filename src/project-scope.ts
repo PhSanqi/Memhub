@@ -10,8 +10,6 @@ export type ProjectRecallScope = "global_only" | "global_and_project";
 export interface ProjectScopeInput {
   /** Project scope already enforced by authentication / namespace. */
   namespaceProjectId?: string;
-  /** Durable binding for the current host conversation. */
-  conversationProjectId?: string;
   /** Project derived from a concrete repository/workspace identity. */
   workspaceProjectId?: string;
   /** Exact registry/name aliases extracted from the request. */
@@ -36,7 +34,6 @@ export interface ProjectScopeResolution {
 export function resolveProjectScope(input: ProjectScopeInput): ProjectScopeResolution {
   const deterministic = uniqueProjectIds([
     input.namespaceProjectId,
-    input.conversationProjectId,
     input.workspaceProjectId
   ]);
   if (deterministic.length > 1) {
@@ -101,7 +98,6 @@ function ambiguous(candidates: string[], evidence: string[]): ProjectScopeResolu
 function deterministicEvidence(input: ProjectScopeInput, projectId: string): string[] {
   const evidence: string[] = [];
   if (normalizeProjectId(input.namespaceProjectId) === projectId) evidence.push("authenticated namespace project");
-  if (normalizeProjectId(input.conversationProjectId) === projectId) evidence.push("conversation project binding");
   if (normalizeProjectId(input.workspaceProjectId) === projectId) evidence.push("workspace project identity");
   return evidence;
 }

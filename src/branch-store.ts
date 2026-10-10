@@ -17,18 +17,9 @@ export interface ProjectBranch {
   closedAt?: string;
 }
 
-export interface ConversationBranchBinding {
-  accountId: string;
-  conversationId: string;
-  projectId: string;
-  branchId: string;
-  updatedAt: string;
-}
-
 interface BranchFile {
   version: 1;
   branches: ProjectBranch[];
-  bindings: ConversationBranchBinding[];
 }
 
 export class JsonProjectBranchStore {
@@ -103,69 +94,6 @@ export class JsonProjectBranchStore {
     return this.setStatus(accountId, projectId, reference, "active");
   }
 
-  async current(accountId: string, conversationId: string, projectId?: string): Promise<ProjectBranch | null> {
-    const account = requireNonEmpty(accountId, "accountId");
-    const conversation = requireNonEmpty(conversationId, "conversationId");
-    const file = await this.read();
-    const binding = file.bindings.find((item) =>
-      item.accountId === account &&
-      item.conversationId === conversation &&
-      (!projectId || item.projectId === projectId)
-    );
-    if (!binding) return null;
-    return file.branches.find((branch) =>
-      branch.accountId === account &&
-      branch.projectId === binding.projectId &&
-      branch.branchId === binding.branchId &&
-      branch.status === "active"
-    ) ?? null;
-  }
-
-  async bind(accountId: string, conversationId: string, projectId: string, branchRef: string): Promise<ConversationBranchBinding> {
-    return this.serialize(async () => {
-      const account = requireNonEmpty(accountId, "accountId");
-      const conversation = requireNonEmpty(conversationId, "conversationId");
-      const project = requireNonEmpty(projectId, "projectId");
-      const file = await this.read();
-      const ref = normalizeRef(requireNonEmpty(branchRef, "branch"));
-      const branch = file.branches.find((item) =>
-        item.accountId === account &&
-        item.projectId === project &&
-        item.status === "active" &&
-        (normalizeRef(item.branchId) === ref || normalizeRef(item.name) === ref)
-      );
-      if (!branch) throw new Error(`unknown active branch for project ${project}: ${branchRef}`);
-      const binding: ConversationBranchBinding = {
-        accountId: account,
-        conversationId: conversation,
-        projectId: project,
-        branchId: branch.branchId,
-        updatedAt: new Date().toISOString()
-      };
-      const key = bindingKey(account, conversation);
-      file.bindings = [
-        ...file.bindings.filter((item) => bindingKey(item.accountId, item.conversationId) !== key),
-        binding
-      ].sort((left, right) => bindingKey(left.accountId, left.conversationId).localeCompare(bindingKey(right.accountId, right.conversationId)));
-      await this.write(file);
-      return binding;
-    });
-  }
-
-  async unbind(accountId: string, conversationId: string): Promise<boolean> {
-    return this.serialize(async () => {
-      const account = requireNonEmpty(accountId, "accountId");
-      const conversation = requireNonEmpty(conversationId, "conversationId");
-      const file = await this.read();
-      const key = bindingKey(account, conversation);
-      const before = file.bindings.length;
-      file.bindings = file.bindings.filter((item) => bindingKey(item.accountId, item.conversationId) !== key);
-      if (file.bindings.length === before) return false;
-      await this.write(file);
-      return true;
-    });
-  }
-
   private async setStatus(accountId: string, projectId: string, reference: string, status: ProjectBranchStatus): Promise<ProjectBranch> {
     return this.serialize(async () => {
       const account = requireNonEmpty(accountId, "accountId");
@@ -183,9 +111,6 @@ export class JsonProjectBranchStore {
       branch.updatedAt = now;
       if (status === "closed") branch.closedAt = now;
       else delete branch.closedAt;
-      if (status === "closed") {
-        file.bindings = file.bindings.filter((item) => !(item.accountId === account && item.projectId === project && item.branchId === branch.branchId));
-      }
       await this.write(file);
       return { ...branch };
     });
@@ -199,9 +124,9 @@ export class JsonProjectBranchStore {
     try {
       const parsed = JSON.parse(await readFile(this.path, "utf8")) as unknown;
       if (!isBranchFile(parsed)) throw new Error(`invalid branch store: ${this.path}`);
-      return parsed;
+      return { version: 1, branches: parsed.branches };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { version: 1, branches: [], bindings: [] };
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { version: 1, branches: [] };
       throw error;
     }
   }
@@ -240,10 +165,6 @@ function normalizeRef(value: string): string {
   return value.normalize("NFKC").toLocaleLowerCase().trim();
 }
 
-function bindingKey(accountId: string, conversationId: string): string {
-  return `${accountId}\u0000${conversationId}`;
-}
-
 function requireNonEmpty(value: string, field: string): string {
   const normalized = value.trim();
   if (!normalized) throw new TypeError(`${field} must be non-empty`);
@@ -253,7 +174,7 @@ function requireNonEmpty(value: string, field: string): string {
 function isBranchFile(value: unknown): value is BranchFile {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  if (record.version !== 1 || !Array.isArray(record.branches) || !Array.isArray(record.bindings)) return false;
+  if (record.version !== 1 || !Array.isArray(record.branches)) return false;
   return record.branches.every((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return false;
     const branch = item as Record<string, unknown>;
@@ -265,13 +186,5 @@ function isBranchFile(value: unknown): value is BranchFile {
       (branch.status === "active" || branch.status === "closed") &&
       typeof branch.createdAt === "string" &&
       typeof branch.updatedAt === "string";
-  }) && record.bindings.every((item) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
-    const binding = item as Record<string, unknown>;
-    return typeof binding.accountId === "string" &&
-      typeof binding.conversationId === "string" &&
-      typeof binding.projectId === "string" &&
-      typeof binding.branchId === "string" &&
-      typeof binding.updatedAt === "string";
   });
 }

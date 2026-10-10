@@ -144,8 +144,8 @@ async function main() {
     }
     // Capture each independently navigable view, not just the Console Overview.
     const consoleViews = {
-      user: ["overview", "projects", "l1", "l2", "l3", "l4", "skills", "processing"],
-      admin: ["overview", "accounts", "projects", "processing", "l1", "l2", "l3", "l4", "skills"]
+      user: ["overview", "projects", "l1", "l2", "l3", "l4", "skills", "visualization", "processing"],
+      admin: ["overview", "accounts", "projects", "processing", "l1", "l2", "l3", "l4", "skills", "visualization"]
     };
     for (const [page, views] of Object.entries(consoleViews)) {
       const file = basePages[page];

@@ -33,7 +33,7 @@ Edition-specific packaging notes live under [../editions/](../editions/).
 - [Memory Core migration](operations/migration.md)
 - [v0.2.6 acceptance, production results and scope limits](operations/release-acceptance-2026-09-27.md) — dated candidate and post-release evidence; legacy Windows migration applies only to an existing old installation.
 
-The canonical hosted project deployment is **https://service-1.example.com/**. Self-hosted documentation uses `memory.example.com` as a placeholder.
+Self-hosted examples use **https://memory.example.com/** as the placeholder public deployment.
 
 ## Maintain the project
 
