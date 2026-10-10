@@ -202,13 +202,14 @@ authentication boundary.
 
 - Local and Server origins bind to loopback by default.
 - Public Server deployments should sit behind authenticated reverse proxy/Tunnel access.
-- Human identity and account-bound devices resolve to one stable `account_id`.
+- Human identity resolves to one stable `account_id`; different accounts are strict tenant boundaries and do not share Projects, Todos, L1–L4 memory, Skills, Branches, Architecture, or distillation state.
+- Ordinary users can access only their own account scope; only an Admin role may enumerate or manage other accounts.
 - Project routing is enforced before retrieval; relevance cannot broaden scope.
 - L4 requires cross-project evidence and must not be used to infer sensitive traits.
 - Destructive project and Skill lifecycle changes use explicit authorization contracts.
 - Project Architecture and direct user-authored L3/L4 replacements require full-text review before explicit authorization; stale plans fail closed.
 
-Read [Privacy boundary](docs/architecture/privacy-boundary.md), [Identity and devices](docs/architecture/identity-and-devices.md), and [Remote authentication](docs/operations/remote-auth.md).
+Read [Privacy boundary](docs/architecture/privacy-boundary.md) and [Remote authentication](docs/operations/remote-auth.md).
 
 ## Development
 

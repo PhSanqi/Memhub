@@ -22,7 +22,7 @@ Cloudflare provides authentication/transport, not long-term-memory storage or mo
 
 ## Human and machine identity
 
-Authenticated remote identity maps to a stable Memhub account. Internal roles live in Memhub. OAuth/Access credentials belong to the transport/control plane and should never enter prompts, TODOs, or project memory.
+Authenticated remote identity maps to a stable Memhub account. Internal roles live in Memhub. Each `account_id` is a strict tenant boundary: ordinary users can read and mutate only their own Projects, Todos, L1–L4 memory, Skills, Branches, Architecture and distillation state; only Admin can enumerate or manage other accounts. OAuth/Access credentials belong to the transport/control plane and should never enter prompts, TODOs, or project memory.
 
 ## Project isolation
 
@@ -56,7 +56,7 @@ Identify at least local OS users, server administrators, authenticated IdP users
 
 ## Minimum-privilege checks
 
-Normal users need their memory/projects/TODOs/status, not account-role or policy controls. Device credentials identify a machine entry point, not an Admin browser session. Rotate edge, device, and local-admin credentials independently so failures have bounded impact.
+Normal users need their memory/projects/TODOs/status, not account-role or policy controls. Remote clients authenticate through the configured Cloudflare/IdP boundary and local clients use loopback; neither path grants Admin by itself. Rotate edge/IdP and local-admin credentials independently so failures have bounded impact.
 
 ## Data minimization
 
@@ -64,7 +64,7 @@ Long-term storage minimization and per-request recall minimization are different
 
 ## Privacy verification checklist
 
-Check that Memory Core remains loopback, public Gateway remains authenticated, anonymous Admin is rejected, device revocation affects only that device, project isolation still holds, remote-model usage is intentional, backups are protected, and logs do not contain tokens or raw prompts unexpectedly.
+Check that Memory Core remains loopback, public Gateway remains authenticated, anonymous Admin is rejected, ordinary users cannot cross account boundaries, project isolation still holds, remote-model usage is intentional, backups are protected, and logs do not contain tokens or raw prompts unexpectedly.
 
 ## FAQ
 

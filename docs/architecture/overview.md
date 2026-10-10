@@ -43,6 +43,7 @@ The product user boundary is the stable Memhub `account_id`. A model, host appli
 - Loopback MCP uses the explicitly configured local account.
 - Remote MCP validates Cloudflare identity and resolves it to the same Memhub account model.
 - Client-supplied account identity is never trusted as authorization.
+- Different `account_id` values are strict tenant boundaries across Project Registry/Todos, L1 evidence, L2/L3/L4, Skills, Branches, Architecture and distillation state. Ordinary users cannot select another account; cross-account administration is Admin-only.
 - Host conversation/session identifiers may be retained as historical provenance, but they do not select project, Branch or distillation scope.
 
 ## Project routing

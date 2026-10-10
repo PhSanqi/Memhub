@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add a permanent multi-account isolation regression covering ordinary-user role defaults, pre-provisioned Cloudflare identity binding, and account-scoped Project/Todo, L1, Skill and distillation state.
+- Clarify that each `account_id` is a strict tenant boundary and remove retired Device Token/device-identity guidance from current documentation.
+- Repair documentation links left behind by the v1 architecture cleanup.
+
 ## v1.0.0 — 2026-10-10
 
 Memhub 1.0 is the architecture-convergence release. It replaces the historical Plugin/Bridge side channel with one MCP runtime and one durable memory core, while keeping Local and Server deployments as two network views of the same runtime.

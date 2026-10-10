@@ -199,13 +199,14 @@ Architecture 替换采用 fail-closed 流程：`memmy_project architecture_plan`
 
 - Local 与 Server origin 默认只绑定 loopback。
 - Server 对公网发布时应放在带认证的反向代理/Tunnel 后面。
-- 人类身份和绑定设备最终解析到同一个稳定 `account_id`。
+- 人类身份最终解析到一个稳定 `account_id`；不同账号是严格 tenant 边界，Project、Todo、L1–L4、Skill、Branch、Architecture 与蒸馏状态都不会跨账号共享。
+- 普通 User 只能访问自己的账号范围；只有 Admin role 才能枚举或管理其他账号。
 - Project Router 先做范围治理，再进入 Retrieval；相关性不能扩大权限边界。
 - L4 只接受跨项目稳定证据，不用于推断敏感属性。
 - 破坏性项目操作和 Skill 修订/退役使用显式授权流程。
 - Project Architecture 与用户直接声明的 L3/L4 替换必须先完整展示最终正文，再由用户明确授权；过期或并发变更后的计划会 fail-closed。
 
-进一步阅读：[隐私边界](docs/architecture/privacy-boundary.md)、[身份与设备](docs/architecture/identity-and-devices.md)、[远程认证](docs/operations/remote-auth.md)。
+进一步阅读：[隐私边界](docs/architecture/privacy-boundary.md)、[远程认证](docs/operations/remote-auth.md)。
 
 ## 开发
 

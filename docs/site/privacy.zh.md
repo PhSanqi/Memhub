@@ -30,7 +30,7 @@ Server Edition 把 Memory Core 与同一个 MCP runtime 放在服务器 loopback
 
 Cloudflare 接收认证和传输流量，但不是 Memory Core 的存储后端，也不是语义蒸馏模型。你仍需要根据自己的 Cloudflare 配置、日志策略和所在地区评估元数据处理；产品边界只说明 Memhub 不把 Cloudflare 当长期记忆数据库。
 
-Server 多设备共享记忆依赖稳定 account_id。远程客户端身份由 Access/OAuth 边界映射到账号；设备、模型和 Harness 只是 provenance，不应该成为永久用户 ID。
+Server 多设备共享记忆依赖稳定 account_id。远程客户端身份由 Access/OAuth 边界映射到账号；设备、模型和 Harness 只是 provenance，不应该成为永久用户 ID。不同 `account_id` 是严格 tenant 边界：普通 User 只能读写自己的 Project、Todo、L1–L4、Skill、Branch、Architecture 与蒸馏状态，只有 Admin 才能枚举或管理其他账号。
 
 ## 人类身份与机器身份
 
@@ -100,7 +100,7 @@ Merge 同样不会物理重写历史，它改变 canonical project 与 alias 关
 
 Local：检查 3001/18960 都只在预期 loopback，并确认 MCP 客户端连接 3001 `/mcp`。Server：检查 18960/3001 origin 只在服务器本机；公网 `/mcp` 只能通过认证域名进入并转到同一个 runtime。使用网络工具验证，而不是仅相信配置文件。
 
-检查 User/Admin 是否在匿名请求下被拒绝；检查正常账号和 Admin role 是否区分。撤销一个 Device Token，确认该设备失效但其他设备与账号记忆仍然存在。
+检查 User/Admin 是否在匿名请求下被拒绝；检查普通账号无法选择或读取其他账号，Admin role 才能执行跨账号管理；再用双账号回归确认相同 Project/event/Skill 标识也不会跨 tenant 串读。
 
 检查一个项目的 L3 是否不会出现在另一个项目 context；检查 Skill 可以复用但不带业务事实。最后检查模型配置，确认你知道召回内容最终由哪个模型处理。
 
@@ -128,8 +128,8 @@ Memhub 自托管架构的长期记忆存储由你控制。真正需要审计的�
 ### 我能把 Memory Core 放到另一台机器吗？
 默认产品路径不建议。远程 storage/model 是显式架构变化，需要经过 network policy 与风险审计。Server Edition 的推荐方式是把 Gateway 与 Memory Core 放在同一服务器私有边界。
 
-### Cloudflare Service Token 能否替代 Memhub Device Token？
-不能。前者通过边缘访问控制，后者在 Memhub origin 选择并约束设备/账号；两者职责不同。
+### Cloudflare Service Token 是否决定 Memhub 账号身份？
+不能。Cloudflare 负责边缘认证/传输；Memhub 根据已验证的人类身份解析稳定 `account_id`。客户端不得通过自报账号标识绕过这个映射。
 
 ### 项目逻辑删除会清掉所有历史吗？
 不会。它主要改变 active routing。需要彻底数据删除时应采用专门 purge 方案，并评估 provenance、备份和合规影响。
@@ -149,9 +149,9 @@ Local 的主要风险往往来自本机账号、磁盘、恶意插件和云模�
 
 ## 最小权限建议
 
-普通 User 只需要读取自己的记忆、项目、TODO 与 Processing 状态，不需要修改账号角色或蒸馏策略。Admin 才能管理账号、项目 merge/delete 和 policy。设备凭据只允许代表绑定账号的机器入口，不应该自动获得 Admin Web 权限。
+普通 User 只需要读取自己的记忆、项目、TODO 与 Processing 状态，不需要修改账号角色或蒸馏策略。Admin 才能管理账号、项目 merge/delete 和 policy。远程 MCP 与浏览器请求都必须由认证边界解析到稳定账号，不能通过客户端参数提升为 Admin 或切换 tenant。
 
-凭据轮换时一次只撤销一个边界：Cloudflare Service Token 影响边缘机器认证；Memhub Device Token 影响 origin 设备身份；local-admin token 影响 loopback 管理。分开轮换可以确认失效范围符合预期。
+凭据轮换时一次只撤销一个边界：Cloudflare/IdP 凭据影响远程身份与边缘访问；local-admin token 只影响 loopback 管理。分开轮换可以确认失效范围符合预期。
 
 ## 数据最小化与召回最小化
 
@@ -175,7 +175,7 @@ Local/Server 都可以先检查监听边界：
 ss -ltn | grep -E '3001|18960'
 ```
 
-Server 再分别检查 origin 与公网入口。UI 示例：匿名打开 `/admin` 应被认证层拒绝；合法 User 打开 `/user` 应只能看到自己的账号范围；只有 Admin role 才能进入管理页面。设备撤销后，该设备应失效，但同一账号其他设备和长期记忆仍可用。
+Server 再分别检查 origin 与公网入口。UI 示例：匿名打开 `/admin` 应被认证层拒绝；合法 User 打开 `/user` 应只能看到自己的账号范围；只有 Admin role 才能进入管理页面。撤销远程身份/Access 凭据后应只影响对应认证边界，不应改变该账号已经保存的长期记忆。
 
 ## 失败诊断与恢复方法
 

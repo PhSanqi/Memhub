@@ -229,7 +229,7 @@ Linux systemd user service 默认与用户 session/linger 配置相关。如果�
 
 ## 生产环境变更纪律
 
-修改公网 host、Access policy、Device Token、项目 merge/delete、Memory Core schema 都属于不同风险等级。一次只改一类边界并完成验证，再继续下一类。不要在同一次维护窗口同时重配 Cloudflare、迁移数据库、升级 Node 和重建项目注册，否则失败后几乎无法定位根因。
+修改公网 host、Access policy、账号 role/允许列表、项目 merge/delete、Memory Core schema 都属于不同风险等级。一次只改一类边界并完成验证，再继续下一类。不要在同一次维护窗口同时重配 Cloudflare、迁移数据库、升级 Node 和重建项目注册，否则失败后几乎无法定位根因。
 
 对外发布新网页也应遵循同样原则：先 build + E2E + responsive review，再重启 Gateway，最后从公网检查页面标记。网页静态改动虽然不触碰 Memory Core，但 Gateway 重启仍会短暂影响 MCP，因此应该被视为运行切换而不是“只是改 CSS”。
 
