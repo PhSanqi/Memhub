@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve cumulative canonical L2 chronology: routine L2 replacement now fails closed when a candidate drops existing timeline states, and strengthen project labels in the L2 feed for clearer visual grouping.
+- Rework Project State / Archify as a canonical-L2-first line progress flow: the main graph contains only representative L2 timeline states and lightweight workstream lanes, while historical revisions and evidence references remain drill-down provenance; Archify transitions follow global L2 chronology instead of lane-local/Gantt-style positioning.
 - Improve memory-console readability: separate actionable processing failures from superseded migration history, stack project Current Truth and Next Work vertically on wide screens, bound long overview todo lists, and show L2 events newest-first.
 - Fix L2 management freshness semantics: identify the ledger-backed canonical/current L2 per project, sort it ahead of stale activated duplicates, distinguish historical event dates from canonical L2 update/revision time, and preserve superseded L2 history through the exact revision ledger.
 - Add a permanent multi-account isolation regression covering ordinary-user role defaults, pre-provisioned Cloudflare identity binding, and account-scoped Project/Todo, L1, Skill and distillation state.

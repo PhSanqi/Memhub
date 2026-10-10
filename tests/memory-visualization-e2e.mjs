@@ -104,10 +104,15 @@ assert.equal(result.archify.lifecycle_ir.diagram_type, "lifecycle");
 assert.equal(result.archify.lifecycle_ir.meta.output, "memhub-project-state-alpha.html");
 assert.ok(result.archify.lifecycle_ir.lanes.length <= 4);
 assert.ok(result.archify.lifecycle_ir.states.length <= result.state.events.length);
-assert.ok(result.archify.lifecycle_ir.states.every((state) => state.col >= 0 && state.col <= 4));
+assert.deepEqual(result.archify.lifecycle_ir.states.map((state) => state.col), result.archify.lifecycle_ir.states.map((_, index) => index));
 assert.ok(result.archify.lifecycle_ir.states.every((state) => /^[A-Za-z][A-Za-z0-9_-]*$/.test(state.id)));
 assert.ok(result.archify.lifecycle_ir.lanes.every((lane) => /^[A-Za-z][A-Za-z0-9_-]*$/.test(lane.id)));
-assert.ok(result.archify.lifecycle_ir.transitions.length >= 2);
+assert.equal(result.archify.lifecycle_ir.transitions.length, result.archify.lifecycle_ir.states.length - 1);
+assert.match(result.archify.lifecycle_ir.meta.subtitle, /L2 progress flow/);
+assert.match(result.archify.invariant, /transition lines encode chronology/i);
+assert.equal(result.archify.lifecycle_ir.cards.length, 0);
+assert.ok(result.state.events.every((event) => !Object.hasOwn(event, "evidence_refs")));
+assert.ok(result.archify.lifecycle_ir.states.every((state) => !Object.hasOwn(state, "evidence_refs")));
 
 // No project selection intentionally produces no account-wide graph.
 const noProject = buildMemoryVisualization({ l2: [] });
@@ -125,8 +130,8 @@ const singleEvent = buildMemoryVisualization({
 assert.equal(singleEvent.state.events.length, 1);
 assert.equal(singleEvent.archify.exportable, false);
 
-// A superseded/archived L2 Memory Core row may disappear from the active L2
-// list, but its exact revision ledger must continue to preserve unique history.
+// A superseded/archived L2 revision remains exact drill-down provenance, but
+// historical-only states must never leak into the canonical L2 main graph.
 const staleLedgerEvent = buildMemoryVisualization({
   projectId: "alpha",
   l2: [{
@@ -144,7 +149,12 @@ const staleLedgerEvent = buildMemoryVisualization({
     evidence_refs: ["l1:historical-evidence"]
   }]
 });
-assert.ok(staleLedgerEvent.state.events.some((event) => event.memory_id === "timeline-stale" && /Historical unique event/.test(event.title)));
+assert.equal(staleLedgerEvent.state.events.some((event) => event.memory_id === "timeline-stale" || /Historical unique event/.test(event.title)), false);
+assert.equal(staleLedgerEvent.state.events.length, 1);
+assert.equal(staleLedgerEvent.drilldown.revisions.length, 1);
+assert.equal(staleLedgerEvent.drilldown.revisions[0].ref, "l2:timeline-stale:revision-1");
+assert.deepEqual(staleLedgerEvent.drilldown.revisions[0].event_ids, []);
+assert.deepEqual(staleLedgerEvent.drilldown.revisions[0].evidence_refs, ["l1:historical-evidence"]);
 assert.equal(staleLedgerEvent.state.latest_l2_revision_at, "2026-10-10T10:05:16.750Z");
 
 console.log("memory-visualization-e2e: ok");

@@ -27,8 +27,9 @@ export async function submitDistillationControl(input: {
 }): Promise<Record<string, unknown>> {
   const { args, stateRoot, runtime, sourceHarness, leaseToken, resolveToolScope, validateDistillationEvidenceChain } = input;
     const jobId = optionalString(args.job_id);
+    const jobs = jobId ? await listDistillationJobs(stateRoot, runtime.accountId) : [];
     const job = jobId
-      ? (await listDistillationJobs(stateRoot, runtime.accountId)).find((item) => item.job_id === jobId)
+      ? jobs.find((item) => item.job_id === jobId)
       : undefined;
     if (jobId && !job) throw new Error("distillation job not found for account");
     if (job) assertActiveDistillationLease(job, sourceHarness, leaseToken);
@@ -93,6 +94,14 @@ export async function submitDistillationControl(input: {
       evidenceRefs: evidenceRefs ?? [],
       job
     });
+    if (kind === "l2" && projectId && job) {
+      assertRoutineL2PreservesCanonicalTimeline({
+        jobs,
+        projectId,
+        jobProjectId: job.project_id,
+        content
+      });
+    }
     if (args.dry_run === true) {
       return {
         ok: true,
@@ -339,6 +348,56 @@ function canonicalLayerTitle(kind: "l2" | "l3", projectId: string): string {
   return kind === "l2"
     ? `Project Timeline · ${projectId}`
     : `Project Rules & Experience · ${projectId}`;
+}
+
+function assertRoutineL2PreservesCanonicalTimeline(input: {
+  jobs: DistillationJob[];
+  projectId: string;
+  jobProjectId: string | null;
+  content: string;
+}): void {
+  const projectIds = new Set([input.projectId, input.jobProjectId].filter((value): value is string => Boolean(value)));
+  const base = input.jobs
+    .filter((item) =>
+      item.status === "completed" &&
+      item.target === "l2" &&
+      item.result_kind === "l2" &&
+      Boolean(item.result_id) &&
+      Boolean(item.result_content?.trim()) &&
+      Boolean(item.project_id && projectIds.has(item.project_id))
+    )
+    .sort((left, right) => completedRevisionAt(left).localeCompare(completedRevisionAt(right)) || left.job_id.localeCompare(right.job_id))
+    .at(-1);
+  if (!base?.result_content?.trim() || !base.result_id) return;
+
+  const baseHeadings = timelineHeadingKeys(base.result_content);
+  if (baseHeadings.length === 0) return;
+  const candidateHeadings = new Set(timelineHeadingKeys(input.content));
+  const missing = baseHeadings.filter((heading) => !candidateHeadings.has(heading));
+  if (missing.length === 0) return;
+
+  const baseRef = `l2:${base.result_id}:${base.job_id}`;
+  const examples = missing.slice(0, 3).join(" | ");
+  throw new Error(
+    `L2 candidate would drop canonical timeline history: ${missing.length}/${baseHeadings.length} prior event headings are missing. ` +
+    `Load current canonical L2 ${baseRef} and submit a full timeline replacement, not a delta.` +
+    (examples ? ` Missing examples: ${examples}` : "")
+  );
+}
+
+function timelineHeadingKeys(content: string): string[] {
+  const values = [...content.matchAll(/^##\s+(.+?)\s*$/gm)]
+    .map((match) => normalizeTimelineHeading(match[1] ?? ""))
+    .filter(Boolean);
+  return [...new Set(values)];
+}
+
+function normalizeTimelineHeading(value: string): string {
+  return value.normalize("NFKC").replace(/\s+/g, " ").trim().toLocaleLowerCase("en-US");
+}
+
+function completedRevisionAt(job: DistillationJob): string {
+  return job.result_committed_at ?? job.completed_at ?? job.updated_at;
 }
 
 function memoryResultId(value: unknown): string | undefined {

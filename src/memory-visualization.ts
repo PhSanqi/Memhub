@@ -158,19 +158,21 @@ export function buildMemoryVisualization(input: {
   const currentCoreHeads: Array<{ id: string; updatedAt: string }> = [];
   const currentL2MemoryIds = new Set<string>();
 
-  const upsertEvent = (
-    memoryId: string,
-    section: TimelineSection,
-    source: { revisionRef?: string; seenAt: string; evidenceRefs: string[] }
-  ): string => {
+  const findCurrentEvent = (memoryId: string, section: TimelineSection): EventDraft | undefined => {
     const title = section.title || section.dateLabel || "Timeline event";
-    const summary = section.summary;
     const dateKey = normalizeEventKey(section.dateLabel || section.date);
-    const existing = [...drafts.values()].find((candidate) =>
+    return [...drafts.values()].find((candidate) =>
       candidate.memory_id === memoryId &&
       normalizeEventKey(candidate.date_label || candidate.date) === dateKey &&
       sameTimelineEvent(candidate.title, title, section.dateLabel || section.date)
     );
+  };
+
+  const createCurrentEvent = (memoryId: string, section: TimelineSection, seenAt: string, sourceEvidenceRefs: string[]): string => {
+    const title = section.title || section.dateLabel || "Timeline event";
+    const summary = section.summary;
+    const existing = findCurrentEvent(memoryId, section);
+    const dateKey = normalizeEventKey(section.dateLabel || section.date);
     const signature = `${memoryId}|${dateKey}|${normalizeEventKey(title)}`;
     const id = existing?.id ?? `event:${portableId(memoryId)}:${stableHash(signature)}`;
     if (!existing) {
@@ -183,10 +185,10 @@ export function buildMemoryVisualization(input: {
         summary,
         stage: inferStage(title),
         version: extractVersion(title),
-        source_revision_refs: source.revisionRef ? [source.revisionRef] : [],
-        evidence_refs: uniqueStrings(source.evidenceRefs),
-        first_seen_at: source.seenAt,
-        last_seen_at: source.seenAt,
+        source_revision_refs: [],
+        evidence_refs: uniqueStrings(sourceEvidenceRefs),
+        first_seen_at: seenAt,
+        last_seen_at: seenAt,
         explicit_workstream: explicitWorkstream(title),
         workstream_id: "main",
         workstream_label: "Mainline",
@@ -197,31 +199,19 @@ export function buildMemoryVisualization(input: {
       });
       return id;
     }
-    if (source.seenAt >= existing.last_seen_at) {
-      existing.date = section.date || existing.date;
-      existing.date_label = section.dateLabel || existing.date_label;
-      existing.title = title || existing.title;
-      existing.summary = summary || existing.summary;
-      existing.stage = inferStage(existing.title);
-      existing.version = extractVersion(existing.title) ?? existing.version;
-      existing.explicit_workstream = explicitWorkstream(existing.title) ?? existing.explicit_workstream;
-      existing.last_seen_at = source.seenAt;
-    }
-    if (source.seenAt < existing.first_seen_at) existing.first_seen_at = source.seenAt;
-    if (source.revisionRef && !existing.source_revision_refs.includes(source.revisionRef)) existing.source_revision_refs.push(source.revisionRef);
-    existing.evidence_refs = uniqueStrings([...existing.evidence_refs, ...source.evidenceRefs]);
+    // Canonical L2 owns the visible event content. Duplicate sections inside the
+    // current L2 can extend timestamps/evidence, but revision history never
+    // rewrites or introduces nodes in the main Project State graph.
+    if (seenAt >= existing.last_seen_at) existing.last_seen_at = seenAt;
+    if (seenAt < existing.first_seen_at) existing.first_seen_at = seenAt;
+    existing.evidence_refs = uniqueStrings([...existing.evidence_refs, ...sourceEvidenceRefs]);
     return id;
   };
 
-  for (const revision of revisions) {
-    const eventIds = timelineSections(revision.content).map((section) => upsertEvent(revision.memory_id, section, {
-      revisionRef: revision.ref,
-      seenAt: revision.committed_at,
-      evidenceRefs: revision.evidence_refs
-    }));
-    revisionEventIds.set(revision.ref, eventIds);
-  }
-
+  // Main graph source: current canonical L2 only. The exact revision ledger is
+  // attached later as drill-down provenance and may not create historical-only
+  // nodes. This keeps Archify a projection of L2 Current Truth rather than a
+  // second state reconstruction system.
   for (const item of input.l2) {
     const memoryId = itemIdentifier(item);
     if (!memoryId) continue;
@@ -229,27 +219,33 @@ export function buildMemoryVisualization(input: {
     const body = stringValue(item.body) ?? stringValue(item.content) ?? "";
     const sections = timelineSections(body);
     const seenAt = timestampFromItem(item) ?? latestRevisionByMemory.get(memoryId)?.committed_at ?? "";
-    const latestRevision = latestRevisionByMemory.get(memoryId);
-    const eventIds = sections.map((section) => upsertEvent(memoryId, section, {
-      revisionRef: latestRevision?.ref,
-      seenAt,
-      evidenceRefs: uniqueStrings([...(latestRevision?.evidence_refs ?? []), ...evidenceRefs(item)])
-    }));
+    const eventIds = sections.map((section) => createCurrentEvent(memoryId, section, seenAt, evidenceRefs(item)));
     const head = eventIds.at(-1);
     if (head) currentCoreHeads.push({ id: head, updatedAt: seenAt });
+  }
+
+  // Historical L2 revisions are provenance only. Match them onto canonical
+  // events for exact drill-down; unmatched historical states remain in the
+  // revision ledger but stay out of the main flow.
+  for (const revision of revisions) {
+    const eventIds = timelineSections(revision.content).flatMap((section) => {
+      const event = findCurrentEvent(revision.memory_id, section);
+      if (!event) return [];
+      if (!event.source_revision_refs.includes(revision.ref)) event.source_revision_refs.push(revision.ref);
+      event.evidence_refs = uniqueStrings([...event.evidence_refs, ...revision.evidence_refs]);
+      if (revision.committed_at < event.first_seen_at) event.first_seen_at = revision.committed_at;
+      return [event.id];
+    });
+    revisionEventIds.set(revision.ref, uniqueStrings(eventIds));
   }
 
   const orderedDrafts = [...drafts.values()].sort(compareEvents);
   assignWorkstreams(orderedDrafts);
   orderedDrafts.forEach((event, index) => { event.order = index + 1; });
 
-  let currentHeadEventId = currentCoreHeads
+  const currentHeadEventId = currentCoreHeads
     .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt) || a.id.localeCompare(b.id))
     .at(-1)?.id ?? null;
-  if (!currentHeadEventId) {
-    const latestRevision = revisions.at(-1);
-    currentHeadEventId = latestRevision ? revisionEventIds.get(latestRevision.ref)?.at(-1) ?? null : null;
-  }
   if (currentHeadEventId) drafts.get(currentHeadEventId)!.current_head = true;
   const latestL2RevisionAt = [
     revisions.at(-1)?.committed_at ?? "",
@@ -342,11 +338,12 @@ export function buildMemoryVisualization(input: {
     const laneEvents = events.filter((event) => event.workstream_id === workstream.id).sort((a, b) => a.order - b.order);
     if (laneEvents.length <= 5) return laneEvents;
     return [laneEvents[0]!, ...laneEvents.slice(-4)];
-  });
+  }).sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
   const archifyStateId = new Map(archifyEvents.map((event, index) => [event.id, `state_${index + 1}`]));
-  const archifyStates = archifyEvents.map((event) => {
-    const workstreamEvents = archifyEvents.filter((item) => item.workstream_id === event.workstream_id);
-    const col = workstreamEvents.findIndex((item) => item.id === event.id);
+  const archifyStates = archifyEvents.map((event, index) => {
+    // Archify columns follow canonical L2 chronology globally, not lane-local
+    // indices. Lanes only separate parallel workstreams visually.
+    const col = index;
     return {
       id: archifyStateId.get(event.id)!,
       type: event.current_head || event.stage === "active" ? "active" as const :
@@ -360,13 +357,12 @@ export function buildMemoryVisualization(input: {
       width: 220
     };
   });
-  const archifyTransitions = orderedArchifyWorkstreams.flatMap((workstream) => {
-    const laneEvents = archifyEvents.filter((event) => event.workstream_id === workstream.id).sort((a, b) => a.order - b.order);
-    return laneEvents.slice(1).flatMap((event, index) => {
-      const from = archifyStateId.get(laneEvents[index]!.id);
-      const to = archifyStateId.get(event.id);
-      return from && to ? [{ from, to }] : [];
-    });
+  // The line is chronology-first. Workstream lanes only position nodes; they
+  // do not redefine causality or create a second project-state graph.
+  const archifyTransitions = archifyEvents.slice(1).flatMap((event, index) => {
+    const from = archifyStateId.get(archifyEvents[index]!.id);
+    const to = archifyStateId.get(event.id);
+    return from && to ? [{ from, to }] : [];
   });
 
   return {
@@ -396,13 +392,13 @@ export function buildMemoryVisualization(input: {
       role: "optional_export_and_design_reference",
       exportable: archifyStates.length >= 2,
       compatible_diagram_types: ["lifecycle"],
-      invariant: "Project State is a disposable projection of canonical project L2 plus its exact L2 revision ledger; the console retains the complete timeline while Archify exports at most five representative states per workstream and never becomes a second project-state source of truth.",
+      invariant: "Project State is a disposable, line-based projection of canonical project L2. Archify exports representative L2 states only; transition lines encode chronology, while revisions and evidence remain drill-down provenance and never become a second project-state source of truth.",
       lifecycle_ir: {
         schema_version: 2,
         diagram_type: "lifecycle",
         meta: {
           title: `Memhub Project State · ${projectId}`,
-          subtitle: `Representative lifecycle · ${orderedArchifyWorkstreams.length} of ${workstreams.length} workstreams · up to 5 states per lane`,
+          subtitle: `L2 progress flow · ${orderedArchifyWorkstreams.length} of ${workstreams.length} workstreams · up to 5 representative states per lane`,
           output: `memhub-project-state-${portableId(projectId)}.html`
         },
         lanes: orderedArchifyWorkstreams.map((workstream) => ({ id: archifyLaneId.get(workstream.id)!, label: workstream.label })),

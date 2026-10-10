@@ -21,7 +21,9 @@ export function distillationNextPayload(
         total_chars: evidenceDocument.length,
         complete: true
       },
-      instructions: `Produce only the requested ${job.target.toUpperCase()} artifact from the supplied evidence. Read current Memhub context first so the result updates the canonical artifact rather than duplicating it. If evidence is insufficient for this layer, call action=skip with job_id.`
+      instructions: job.target === "l2"
+        ? "Produce the requested L2 artifact from the supplied L1 evidence. First load the current canonical L2 from Memhub, preserve its existing timeline events and superseded history, then merge the new evidence into one full canonical timeline replacement. Never submit a delta-only L2 body. If evidence is insufficient, call action=skip with job_id."
+        : `Produce only the requested ${job.target.toUpperCase()} artifact from the supplied evidence. Read current Memhub context first so the result updates the canonical artifact rather than duplicating it. If evidence is insufficient for this layer, call action=skip with job_id.`
     };
   }
 
@@ -52,7 +54,9 @@ export function distillationNextPayload(
     },
     evidence_chunk: evidenceDocument.slice(evidenceOffset, end),
     instructions: nextOffset === null
-      ? `All evidence chunks for ${job.job_id} have been read. Produce only the requested ${job.target.toUpperCase()} artifact, or call action=skip if the evidence is insufficient.`
+      ? (job.target === "l2"
+        ? `All evidence chunks for ${job.job_id} have been read. Load the current canonical L2, preserve its prior timeline events, and merge this evidence into one full canonical replacement; never submit a delta-only L2 body. Call action=skip if the evidence is insufficient.`
+        : `All evidence chunks for ${job.job_id} have been read. Produce only the requested ${job.target.toUpperCase()} artifact, or call action=skip if the evidence is insufficient.`)
       : `This job uses chunked evidence. Keep the same lease owner and call action=next with job_id=${job.job_id}, source_harness=${job.leased_by ?? "<same-harness>"}, evidence_offset=${nextOffset}. Do not submit until evidence_transport.complete=true.`
   };
 }

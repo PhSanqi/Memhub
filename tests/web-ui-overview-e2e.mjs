@@ -37,6 +37,7 @@ assert.match(html, /处理状态/);
 assert.match(html, /ad=a\.date\|\|['"]0000-00-00['"],bd=b\.date\|\|['"]0000-00-00['"]/);
 assert.match(html, /bd\.localeCompare\(ad\)/);
 assert.match(html, /按事件日期从新到旧/);
+assert.match(html, /\.timeline-context>span\{color:var\(--text\);font:700 13px\/1\.4 var\(--font-sans\)/);
 
 // Long Next Work lists stay bounded in overview and expose the full project
 // todo view instead of turning the overview into an unbounded page.
