@@ -40,7 +40,7 @@ const client = {
       ] } };
     }
     if (layers.includes("L3") || layers.includes("L2")) {
-      return { debug: { hits: [
+      return { debug: { status: ["fts_search:failed_pattern_fallback"], hits: [
         makeHit("project-keyword", "L3", 0.55, "BM25 keyword retrieval diagnostics and compact top-k", [`project:${project}`]),
         makeHit("project-semantic", "L3", 1.4, "general project architecture", [`project:${project}`]),
         makeHit("project-duplicate", "L3", 0.5, "BM25   keyword retrieval diagnostics and compact top-k", [`project:${project}`]),
@@ -75,8 +75,88 @@ assert.equal(recalled.reusableSkills[0].provenance.skillRouter.reliability, 0.85
 assert.equal(recalled.diagnostics.version, "retrieval-v1");
 assert.equal(recalled.diagnostics.finalLimit, 6);
 assert.equal(recalled.diagnostics.candidateLimit, 24);
+assert.deepEqual(recalled.diagnostics.coreStatus, ["fts_search:failed_pattern_fallback"]);
 assert.ok(recalled.diagnostics.lanes.project.candidateCount >= 2);
 assert.ok(recalled.projectMemory[0].provenance.retrievalV1.fusedScore > 0);
 assert.ok(requests.every((request) => request.limit <= 24));
+
+// Project merge/alias regression: storageIds may contain both the active
+// canonical project and historical merged project namespaces. Historical L3
+// remains stored for audit/provenance, but must never compete with the active
+// canonical project's L3 for Current Truth. Historical L2 chronology remains
+// eligible so merge history is not lost.
+const mergedRequests = [];
+const mergedClient = {
+  async search(request) {
+    mergedRequests.push(request);
+    const layers = request.layers ?? [];
+    const project = request.namespace?.projectId;
+    if (layers.includes("L4") || layers.includes("Skill")) return { debug: { hits: [] } };
+    if (project === "LegacyWorkbench" && layers.includes("L3")) {
+      return { debug: { hits: [
+        makeHit(
+          "canonical-legacyworkbench-l3",
+          "L3",
+          0.2,
+          "Current LegacyWorkbench rules and complete canonical project truth.",
+          ["artifact:l3", "project:LegacyWorkbench"]
+        ),
+        makeHit(
+          "canonical-legacyworkbench-l2",
+          "L2",
+          0.1,
+          "Current LegacyWorkbench chronology.",
+          ["artifact:l2", "project:LegacyWorkbench"]
+        )
+      ] } };
+    }
+    if (project === "devspace" && layers.includes("L2") && !layers.includes("L3")) {
+      return { debug: { hits: [
+        makeHit(
+          "historical-devspace-l2",
+          "L2",
+          0.8,
+          "Historical devspace chronology retained after merge.",
+          ["artifact:l2", "project:devspace"]
+        )
+      ] } };
+    }
+    if (project === "devspace" && layers.includes("L3")) {
+      return { debug: { hits: [
+        makeHit(
+          "historical-devspace-l3",
+          "L3",
+          9.9,
+          "Obsolete devspace rules that must never become Current Truth again.",
+          ["artifact:l3", "project:devspace"]
+        )
+      ] } };
+    }
+    return { debug: { hits: [] } };
+  }
+};
+
+const mergedSource = new MemoryRestContextSource(mergedClient);
+const mergedRecall = await mergedSource.recall({
+  accountId: "acct",
+  userId: "user",
+  query: "LegacyWorkbench current project truth",
+  projectId: "LegacyWorkbench",
+  projectStorageIds: ["LegacyWorkbench", "devspace"],
+  limit: 6,
+  reusableSkillProjectIds: []
+});
+
+assert.ok(mergedRecall.projectMemory.some((item) => item.id === "canonical-legacyworkbench-l3"));
+assert.ok(mergedRecall.projectMemory.some((item) => item.id === "historical-devspace-l2"));
+assert.ok(mergedRecall.projectMemory.every((item) => item.id !== "historical-devspace-l3"));
+assert.equal(
+  mergedRequests.some((request) =>
+    request.namespace?.projectId === "devspace" &&
+    (request.layers ?? []).includes("L3")
+  ),
+  false,
+  "merged historical project namespaces must not be queried for L3 Current Truth"
+);
 
 console.log("memhub-memory-source-retrieval-e2e: ok");

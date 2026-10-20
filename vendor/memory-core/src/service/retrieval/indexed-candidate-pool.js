@@ -19,7 +19,7 @@ export class IndexedCandidatePool {
     retrievalCandidateCount(input) {
         const baseFilter = {
             userId: input.userId,
-            ...projectRecallFilter(input.projectId),
+            ...projectRecallFilter(input.projectId, input.projectIds, input.accountWideSkill),
             memoryLayer: input.layers,
             status: ["activated", "resolving"]
         };
@@ -30,7 +30,7 @@ export class IndexedCandidatePool {
             return false;
         const baseFilter = {
             userId: input.userId,
-            ...projectRecallFilter(input.projectId),
+            ...projectRecallFilter(input.projectId, input.projectIds, input.accountWideSkill),
             memoryLayer: input.layers,
             status: ["activated", "resolving"]
         };
@@ -38,15 +38,21 @@ export class IndexedCandidatePool {
     }
     async indexedRetrievalCandidatePool(input) {
         const routeTasks = [];
+        const routeStatus = [];
         const queryVector = input.queryVector && input.queryVector.length > 0 ? input.queryVector : undefined;
         const layers = input.layers;
-        const addRoute = (run) => {
-            routeTasks.push(Promise.resolve().then(run));
+        const addRoute = (run, failureStatus) => {
+            routeTasks.push(Promise.resolve().then(run).catch((error) => {
+                if (!failureStatus)
+                    throw error;
+                routeStatus.push(failureStatus);
+                return [];
+            }));
         };
         for (const layer of layers) {
             const filter = {
                 userId: input.userId,
-                ...projectRecallFilter(input.projectId),
+                ...projectRecallFilter(input.projectId, input.projectIds, input.accountWideSkill && layer === "Skill"),
                 memoryLayer: layer,
                 status: ["activated", "resolving"],
                 ...(input.tags?.length ? { tags: input.tags } : {})
@@ -62,7 +68,12 @@ export class IndexedCandidatePool {
                 }
             }
             if (input.compiledQuery.ftsMatch) {
-                addRoute(() => this.deps.repos.memories.searchFtsIds(input.compiledQuery.ftsMatch, filter, keywordPool));
+                addRoute(
+                    () => this.deps.repos.memories.searchFtsIds(input.compiledQuery.ftsMatch, filter, keywordPool),
+                    input.compiledQuery.patternTerms.length > 0
+                        ? "fts_search:failed_pattern_fallback"
+                        : "fts_search:failed_no_pattern_fallback"
+                );
             }
             if (input.compiledQuery.patternTerms.length > 0) {
                 addRoute(() => this.deps.repos.memories.searchPatternIds(input.compiledQuery.patternTerms, filter, keywordPool));
@@ -75,7 +86,7 @@ export class IndexedCandidatePool {
             routeTasks.push(Promise.resolve([{ id: input.targetSkillId, score: 1, channel: "vec" }]));
         }
         if (routeTasks.length === 0) {
-            return { memories: [], channelScoresByMemory: new Map() };
+            return { memories: [], channelScoresByMemory: new Map(), status: [] };
         }
         const routeHits = await Promise.all(routeTasks);
         const flattenedHits = routeHits.flat();
@@ -91,7 +102,8 @@ export class IndexedCandidatePool {
         return {
             memories: this.deps.repos.memories.getMany(candidateIds).filter((memory) => this.isMemoryReadyForRetrieval(memory) &&
                 this.isSkillVisibleToAgent(memory, input.currentAgentId)),
-            channelScoresByMemory
+            channelScoresByMemory,
+            status: dedupeStrings(routeStatus).sort()
         };
     }
     isSkillVisibleToAgent(memory, currentAgentId) {
@@ -159,7 +171,22 @@ export class IndexedCandidatePool {
         return total <= 0 ? [] : this.deps.repos.memories.list(filter, total);
     }
 }
-function projectRecallFilter(projectId) {
+function projectRecallFilter(projectId, projectIds, accountWideSkill) {
+    if (accountWideSkill) {
+        const normalizedList = Array.isArray(projectIds) && projectIds.length > 0
+            ? projectIds.map((id) => (typeof id === "string" ? id.trim() : "")).filter(Boolean)
+            : undefined;
+        if (normalizedList && normalizedList.length > 0) {
+            return {
+                projectIds: normalizedList,
+                includeUnscopedProject: true
+            };
+        }
+        return {
+            projectIds: undefined,
+            includeUnscopedProject: undefined
+        };
+    }
     const normalized = projectId?.trim();
     return {
         projectIds: normalized ? [normalized] : [],

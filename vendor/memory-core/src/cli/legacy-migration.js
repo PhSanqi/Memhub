@@ -58,7 +58,7 @@ export async function migrateLegacyLocalPlugins(options) {
             for (const source of dataSources)
                 report.sources.push(importLegacyDatabase(target, source));
         });
-        run();
+        run.immediate();
     }
     finally {
         target.close();

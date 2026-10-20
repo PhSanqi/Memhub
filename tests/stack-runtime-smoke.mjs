@@ -1,12 +1,13 @@
+import { createTestRoot, isolateTestEnvironment } from "./test-isolation.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import {
+  closeCaptureIndexDb,
   isCaptureIngested,
   listCaptureEvents,
   markCaptureIngested,
@@ -20,7 +21,8 @@ import { createMemhubRuntime } from "../dist/runtime.js";
 import { waitForService } from "../dist/service-readiness.js";
 
 const repo = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const root = await mkdtemp(join(tmpdir(), "memhub-real-stack-"));
+const root = await createTestRoot("memhub-real-stack-");
+isolateTestEnvironment(join(root, "server"), root);
 const controlRoot = join(root, "server");
 const memoryDir = join(root, "memory");
 const entry = join(repo, "scripts", "run-stack.mjs");
@@ -210,7 +212,7 @@ try {
         assistant_text: assistantText
       }
     })).content[0].text);
-    assert.equal(committed.turn.ingested, true);
+    assert.equal(committed.ingested, true);
     return committed;
   };
   try {
@@ -412,5 +414,6 @@ try {
   console.log("memhub-stack-runtime-smoke: ok");
 } finally {
   if (child && child.exitCode === null) child.kill("SIGTERM");
+  closeCaptureIndexDb();
   await rm(root, { recursive: true, force: true, maxRetries: 30, retryDelay: 250 });
 }

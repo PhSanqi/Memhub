@@ -257,9 +257,11 @@ export class PanelReadModel {
         const memories = input.q?.trim()
             ? this.deps.repos.memories.getMany(this.deps.repos.memories.searchPanelIds(input.q, { ...filter, status: filter.status ?? ["activated", "resolving"] }, pageSize, offset).map((hit) => hit.id))
             : this.deps.repos.memories.list(filter, pageSize, offset);
+        const processing = new Map(this.deps.repos.processing.getMany(memories.map((memory) => memory.id))
+            .map((record) => [record.memoryId, record]));
         return {
             items: memories.map((memory) => ({
-                ...panelListItemFromMemory(this.deps.repos.memories.toListItem(memory), memory, this.deps.repos.processing.get(memory.id)),
+                ...panelListItemFromMemory(this.deps.repos.memories.toListItem(memory), memory, processing.get(memory.id)),
                 ...(input.includeBody ? { body: memory.memoryValue } : {})
             })),
             page,
@@ -281,11 +283,13 @@ export class PanelReadModel {
         const totalPages = Math.max(1, Math.ceil(total / pageSize));
         const page = Math.min(normalizePageNumber(input.page), totalPages);
         const episodes = this.deps.repos.runtime.listEpisodes(userId, pageSize, (page - 1) * pageSize, query, input.sourceAgent);
+        const memoryIds = new Set(this.deps.repos.memories.getMany(episodes.flatMap((episode) => episode.l1MemoryIds))
+            .map((memory) => memory.id));
         return {
             tasks: episodes.map((episode) => ({
                 id: episode.id,
                 episode: this.deps.episodeRef(episode),
-                memoryIds: episode.l1MemoryIds.filter((memoryId) => Boolean(this.deps.repos.memories.get(memoryId))),
+                memoryIds: episode.l1MemoryIds.filter((memoryId) => memoryIds.has(memoryId)),
                 turns: this.deps.repos.runtime.listRawTurnsByEpisode(episode.id, 1000).map(this.deps.rawTurnSummary),
                 updatedAt: episode.updatedAt
             })),

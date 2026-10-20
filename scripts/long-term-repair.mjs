@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 import { mkdir, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { migrate } from "../vendor/memory-core/src/storage/schema.js";
+import { resolveControlRoot, resolveCoreState } from "../dist/state-root.mjs";
 
 const OBSOLETE_JOB_TYPES = [
   "user_memory_embedding",
@@ -18,10 +18,8 @@ const OBSOLETE_JOB_TYPES = [
 ];
 
 const args = parseArgs(process.argv.slice(2));
-const dbPath = resolve(args.db ?? process.env.MEMHUB_MEMORY_DB ??
-  join(homedir(), ".memmy", "memory-service", "memory.sqlite"));
-const reportRoot = resolve(args.reportRoot ??
-  join(homedir(), ".memmy", "memhub", "repairs"));
+const dbPath = resolve(args.db ?? process.env.MEMHUB_MEMORY_DB ?? resolveCoreState().dbPath);
+const reportRoot = resolve(args.reportRoot ?? join(resolveControlRoot(), "repairs"));
 const startedAt = new Date().toISOString();
 
 const db = new Database(dbPath, args.apply ? {} : { readonly: true });

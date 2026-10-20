@@ -4,8 +4,9 @@
     "outDir": "dist",
     "rootDir": "src",
     "declaration": true,
+    "allowJs": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "src/**/*.mjs"],
   "exclude": ["node_modules", "dist"]
 }

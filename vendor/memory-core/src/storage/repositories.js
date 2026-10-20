@@ -6,7 +6,7 @@ import { asStringArray, parseJson, toJson } from "../utils/json.js";
 import { nowIso } from "../utils/time.js";
 import { attachMemoryVectors, dirtyMemoryVectorEntries, memoryVectorEntries as attachedMemoryVectorEntries, transferMemoryVectors } from "./memory-vector-state.js";
 import { SqliteVecStore, VECTOR_SEARCH_WINDOW } from "./sqlite-vec-store.js";
-const BUNDLE_TABLES = [
+export const BUNDLE_TABLES = [
     "memories",
     "memory_capture_claims",
     "l3_world_model_scopes",
@@ -42,6 +42,12 @@ const CLEAR_MEMORY_TABLES = [
     "idempotency_keys",
     "legacy_migration_ledger"
 ];
+export class MemoryFtsSearchError extends Error {
+    constructor(message, cause) {
+        super(message, { cause });
+        this.name = "MemoryFtsSearchError";
+    }
+}
 const LOG_TABLE_RETENTION_LIMIT = 10_000;
 const LOG_TABLE_RETENTION_ORDER = {
     api_logs: "called_at DESC, id DESC",
@@ -51,28 +57,105 @@ const LOG_TABLE_RETENTION_ORDER = {
 export class MemoryRepository {
     db;
     vectors;
+    pendingFtsRepairs = new Set();
+    ftsFailureLogged = false;
     constructor(db, vectors) {
         this.db = db;
         this.vectors = vectors;
+        this.recoverFtsOnStartup();
+    }
+    get ftsRepairOverflow() {
+        return this.ftsRepairState().dirty;
+    }
+    ftsRepairState() {
+        try {
+            const row = this.db
+                .prepare(`SELECT dirty, reason, updated_at FROM fts_repair_state WHERE id = 1`)
+                .get();
+            return {
+                dirty: Number(row?.dirty ?? 0) === 1,
+                reason: row?.reason ?? null,
+                updatedAt: row?.updated_at ?? null
+            };
+        }
+        catch {
+            return { dirty: false, reason: null, updatedAt: null };
+        }
+    }
+    markFtsDirty(reason) {
+        try {
+            this.db.prepare(`INSERT INTO fts_repair_state (id, dirty, reason, updated_at)
+         VALUES (1, 1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           dirty = 1,
+           reason = excluded.reason,
+           updated_at = excluded.updated_at`).run(reason, nowIso());
+        }
+        catch (error) {
+            throw new MemoryFtsSearchError("Failed to persist FTS repair state; aborting write transaction", error);
+        }
+    }
+    recoverFtsOnStartup() {
+        if (!this.ftsRepairState().dirty)
+            return false;
+        try {
+            this.db.transaction(() => {
+                this.rebuildAllFts();
+                this.db.prepare(`UPDATE fts_repair_state
+           SET dirty = 0, reason = NULL, updated_at = ?
+           WHERE id = 1`).run(nowIso());
+            }).immediate();
+            this.pendingFtsRepairs.clear();
+            return true;
+        }
+        catch (error) {
+            // Keep dirty set: the next startup retries. Rows and vectors are untouched.
+            console.warn("Memory FTS startup rebuild failed; full reindex remains required", error);
+            return false;
+        }
+    }
+    rebuildAllFts() {
+        const memories = this.db
+            .prepare(`SELECT * FROM memories WHERE deleted_at IS NULL AND status != 'deleted'`)
+            .all()
+            .map(memoryFromSql);
+        this.db.prepare(`DELETE FROM memories_fts`).run();
+        const insertMemory = this.db.prepare(`INSERT INTO memories_fts (id, identifier, memory_value, tags)
+       VALUES (?, ?, ?, ?)`);
+        for (const memory of memories) {
+            insertMemory.run(memory.id, memory.id, retrievalDocumentForMemory(memory), memory.tags.join(" "));
+        }
+        const userMemories = this.db
+            .prepare(`SELECT id, content, memory_types_json
+       FROM user_memories WHERE deleted_at IS NULL AND status != 'deleted'`)
+            .all();
+        this.db.prepare(`DELETE FROM user_memories_fts`).run();
+        const insertUserMemory = this.db.prepare(`INSERT INTO user_memories_fts (id, content, memory_types)
+       VALUES (?, ?, ?)`);
+        for (const userMemory of userMemories) {
+            insertUserMemory.run(userMemory.id, userMemory.content, asStringArray(parseJson(userMemory.memory_types_json, [])).join(" "));
+        }
     }
     insert(memory) {
-        const prepared = prepareMemoryForStorage(memory);
-        this.db
-            .prepare(`INSERT INTO memories (
-          id, timeline, user_id, conversation_id, session_id, agent_id, app_id,
-          memory_type, status, visibility, memory_key, memory_value,
-          tags_json, info_json, properties_json, memory_layer, content_hash,
-          version, created_at, updated_at, deleted_at
-        ) VALUES (
-          @id, @timeline, @userId, @conversationId, @sessionId, @agentId, @appId,
-          @memoryType, @status, @visibility, @memoryKey, @memoryValue,
-          @tagsJson, @infoJson, @propertiesJson, @memoryLayer, @contentHash,
-          @version, @createdAt, @updatedAt, @deletedAt
-        )`)
-            .run(memoryToSql(prepared.memory));
-        this.vectors.replace(prepared.memory.id, prepared.vectors, prepared.memory.updatedAt);
-        this.reindexFts(prepared.memory);
-        return attachMemoryVectors(prepared.memory, prepared.vectors);
+        return this.db.transaction(() => {
+            const prepared = prepareMemoryForStorage(memory);
+            this.db
+                .prepare(`INSERT INTO memories (
+              id, timeline, user_id, conversation_id, session_id, agent_id, app_id,
+              memory_type, status, visibility, memory_key, memory_value,
+              tags_json, info_json, properties_json, memory_layer, content_hash,
+              version, created_at, updated_at, deleted_at
+            ) VALUES (
+              @id, @timeline, @userId, @conversationId, @sessionId, @agentId, @appId,
+              @memoryType, @status, @visibility, @memoryKey, @memoryValue,
+              @tagsJson, @infoJson, @propertiesJson, @memoryLayer, @contentHash,
+              @version, @createdAt, @updatedAt, @deletedAt
+            )`)
+                .run(memoryToSql(prepared.memory));
+            this.vectors.replace(prepared.memory.id, prepared.vectors, prepared.memory.updatedAt);
+            this.reindexFtsForWrite(prepared.memory);
+            return attachMemoryVectors(prepared.memory, prepared.vectors);
+        }).immediate();
     }
     update(memory) {
         return this.updateRow(memory, true);
@@ -81,49 +164,51 @@ export class MemoryRepository {
         return this.updateRow(memory, false);
     }
     updateRow(memory, bumpVersion) {
-        const existing = this.get(memory.id);
-        if (!existing) {
-            throw new Error(`memory not found: ${memory.id}`);
-        }
-        const prepared = prepareMemoryForStorage(memory);
-        const updated = {
-            ...prepared.memory,
-            version: bumpVersion ? memory.version + 1 : existing.version
-        };
-        this.db
-            .prepare(`UPDATE memories
-         SET timeline = @timeline,
-             user_id = @userId,
-             conversation_id = @conversationId,
-             session_id = @sessionId,
-             agent_id = @agentId,
-             app_id = @appId,
-             memory_type = @memoryType,
-             status = @status,
-             visibility = @visibility,
-             memory_key = @memoryKey,
-             memory_value = @memoryValue,
-             tags_json = @tagsJson,
-             info_json = @infoJson,
-             properties_json = @propertiesJson,
-             memory_layer = @memoryLayer,
-             content_hash = @contentHash,
-             version = @version,
-             updated_at = @updatedAt,
-             deleted_at = @deletedAt
-         WHERE id = @id`)
-            .run(memoryToSql(updated));
-        const mergedVectors = mergeMemoryVectors(attachedMemoryVectorEntries(existing), prepared.vectorUpdates);
-        if (updated.deletedAt || updated.status === "deleted") {
-            this.vectors.deleteMemory(updated.id);
-        }
-        else if (prepared.vectorUpdates.length > 0) {
-            for (const vector of prepared.vectorUpdates) {
-                this.vectors.upsert(updated.id, vector, updated.updatedAt);
+        return this.db.transaction(() => {
+            const existing = this.get(memory.id);
+            if (!existing) {
+                throw new Error(`memory not found: ${memory.id}`);
             }
-        }
-        this.reindexFts(updated);
-        return attachMemoryVectors(updated, updated.deletedAt || updated.status === "deleted" ? [] : mergedVectors);
+            const prepared = prepareMemoryForStorage(memory);
+            const updated = {
+                ...prepared.memory,
+                version: bumpVersion ? memory.version + 1 : existing.version
+            };
+            this.db
+                .prepare(`UPDATE memories
+             SET timeline = @timeline,
+                 user_id = @userId,
+                 conversation_id = @conversationId,
+                 session_id = @sessionId,
+                 agent_id = @agentId,
+                 app_id = @appId,
+                 memory_type = @memoryType,
+                 status = @status,
+                 visibility = @visibility,
+                 memory_key = @memoryKey,
+                 memory_value = @memoryValue,
+                 tags_json = @tagsJson,
+                 info_json = @infoJson,
+                 properties_json = @propertiesJson,
+                 memory_layer = @memoryLayer,
+                 content_hash = @contentHash,
+                 version = @version,
+                 updated_at = @updatedAt,
+                 deleted_at = @deletedAt
+             WHERE id = @id`)
+                .run(memoryToSql(updated));
+            const mergedVectors = mergeMemoryVectors(attachedMemoryVectorEntries(existing), prepared.vectorUpdates);
+            if (updated.deletedAt || updated.status === "deleted") {
+                this.vectors.deleteMemory(updated.id);
+            }
+            else if (prepared.vectorUpdates.length > 0) {
+                for (const vector of prepared.vectorUpdates) {
+                    this.vectors.upsert(updated.id, vector, updated.updatedAt);
+                }
+            }
+            this.reindexFtsForWrite(updated);
+            return attachMemoryVectors(updated, updated.deletedAt || updated.status === "deleted" ? [] : mergedVectors);
+        }).immediate();
     }
     upsertByKey(memory) {
         const previous = memory.memoryKey
@@ -540,8 +625,8 @@ export class MemoryRepository {
                 .all(...built.params, ftsMatch, limit);
             return rows.map((row, index) => ({ id: row.id, score: 1 / (index + 1), channel: "fts" }));
         }
-        catch {
-            return [];
+        catch (error) {
+            throw new MemoryFtsSearchError("memory FTS search failed", error);
         }
     }
     searchPatternIds(terms, filter = {}, limit = 20) {
@@ -630,6 +715,21 @@ export class MemoryRepository {
             version: memory.version
         };
     }
+    reindexFtsForWrite(memory) {
+        try {
+            this.db.transaction(() => this.reindexFts(memory)).immediate();
+        }
+        catch (error) {
+            // The FTS savepoint already rolled back; persist the durable dirty flag inside
+            // the still-open row/vector transaction. A failed dirty write aborts it.
+            this.markFtsDirty(`write:${memory.id}`);
+            if (this.pendingFtsRepairs.size < 1000) this.pendingFtsRepairs.add(memory.id);
+            if (!this.ftsFailureLogged) {
+                this.ftsFailureLogged = true;
+                console.warn("Memory FTS reindex failed; writes preserved, repair required", error);
+            }
+        }
+    }
     reindexFts(memory) {
         try {
             this.db.prepare(`DELETE FROM memories_fts WHERE id = ?`).run(memory.id);
@@ -639,10 +739,12 @@ export class MemoryRepository {
                     .run(memory.id, memory.id, retrievalDocumentForMemory(memory), memory.tags.join(" "));
             }
         }
-        catch {
-            // The service search path is deterministic JS scoring; FTS is maintained
-            // opportunistically for future cloud/local parity and should not block writes.
+        catch (error) {
+            throw new MemoryFtsSearchError(`FTS reindex failed for ${memory.id}`, error);
         }
+        this.pendingFtsRepairs.delete(memory.id);
+        if (!this.pendingFtsRepairs.size && !this.ftsRepairOverflow) this.ftsFailureLogged = false;
+        return true;
     }
     hydrate(memory) {
         return attachMemoryVectors(memory, this.vectors.getMany([memory.id]).get(memory.id) ?? []);
@@ -801,6 +903,7 @@ export class MemoryProcessingRepository {
 export class RuntimeRepository {
     db;
     scheduledLogPrunes = new Set();
+    logInsertCounts = new Map();
     constructor(db) {
         this.db = db;
     }
@@ -1598,18 +1701,26 @@ export class RuntimeRepository {
         }));
     }
     saveIdempotency(key, requestHash, response, createdAt = nowIso()) {
+        const expiresAt = new Date(Date.parse(createdAt) + 7 * 24 * 60 * 60 * 1000).toISOString();
         this.db
             .prepare(`INSERT INTO idempotency_keys (key, request_hash, response_json, created_at, expires_at)
-         VALUES (?, ?, ?, ?, NULL)
+         VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET
            request_hash = excluded.request_hash,
-           response_json = excluded.response_json`)
-            .run(key, requestHash, toJson(response), createdAt);
+           response_json = excluded.response_json,
+           created_at = excluded.created_at,
+           expires_at = excluded.expires_at`)
+            .run(key, requestHash, toJson(response), createdAt, expiresAt);
+        this.db.prepare(`DELETE FROM idempotency_keys WHERE expires_at <= ?`).run(createdAt);
+        this.db.prepare(`DELETE FROM idempotency_keys WHERE key IN (
+          SELECT key FROM idempotency_keys ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET 10000
+        )`).run();
     }
     getIdempotency(key) {
         const row = this.db
-            .prepare(`SELECT request_hash, response_json FROM idempotency_keys WHERE key = ?`)
-            .get(key);
+            .prepare(`SELECT request_hash, response_json FROM idempotency_keys
+              WHERE key = ? AND (expires_at IS NULL OR expires_at > ?)`)
+            .get(key, nowIso());
         if (!row) {
             return undefined;
         }
@@ -1678,7 +1789,7 @@ export class RuntimeRepository {
             });
             return job;
         });
-        return transaction();
+        return transaction.immediate();
     }
     listJobs(status, limit = 50, userId) {
         void userId;
@@ -1888,7 +1999,7 @@ export class RuntimeRepository {
                 updated_at: at
             }));
         });
-        return transaction();
+        return transaction.immediate();
     }
     completeJob(id, at = nowIso()) {
         this.db
@@ -1936,7 +2047,7 @@ export class RuntimeRepository {
                 })
             }));
         });
-        return transaction();
+        return transaction.immediate();
     }
     requeueLeasedJobsAfterRestart(at = nowIso()) {
         const transaction = this.db.transaction(() => {
@@ -1967,7 +2078,7 @@ export class RuntimeRepository {
                 })
             }));
         });
-        return transaction();
+        return transaction.immediate();
     }
     failJob(id, error, at = nowIso(), forceDeadLetter = false) {
         return this.db.transaction(() => {
@@ -1990,7 +2101,7 @@ export class RuntimeRepository {
            WHERE id = ?`)
                 .run(status, error, at, id);
             return this.getJob(id);
-        })();
+        }).immediate();
     }
     enqueueEmbeddingRetry(input) {
         const now = input.now ?? Date.now();
@@ -2114,7 +2225,7 @@ export class RuntimeRepository {
                 })
             }));
         });
-        return transaction();
+        return transaction.immediate();
     }
     claimDueEmbeddingRetries(input) {
         if (input.targetMemoryIds?.length === 0) {
@@ -2165,7 +2276,7 @@ export class RuntimeRepository {
             }
             return claimed;
         });
-        return transaction();
+        return transaction.immediate();
     }
     isEmbeddingRetryClaimHeld(id, input) {
         const row = this.db
@@ -2588,7 +2699,7 @@ export class RuntimeRepository {
                     }
                 }
             }
-        })();
+        }).immediate();
         this.scheduleLogTablesPrune();
         return result;
     }
@@ -2614,7 +2725,10 @@ export class RuntimeRepository {
         if (insertedRowid <= LOG_TABLE_RETENTION_LIMIT) {
             return;
         }
-        this.scheduleLogTablePrune(table);
+        const count = (this.logInsertCounts.get(table) ?? 499) + 1;
+        this.logInsertCounts.set(table, count % 500);
+        if (count % 500 === 0)
+            this.scheduleLogTablePrune(table);
     }
     scheduleLogTablePrune(table) {
         if (this.scheduledLogPrunes.has(table)) {
@@ -2632,6 +2746,11 @@ export class RuntimeRepository {
         });
     }
     pruneLogTable(table) {
+        if (table === "api_logs") {
+            return this.db.prepare(`DELETE FROM api_logs WHERE rowid < (
+                SELECT rowid FROM api_logs ORDER BY rowid DESC LIMIT 1 OFFSET ?
+            )`).run(LOG_TABLE_RETENTION_LIMIT - 1).changes;
+        }
         const result = this.db
             .prepare(`DELETE FROM ${table}
          WHERE rowid IN (
@@ -2670,7 +2789,7 @@ export class Repositories {
         this.runtime = new RuntimeRepository(db);
     }
     transaction(fn) {
-        return this.db.transaction(fn)();
+        return this.db.transaction(fn).immediate();
     }
     clearAllMemoryData() {
         const existing = new Set(this.db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").pluck().all()
@@ -2693,7 +2812,7 @@ export class Repositories {
                     }
                 }
                 return cleared;
-            })();
+            }).immediate();
         }
         finally {
             if (foreignKeysEnabled)
@@ -3751,7 +3870,7 @@ function nestedString(record, ...path) {
     }
     return stringLike(value);
 }
-function redactBundleRow(table, row) {
+export function redactBundleRow(table, row, redactedAt) {
     if (table !== "raw_turns") {
         return row;
     }
@@ -3762,10 +3881,10 @@ function redactBundleRow(table, row) {
         reasoning_summary: null,
         tool_calls_json: "[]",
         tool_results_json: "[]",
-        redacted_at: row.redacted_at ?? nowIso()
+        redacted_at: row.redacted_at ?? redactedAt ?? nowIso()
     };
 }
-function serializeBundleRow(table, row) {
+export function serializeBundleRow(table, row) {
     const serialized = {};
     for (const [key, value] of Object.entries(row)) {
         serialized[key] = Buffer.isBuffer(value)
@@ -3863,6 +3982,9 @@ function evolutionJobPrioritySql() {
              WHEN job_type IN ('trace_summary', 'import_summary', 'embedding')
                AND ${onboardingFirstReportTarget} THEN -100
              WHEN json_extract(payload_json, '$.source') = 'memory.processing.manual_retry' THEN 0
+             WHEN job_type IN ('trace_summary', 'import_summary')
+               AND json_extract(payload_json, '$.source') IN
+                 ('startup.processing_repair', 'startup.placeholder_summary_repair') THEN 90
              WHEN job_type = 'trace_summary'
                OR (job_type = 'embedding' AND ${interactiveL1Target}) THEN 1
              WHEN job_type = 'import_summary'

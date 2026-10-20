@@ -1,5 +1,4 @@
 export { MemoryDb, defaultDatabasePath } from "./storage/db.js";
-export { POLARDB_MIGRATION_ID, POLARDB_SCHEMA_VERSION, polardbMigrationSql } from "./storage/polardb.js";
 export { RemoteRestStorageBackend, SqliteStorageBackend, createStorageBackend, sqliteBackendCapabilities } from "./storage/backend.js";
 export { MemoryRestClient, MemoryRestClientError } from "./client/rest-client.js";
 export { OpenMemCloudClient, OpenMemCloudClientError, openMemAddMessageFromTurnComplete, openMemFeedbackFromFeedback } from "./client/openmem-cloud-client.js";

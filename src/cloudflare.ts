@@ -22,9 +22,7 @@ export async function verifyCloudflareAccessJwt(
   token: string
 ): Promise<CloudflareIdentity> {
   const pin = await loadPin(stateRoot);
-  const configuredIssuer = process.env.MEMHUB_CF_TEAM_DOMAIN?.trim();
-  const issuer = normalizeIssuer(configuredIssuer || pin?.issuer || await discoverIssuer(publicHost));
-  if (pin && pin.issuer !== issuer) throw new Error("Cloudflare issuer 与已固定配置不一致");
+  const issuer = await resolveIssuer(publicHost, pin);
   let jwks = jwksByIssuer.get(issuer);
   if (!jwks) {
     jwks = createRemoteJWKSet(new URL(`${issuer}/cdn-cgi/access/certs`));
@@ -47,6 +45,17 @@ export async function verifyCloudflareAccessJwt(
   if (typeof payload.sub !== "string" || !payload.sub.trim()) throw new Error("Cloudflare JWT 缺少 sub");
   if (typeof payload.email !== "string" || !payload.email.trim()) throw new Error("Cloudflare JWT 缺少 email");
   return { sub: payload.sub.trim(), email: payload.email.trim().toLowerCase() };
+}
+
+export async function resolveCloudflareAccessIssuer(stateRoot: string, publicHost: string): Promise<string> {
+  return resolveIssuer(publicHost, await loadPin(stateRoot));
+}
+
+async function resolveIssuer(publicHost: string, pin: CloudflarePin | null): Promise<string> {
+  const configuredIssuer = process.env.MEMHUB_CF_TEAM_DOMAIN?.trim();
+  const issuer = normalizeIssuer(configuredIssuer || pin?.issuer || await discoverIssuer(publicHost));
+  if (pin && pin.issuer !== issuer) throw new Error("Cloudflare issuer 与已固定配置不一致");
+  return issuer;
 }
 
 function pinPath(stateRoot: string): string {

@@ -51,7 +51,12 @@ export const VIEWER_API_ROUTES = [
     "POST /api/v1/memory/:id/archive"
 ];
 export function isViewerApiRequest(request, url) {
-    return url.pathname === "/api/v1/events" || header(request, "x-memmy-viewer") === "1";
+    const method = request.method;
+    const matched = VIEWER_API_ROUTES.some((route) => {
+        const [verb, path] = route.split(" ");
+        return method === verb && new RegExp(`^${path.replace(/:[^/]+/g, "[^/]+")}$`).test(url.pathname);
+    });
+    return matched && (url.pathname === "/api/v1/events" || header(request, "x-memmy-viewer") === "1");
 }
 export function assertLocalViewerRequest(request, url) {
     const remote = request.socket.remoteAddress;

@@ -10,6 +10,7 @@ import {
   retryDistillationJob
 } from "../dist/distillation-jobs.js";
 import { submitDistillationControl } from "../dist/distillation-submit.js";
+import { MemoryCoreHttpError } from "../dist/local-memory-client.js";
 import { auditDistillationPipeline } from "../dist/distillation-audit.js";
 import { reconcileCompletedL2DerivedJob } from "../dist/distillation-derived-recovery.js";
 
@@ -26,10 +27,11 @@ const makeEvidence = (name) => [{
   timestamp: "2026-09-26T00:00:00.000Z", project_id: projectId,
   user_text: "Source evidence", assistant_text: "Recorded response"
 }];
-async function submit(job, runtime, description, enqueueDerived) {
+async function submit(job, runtime, description, enqueueDerived, artifactId) {
   return submitDistillationControl({
     args: {
       job_id: job.job_id,
+      ...(artifactId ? { artifact_id: artifactId } : {}),
       content: "Source-grounded project chronology from the supplied turn.",
       project_description: description
     },
@@ -116,7 +118,7 @@ try {
   const failedCore = await lease("second");
   runtime.memory.distill = async () => {
     coreWrites++;
-    throw new Error("injected Core write failed before commit");
+    throw new MemoryCoreHttpError(400, "injected Core write failed before commit");
   };
   await assert.rejects(
     submit(failedCore, runtime, "Metadata should not be attempted."),
@@ -156,6 +158,10 @@ try {
   assert.equal(audit.recovery.completed_l2_missing_l3, 1,
     "read-only audit must identify exactly the completed L2 without a child claim");
   assert.equal(audit.review_samples.completed_l2_missing_l3[0].job_id, third.job_id);
+  assert.equal(audit.content_health.mode, "read_only");
+  assert.equal(audit.content_health.mutation, "none");
+  assert.equal(audit.content_health.status, "attention");
+  assert.equal(audit.content_health.checks.find((check) => check.code === "DERIVATION_GAP_L2_L3")?.count, 1);
   assert.ok(audit.warnings.some((warning) => warning.includes("never replay the completed Core write")));
   const recoveryInput = {
     stateRoot: root, accountId, jobId: third.job_id, projectId
@@ -193,6 +199,7 @@ try {
     stateRoot: root, accountId, resolveProject: async () => projectId
   });
   assert.equal(repairedAudit.recovery.completed_l2_missing_l3, 0);
+  assert.equal(repairedAudit.content_health.checks.some((check) => check.code === "DERIVATION_GAP_L2_L3"), false);
   const originalStoreBytes = await readFile(jobsPath);
   try {
     const corrupted = JSON.parse(originalStoreBytes.toString("utf8"));
@@ -318,7 +325,7 @@ try {
     return {};
   };
   await assert.rejects(
-    submit(ambiguous, runtime, undefined),
+    submit(ambiguous, runtime, undefined, undefined, "ambiguous-response-artifact"),
     /stable result id/
   );
   const afterAmbiguous = await listDistillationJobs(root, accountId);
@@ -355,6 +362,10 @@ try {
   assert.equal(reassigned.status, "leased");
   assert.equal(reassigned.lease_token, replacement.lease_token);
   assert.equal(reassigned.result_id, undefined, "old generation must not overwrite the replacement lease");
+  const writesBeforeReconciliation = coreWrites;
+  await submit(replacement, runtime, undefined);
+  assert.equal(coreWrites, writesBeforeReconciliation,
+    "the current generation reconciles the frozen result without repeating Core");
 
   // Explicit Core failures keep their normal failed-job semantics even if
   // the token-fenced request crossed the wall-clock lease deadline.
@@ -362,7 +373,7 @@ try {
   runtime.memory.distill = async () => {
     coreWrites++;
     await expireLease(expiredFailure.job_id);
-    throw new Error("injected long Core request failure");
+    throw new MemoryCoreHttpError(400, "injected long Core request failure");
   };
   await assert.rejects(
     submit(expiredFailure, runtime, undefined),
@@ -384,7 +395,7 @@ try {
       harness, projectId, target: "l2", useLeaseToken: true
     });
     assert.equal(failureReplacement.job_id, reassignedFailure.job_id);
-    throw new Error("old generation Core failure after reassignment");
+    throw new MemoryCoreHttpError(400, "old generation Core failure after reassignment");
   };
   await assert.rejects(
     submit(reassignedFailure, runtime, undefined),
@@ -394,6 +405,50 @@ try {
   const failureOwner = afterFailureReassignment.find((job) => job.job_id === reassignedFailure.job_id);
   assert.equal(failureOwner.status, "leased");
   assert.equal(failureOwner.lease_token, failureReplacement.lease_token);
+
+  // A governed direct L2 replacement (for example consolidation/manual
+  // canonical repair) must create the same exact L2 -> L3 derivation claim as
+  // a leased routine L2 job. Otherwise current L3 can silently lag current L2.
+  const directRoot = join(root, "direct-submit");
+  const directProjectId = "direct-l2-project";
+  const directEvidence = [{
+    ref: "l1:direct-source",
+    kind: "turn",
+    layer: "L1",
+    timestamp: "2026-10-11T00:00:00.000Z",
+    project_id: directProjectId,
+    content: "Direct source evidence"
+  }];
+  const directRuntime = {
+    ...runtime,
+    memory: {
+      distill: async () => ({ id: "direct-l2-result" })
+    },
+    projects: {
+      ...runtime.projects,
+      resolve: async () => directProjectId
+    }
+  };
+  const directResult = await submitDistillationControl({
+    args: {
+      kind: "l2",
+      scope: "project",
+      project: directProjectId,
+      content: "Direct canonical L2 replacement with complete chronology.",
+      evidence_refs: directEvidence.map((item) => item.ref)
+    },
+    stateRoot: directRoot,
+    runtime: directRuntime,
+    sourceHarness: harness,
+    resolveToolScope: async () => ({ projectId: directProjectId, resolutionSource: "explicit" }),
+    validateDistillationEvidenceChain: async () => directEvidence
+  });
+  assert.equal(directResult.next_layer_job.job.target, "l3");
+  assert.equal(directResult.next_layer_job.job.project_id, directProjectId);
+  assert.deepEqual(directResult.next_layer_job.job.evidence_refs, [directResult.result_evidence_ref]);
+  const directJobs = await listDistillationJobs(directRoot, accountId);
+  assert.equal(directJobs.filter((job) => job.target === "l2" && job.status === "completed").length, 1);
+  assert.equal(directJobs.filter((job) => job.target === "l3" && job.project_id === directProjectId).length, 1);
 
   console.log("distillation-secondary-failure-e2e: ok (durable Core, metadata/queue warnings, L3 chain, real Core failure)");
 } finally {

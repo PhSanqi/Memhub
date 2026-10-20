@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import type { StoredCaptureEvent } from "./capture.js";
+import { TRUSTED_TURN_SOURCE_KINDS, type CaptureSectionSourceKinds, type StoredCaptureEvent } from "./capture.js";
 import { withFileMutationLock } from "./file-mutation-lock.js";
+import { MemoryCoreHttpError } from "./local-memory-client.js";
 
 export type DistillationTarget = "l2" | "l3" | "l4" | "skill";
 export type DistillationFailureKind =
@@ -29,6 +30,8 @@ export interface DistillationEvidenceItem {
   user_text?: string;
   assistant_text?: string;
   reasoning_summary?: string;
+  tool_summary?: string;
+  source_kinds?: CaptureSectionSourceKinds;
 }
 
 export interface DistillationJob {
@@ -52,8 +55,13 @@ export interface DistillationJob {
   attempts?: number;
   result_kind?: DistillationTarget | "noop";
   result_id?: string;
+  result_retirement?: "pending" | "archived" | "deleted";
+  result_retirement_generation?: string;
+  result_retirement_operation?: "archived" | "deleted";
   result_content?: string;
   result_committed_at?: string;
+  result_operation_id?: string;
+  result_core_content_hash?: string;
   evidence_refs: string[];
   evidence_hash: string;
   evidence: DistillationEvidenceItem[];
@@ -115,12 +123,80 @@ function withFailureClassification(job: DistillationJob): DistillationJob {
     : job;
 }
 
-export async function listDistillationJobs(stateRoot: string, accountId?: string): Promise<DistillationJob[]> {
+export async function listDistillationJobs(stateRoot: string, accountId?: string, includeRetired = false): Promise<DistillationJob[]> {
   const store = await loadStore(stateRoot);
   return store.jobs
-    .filter((job) => !accountId || job.account_id === accountId)
+    .filter((job) => (!accountId || job.account_id === accountId) && (includeRetired || !job.result_retirement))
     .map(withFailureClassification)
     .sort((a, b) => b.created_at.localeCompare(a.created_at));
+}
+
+/** Retire active revisions before the remote mutation, preserving exact historical evidence.
+ * An ambiguous Core call leaves them quarantined until an explicit retry succeeds. */
+export async function retireDistillationMemory(input: {
+  stateRoot: string; accountId: string; memoryId: string; operation: "archived" | "deleted";
+  mutateCore: () => Promise<unknown>;
+}): Promise<void> {
+  const generation = randomUUID();
+  const quarantine = await withMutation(input.stateRoot, async () => {
+    const store = await loadStore(input.stateRoot);
+    const revisions = store.jobs.filter((job) => job.account_id === input.accountId &&
+      job.status === "completed" && job.result_id === input.memoryId);
+    if (input.operation === "archived" && revisions.some((job) => job.result_retirement === "deleted")) {
+      throw new Error("retirement conflict: memory already retired with a different operation");
+    }
+    if (revisions.length && revisions.every((job) => job.result_retirement === input.operation)) return null;
+    if (revisions.some((job) => job.result_retirement === "pending" &&
+      job.result_retirement_operation && job.result_retirement_operation !== input.operation)) {
+      throw new Error("pending retirement must be retried with the same operation");
+    }
+    const active = revisions.filter((job) => job.result_retirement !== input.operation);
+    const retrying = active.length > 0 && active.every((job) => job.result_retirement === "pending" &&
+      job.result_retirement_operation === input.operation);
+    const previous = active.filter((job) => job.result_retirement !== "pending").map((job) => ({ ...job }));
+    for (const job of active) {
+      job.result_retirement = "pending";
+      job.result_retirement_generation = generation;
+      job.result_retirement_operation = input.operation;
+    }
+    if (active.length) await saveStore(input.stateRoot, store);
+    return { revisions: active.map((job) => job.job_id), retrying, previous };
+  });
+  if (!quarantine) return;
+  const { revisions, retrying, previous } = quarantine;
+  try {
+    await input.mutateCore();
+  } catch (error) {
+    if (!(retrying && input.operation === "deleted" &&
+      error instanceof MemoryCoreHttpError && error.status === 404)) {
+      if (previous.length && error instanceof MemoryCoreHttpError && error.status >= 400 && error.status < 600) {
+        await withMutation(input.stateRoot, async () => {
+          const store = await loadStore(input.stateRoot);
+          let restored = false;
+          for (const before of previous) {
+            const index = store.jobs.findIndex((job) => job.job_id === before.job_id &&
+              job.account_id === input.accountId && job.result_id === input.memoryId &&
+              job.result_retirement === "pending" && job.result_retirement_generation === generation);
+            if (index !== -1) {
+              store.jobs[index] = before;
+              restored = true;
+            }
+          }
+          if (restored) await saveStore(input.stateRoot, store);
+        });
+      }
+      throw error;
+    }
+  }
+  await withMutation(input.stateRoot, async () => {
+    const store = await loadStore(input.stateRoot);
+    const matching = store.jobs.filter((job) => revisions.includes(job.job_id) &&
+      job.account_id === input.accountId && job.result_id === input.memoryId &&
+      job.result_retirement === "pending" && job.result_retirement_generation === generation);
+    if (matching.length !== revisions.length) throw new Error("retirement generation changed before finalize; retry required");
+    for (const job of matching) job.result_retirement = input.operation;
+    if (matching.length) await saveStore(input.stateRoot, store);
+  });
 }
 
 /**
@@ -186,7 +262,14 @@ export async function enqueueDistillationJob(input: {
       conversation_id: item.conversation_id,
       user_text: item.user_text!.trim(),
       assistant_text: item.assistant_text!.trim(),
-      ...(item.reasoning_summary?.trim() ? { reasoning_summary: item.reasoning_summary.trim() } : {})
+      ...(item.reasoning_summary?.trim() ? { reasoning_summary: item.reasoning_summary.trim() } : {}),
+      ...(item.tool_summary?.trim() ? { tool_summary: item.tool_summary.trim() } : {}),
+      source_kinds: {
+        user_text: TRUSTED_TURN_SOURCE_KINDS.user_text,
+        assistant_text: TRUSTED_TURN_SOURCE_KINDS.assistant_text,
+        ...(item.reasoning_summary?.trim() ? { reasoning_summary: TRUSTED_TURN_SOURCE_KINDS.reasoning_summary } : {}),
+        ...(item.tool_summary?.trim() ? { tool_summary: TRUSTED_TURN_SOURCE_KINDS.tool_summary } : {})
+      }
     }));
   if (evidence.length === 0) throw new Error("L2 distillation requires complete L1 turns");
   return enqueueJob({
@@ -240,6 +323,8 @@ export async function recordCompletedDistillationRevision(input: {
   resultId: string;
   content: string;
   committedAt: string;
+  operationId?: string;
+  coreBody?: string;
 }): Promise<DistillationJob> {
   const resultId = input.resultId.trim();
   const content = input.content.trim();
@@ -269,9 +354,11 @@ export async function recordCompletedDistillationRevision(input: {
       job.target === input.target &&
       job.project_id === input.projectId &&
       job.status === "completed" &&
+      !job.result_retirement &&
       job.result_kind === input.target &&
       job.result_id === resultId &&
       job.result_content === content &&
+      (!input.operationId || job.result_operation_id === input.operationId) &&
       job.evidence_hash === evidenceHash
     );
     if (existing) return structuredClone(existing);
@@ -292,6 +379,8 @@ export async function recordCompletedDistillationRevision(input: {
       result_id: resultId,
       result_content: content,
       result_committed_at: committedAt,
+      ...(input.coreBody !== undefined ? { result_core_content_hash: createHash("sha256").update(input.coreBody).digest("hex") } : {}),
+      ...(input.operationId ? { result_operation_id: input.operationId } : {}),
       evidence_refs: evidence.map((item) => item.ref),
       evidence_hash: evidenceHash,
       evidence
@@ -356,7 +445,9 @@ export async function leaseDistillationJob(
         (item.status === "leased" && Boolean(item.leased_until) && Date.parse(item.leased_until!) <= now)
       ) &&
       (input.projectId === undefined || item.project_id === input.projectId) &&
-      (input.target === undefined || item.target === input.target)
+      (input.target === undefined || item.target === input.target) &&
+      // Owner-only leases are single-use; every reassignment requires a token.
+      (input.useLeaseToken || (item.status === "pending" && !item.lease_token && !item.attempts))
     );
     if (!job) return null;
     // Reassign an expired generation only when this exact job is actually
@@ -413,7 +504,7 @@ export async function completeDistillationJobAfterCoreCommit(
   stateRoot: string,
   accountId: string,
   jobId: string,
-  result: { kind: DistillationTarget; resultId: string; content: string; committedAt: string },
+  result: { kind: DistillationTarget; resultId: string; content: string; committedAt: string; coreBody?: string },
   leaseOwner: string,
   leaseToken?: string
 ): Promise<DistillationJob> {
@@ -427,6 +518,7 @@ export async function completeDistillationJobAfterCoreCommit(
     job.result_id = result.resultId;
     job.result_content = result.content;
     job.result_committed_at = result.committedAt;
+    if (result.coreBody !== undefined) job.result_core_content_hash = createHash("sha256").update(result.coreBody).digest("hex");
     delete job.leased_until;
     delete job.leased_by;
     delete job.lease_token;
@@ -520,7 +612,7 @@ export function assertActiveDistillationLease(job: DistillationJob, leaseOwner: 
   if (job.leased_by !== leaseOwner) {
     throw new Error(`distillation job is leased by another harness: ${job.leased_by ?? "unknown"}`);
   }
-  if (job.lease_token && job.lease_token !== leaseToken) {
+  if (job.lease_token !== leaseToken) {
     throw new Error("distillation job lease token is missing or stale");
   }
 }
@@ -534,10 +626,10 @@ function assertPostCoreCommitLeaseGeneration(
   if (job.leased_by !== leaseOwner) {
     throw new Error(`distillation job is leased by another harness: ${job.leased_by ?? "unknown"}`);
   }
+  if (job.lease_token !== leaseToken) {
+    throw new Error("distillation job lease token is missing or stale");
+  }
   if (job.lease_token) {
-    if (job.lease_token !== leaseToken) {
-      throw new Error("distillation job lease token is missing or stale");
-    }
     return;
   }
   if (!job.leased_until || Date.parse(job.leased_until) <= Date.now()) {
@@ -727,20 +819,49 @@ function storePath(root: string): string {
 
 async function loadStore(root: string): Promise<JobStore> {
   try {
-    const raw = JSON.parse(await readFile(storePath(root), "utf8")) as {
-      version?: number;
-      jobs?: Array<Record<string, unknown>>;
-    };
-    if (!Array.isArray(raw.jobs)) return { version: 2, jobs: [] };
-    if (raw.version === 2) return { version: 2, jobs: raw.jobs as unknown as DistillationJob[] };
-    const jobs = raw.jobs.map((item) => migrateV1Job(item));
-    const store: JobStore = { version: 2, jobs };
-    await saveStore(root, store);
-    return store;
+    return parseStore(JSON.parse(await readFile(storePath(root), "utf8")));
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { version: 2, jobs: [] };
     throw error;
   }
+}
+
+function parseStore(raw: unknown): JobStore {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("invalid distillation job store: expected an object");
+  }
+  const record = raw as Record<string, unknown>;
+  if (record.version !== 1 && record.version !== 2) {
+    throw new Error("invalid distillation job store: unsupported version");
+  }
+  if (!Array.isArray(record.jobs)) {
+    throw new Error("invalid distillation job store: jobs must be an array");
+  }
+  const jobs = record.jobs.map((value: unknown, index: number) => {
+    const invalid = () => new Error(`invalid distillation job store: invalid job at index ${index}`);
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid();
+    const job = value as Record<string, unknown>;
+    if (!["job_id", "account_id", "created_at", "updated_at"].every((key) =>
+      typeof job[key] === "string" && (job[key] as string).length > 0) ||
+        !["pending", "leased", "completed", "failed"].includes(job.status as string) ||
+        !["manual", "turn_threshold", "idle", "upstream", "migration"].includes(job.reason as string) ||
+        !(job.project_id === null || typeof job.project_id === "string") ||
+        !Array.isArray(job.evidence) || !job.evidence.every((item) =>
+          item && typeof item === "object" && !Array.isArray(item))) throw invalid();
+    if (record.version === 1) {
+      if (!job.evidence.every((item) => typeof item.event_id === "string" && item.event_id.trim() &&
+          typeof item.timestamp === "string")) throw invalid();
+      return migrateV1Job(job);
+    }
+    if (!["l2", "l3", "l4", "skill"].includes(job.target as string) ||
+        !["account", "project"].includes(job.scope as string) ||
+        typeof job.evidence_hash !== "string" ||
+        !Array.isArray(job.evidence_refs) || !job.evidence_refs.every((ref) => typeof ref === "string") ||
+        !job.evidence.every((item) => typeof item.ref === "string" &&
+          typeof item.timestamp === "string" && ["turn", "memory", "artifact"].includes(item.kind))) throw invalid();
+    return job as unknown as DistillationJob;
+  });
+  return { version: 2, jobs };
 }
 
 function migrateV1Job(item: Record<string, unknown>): DistillationJob {
@@ -787,6 +908,7 @@ function migrateV1Job(item: Record<string, unknown>): DistillationJob {
     ...(typeof item.attempts === "number" ? { attempts: item.attempts } : {}),
     ...(legacyResult ? { result_kind: legacyResult === "skill" ? "skill" : legacyResult === "noop" ? "noop" : "l2" } : {}),
     ...(typeof item.result_id === "string" ? { result_id: item.result_id } : {}),
+    ...(typeof item.result_content === "string" ? { result_content: item.result_content } : {}),
     ...(typeof item.result_committed_at === "string" &&
         Number.isFinite(Date.parse(item.result_committed_at))
       ? { result_committed_at: item.result_committed_at }
@@ -809,5 +931,21 @@ async function atomicJson(path: string, value: unknown): Promise<void> {
 }
 
 async function withMutation<T>(stateRoot: string, run: () => Promise<T>): Promise<T> {
-  return withFileMutationLock(storePath(stateRoot), run);
+  return withFileMutationLock(storePath(stateRoot), async () => {
+    let contents: string | undefined;
+    try {
+      contents = await readFile(storePath(stateRoot), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+    }
+    if (contents !== undefined) {
+      const raw = JSON.parse(contents) as unknown;
+      const store = parseStore(raw);
+      if ((raw as { version: number }).version === 1) {
+        await writeFile(`${storePath(stateRoot)}.v1-backup-${Date.now()}`, contents, { flag: "wx", mode: 0o600 });
+        await saveStore(stateRoot, store);
+      }
+    }
+    return run();
+  });
 }

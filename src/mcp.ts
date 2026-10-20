@@ -1,34 +1,24 @@
 #!/usr/bin/env node
-import { createHash, randomUUID } from "node:crypto";
-import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { join, resolve } from "node:path";
-import {
-  hostHeaderValidation,
-  localhostHostValidation,
-  localhostOriginValidation,
-  originValidation,
-  toNodeHandler
-} from "@modelcontextprotocol/node";
+import { resolve } from "node:path";
 import { createMcpHandler, fromJsonSchema, McpServer } from "@modelcontextprotocol/server";
 import type { JsonSchemaType } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
-import {
-  ensureLocalAdminToken,
-  listAccounts,
-  resolveCloudflareAccount,
-  verifyLocalAdminToken
-} from "./auth.js";
 import { runAccountCommand, runAdminTokenCommand } from "./cli-admin.js";
-import { verifyCloudflareAccessJwt } from "./cloudflare.js";
+import { recoverCaptureIndex, listCaptureEvents } from "./capture.js";
 import {
-  listCaptureIndexEntries,
-  listCaptureEvents
-} from "./capture.js";
-import { hydrateMemoryEvidence, recordMemoryHydration } from "./memory-hydration.js";
-import { reconcileFrozenCaptureIngests } from "./capture-recovery.js";
+  attachExactEvidenceRefsToContext,
+  explainMemoryWhy,
+  hydrateMemoryEvidence,
+  recordMemoryHydration
+} from "./memory-hydration.js";
+import {
+  relevantProjectTodos,
+  resolveExplicitProjectEvidence,
+  resolveToolScope
+} from "./context-router.js";
 import {
   auditDistillationControl,
   discoverDistillationControl,
@@ -37,28 +27,29 @@ import {
   renewDistillationControl,
   skipDistillationControl
 } from "./distillation-control.js";
-import { discoverDistillationJobs } from "./distillation-discovery.js";
+import { validateDistillationEvidenceChain } from "./distillation-evidence.js";
 import {
-  distillationResultTimestamp,
-  getDistillationConfig,
-  listDistillationJobs,
-  type DistillationEvidenceItem,
-  type DistillationJob
-} from "./distillation-jobs.js";
+  maybeQueueThresholdDistillation,
+  queueIdleDistillation
+} from "./distillation-scheduling.js";
+import {
+  executeProjectMutation,
+  planProjectMutation,
+  unfinishedDistillationJobsForProject
+} from "./project-governance.js";
 import { createMemhubRuntime, resolveLocalAccountId, type MemhubRuntime, type MemhubRuntimeOptions } from "./runtime.js";
-import type { ContextItem } from "./context-capsule.js";
-import type { ProjectDescriptor, ProjectTodo } from "./project-registry.js";
+import { resolveControlRoot } from "./state-root.mjs";
+import { utf8Prefix } from "./context-capsule.js";
+import type { ProjectDescriptor } from "./project-registry.js";
+import { distillationContract } from "./distillation-contract.js";
 import {
-  DISTILLATION_CONTRACT_VERSION,
-  distillationContract,
-  validateDistillationCandidate
-} from "./distillation-contract.js";
-import {
-  handleMemoryControlRead
-} from "./memory-control-http.js";
-import { handleMemoryControlAction } from "./memory-control-actions.js";
+  executeSkillMutation,
+  loadSkillForAccount,
+  planSkillMutation
+} from "./skill-governance.js";
 import { recentL1Continuity, upsertL1Turn } from "./turn-log.js";
-import { asHttpJsonBodyError } from "./http-json.js";
+import { assignCaptureProjects, projectClarification } from "./capture-project-assignments.js";
+import { resolveCaptureProject } from "./capture-project-resolution.js";
 import {
   readSkillExecution,
   recordSkillExecutionEvent,
@@ -67,18 +58,9 @@ import {
   type SkillExecutionStage
 } from "./skill-telemetry.js";
 import { enrichSkillCandidateReliability, skillSelectionMetadataFromBody } from "./skill-router.js";
-import { assertNextSkillVersion } from "./skill-version.js";
-import { tokenizeRetrievalText } from "./retrieval-ranker.js";
+import { buildTurnKnowledgePlan } from "./turn-knowledge-plan.js";
 import { JsonResultTransport } from "./result-transport.js";
-import { renderConsole, renderDocs, renderLanding, renderUnprovisionedAccount } from "./web-ui.js";
-import {
-  basicPassword,
-  isLocalControlRequest,
-  normalizeBasePath,
-  rewriteHtmlForBasePath,
-  singleHeader,
-  webSecurityHeaders
-} from "./gateway-http.js";
+import { normalizeBasePath, serveHttp } from "./gateway-http.js";
 import { distillationNextPayload } from "./distillation-transport.js";
 import { submitDistillationControl } from "./distillation-submit.js";
 import {
@@ -86,49 +68,27 @@ import {
   reconcileCurrentL4DerivedJob
 } from "./distillation-derived-recovery.js";
 import { planDistillationConsolidation } from "./distillation-consolidation.js";
+import { listArchitectureRevisions } from "./architecture-history.js";
 import {
-  commitArchitectureRevision,
-  listArchitectureRevisions,
-  prepareArchitectureRevision
-} from "./architecture-history.js";
+  executeArchitectureMutation,
+  planArchitectureMutation
+} from "./architecture-governance.js";
 import {
   executeUserAuthorizedMemory,
   planUserAuthorizedMemory
 } from "./user-authorized-memory.js";
 
 const VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
-const projectMutationAuthorizations = new Map<string, {
-  accountId: string;
-  operation: "create" | "update" | "archive" | "unarchive" | "delete" | "merge";
-  payload: Record<string, unknown>;
-  expiresAt: number;
-}>();
-const skillMutationAuthorizations = new Map<string, {
-  accountId: string;
-  skillId: string;
-  operation: "revise" | "retire";
-  expectedFingerprint: string;
-  content?: string;
-  title?: string;
-  version?: string;
-  tags?: string[];
-  note: string;
-  expiresAt: number;
-}>();
-const architectureMutationAuthorizations = new Map<string, {
-  accountId: string;
-  projectId: string;
-  expectedPath: string;
-  expectedFingerprint: string;
-  content: string;
-  expiresAt: number;
-}>();
 
 export interface MemhubMcpOptions extends MemhubRuntimeOptions {}
 
 export function createMemhubMcpServer(options: MemhubMcpOptions = {}): McpServer {
-  const runtime = createMemhubRuntime(options);
-  return createMemhubMcpServerForRuntime(runtime, defaultStateRoot());
+  const stateRoot = resolve(options.controlRoot ?? process.env.MEMHUB_CONTROL_ROOT ?? defaultStateRoot());
+  const runtime = createMemhubRuntime({ ...options, controlRoot: stateRoot });
+  const server = createMemhubMcpServerForRuntime(runtime, stateRoot);
+  const onclose = server.server.onclose;
+  server.server.onclose = () => { try { onclose?.(); } finally { runtime.dispose(); } };
+  return server;
 }
 
 export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoot = defaultStateRoot()): McpServer {
@@ -138,15 +98,15 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     description: "Private account/project-scoped long-term memory and project routing. Each Memhub turn should call memmy_context with the current request plus explicit workspace_project/project evidence, then memmy_turn action=open before work and action=commit before the final answer. Host conversation/session IDs are optional provenance only: they do not select projects, branches, or distillation batches. Project-scoped tools must carry workspace_project or project from the current turn. If explicit project and workspace_project disagree after canonical resolution, Memhub rejects the operation instead of guessing. If a project name is unknown, case-variant, or merely similar, call memmy_project_list and compare canonical slug, aliases, and description before creating anything. Project Registry mutations use memmy_project_manage plan -> explicit user authorization -> execute. Project Architecture replacements use memmy_project architecture_plan -> full-text user review -> architecture_execute. Explicit user-authored L3/L4 changes use memhub_memory plan -> full-text user review -> capture the confirmation as L1 -> execute. Project todos are first-class state."
   });
   const resultTransport = new JsonResultTransport(stateRoot, runtime.accountId);
-  const jsonResult = (value: unknown) => inlineJsonResult(resultTransport.wrap(value));
+  const jsonResult = (value: unknown, pretty = true) => inlineJsonResult(resultTransport.wrap(value, { readOnly: true }), pretty);
 
   server.registerTool("memhub_result", {
-    description: "续取被 Memhub 通用大结果 transport 分片的 MCP JSON 结果。原工具返回 result_transport.mode=chunked 时，按同一个 result_id 和 next_offset 继续读取；按 offset 顺序拼接 result_chunk 后再解析原始 JSON。短结果不会经过此工具。",
+    description: "续取被 Memhub 分片的 MCP JSON 结果。当返回 result_transport.mode=chunked 时，按 result_id 和 next_offset 继续读取，按 offset 拼接 result_chunk 后解析原始 JSON。短结果不经过此工具。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
-        result_id: { type: "string" },
-        offset: { type: "integer", minimum: 0 },
+        result_id: { type: "string", description: "大结果传输标识" },
+        offset: { type: "integer", minimum: 0, description: "续取起始字符偏移量" },
         chunk_chars: { type: "integer", minimum: 10000, maximum: 200000, description: "每次续取字符数；默认 100000" }
       },
       required: ["result_id", "offset"],
@@ -159,23 +119,25 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   )));
 
   server.registerTool("memmy_turn", {
-    description: "L1 原始 turn 日志。Harness/Chat 每轮收到用户消息后先 action=open，最终回答前 action=commit；需要时 checkpoint 写简短可公开审计摘要。conversation_id/continuity_id 仅用于可选 provenance 或显式 resume，不参与 project/branch routing，也不建立新的 conversation binding。没有稳定会话 ID 时直接省略，Memhub 使用 event-scoped 内部 storage key。不要写隐藏 chain-of-thought。",
+    description: "Record turns with open/commit; when project_resolution appears, ask the user then call assign.",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
-        action: { type: "string", enum: ["open", "checkpoint", "commit", "failed", "truncated", "resume"] },
-        event_id: { type: "string", description: "open 返回的稳定 L1 event id；后续 checkpoint/commit 推荐原样回传" },
-        conversation_id: { type: "string", description: "可选 transport provenance；不用于 project/branch routing" },
-        continuity_id: { type: "string", description: "可选显式 resume key；不用于 project/branch routing" },
-        turn_id: { type: "string", description: "Harness 原生 turn id；有稳定 turn id 时可替代 event_id 做幂等定位" },
+        action: { type: "string", enum: ["open", "checkpoint", "commit", "failed", "truncated", "resume", "assign"], description: "open/checkpoint/commit/failed/truncated/resume/assign" },
+        event_ids: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 200 },
+        keep_global: { type: "boolean" },
+        event_id: { type: "string", description: "open 返回的稳定 L1 event id；后续 checkpoint/commit/resume 原样回传" },
+        conversation_id: { type: "string", description: "可选 transport provenance；不用于 project/branch 路由" },
+        continuity_id: { type: "string", description: "Explicit continuity key; assign binds later turns" },
+        turn_id: { type: "string", description: "Harness 原生 turn id；可替代 event_id 做幂等定位" },
         previous_event_id: { type: "string", description: "显式前序 L1 event id" },
-        project: { type: "string", description: "明确 canonical project；项目级 turn 建议始终与 workspace_project 一起显式提供" },
-        workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 不一致时拒绝写入" },
-        user_text: { type: "string" },
-        assistant_text: { type: "string" },
-        reasoning_summary: { type: "string", description: "可公开审计的简短推理/决策摘要，不得包含隐藏 chain-of-thought" },
+        project: { type: "string", description: "明确 canonical project；与 workspace_project 冲突时拒绝" },
+        workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 冲突时拒绝" },
+        user_text: { type: "string", description: "用户原始输入文本" },
+        assistant_text: { type: "string", description: "助手最终回答文本" },
+        reasoning_summary: { type: "string", description: "可公开审计的决策摘要，不得包含隐藏 chain-of-thought" },
         tool_summary: { type: "string", description: "关键工具动作与结果摘要" },
-        limit: { type: "integer", minimum: 1, maximum: 50 }
+        limit: { type: "integer", minimum: 1, maximum: 50, description: "resume 最大返回轮数，默认 12" }
       },
       required: ["action"],
       additionalProperties: false
@@ -184,9 +146,20 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     const action = requiredString(args.action, "action");
     const transportConversationId = optionalString(args.conversation_id);
     const requestedContinuityId = optionalString(args.continuity_id);
+    if (action === "assign") {
+      return jsonResult({ ok: true, ...await assignCaptureProjects({
+        stateRoot, accountId: runtime.accountId, projects: runtime.projects, assignedBy: "host",
+        project: args.project, keepGlobal: args.keep_global, continuityId: args.continuity_id, eventIds: args.event_ids
+      }) });
+    }
     if (action === "resume") {
-      const continuityId = requestedContinuityId ?? transportConversationId;
-      if (!continuityId) throw new TypeError("resume requires continuity_id or conversation_id");
+      const resumeEventId = optionalString(args.event_id);
+      const event = resumeEventId
+        ? (await listCaptureEvents(stateRoot, runtime.accountId, { eventId: resumeEventId, limit: 1 }))[0]
+        : undefined;
+      if (resumeEventId && !event) throw new Error("capture event not found for account");
+      const continuityId = requestedContinuityId ?? transportConversationId ?? event?.continuity_id;
+      if (!continuityId) throw new TypeError("resume requires continuity_id, conversation_id, or event_id");
       const turns = await recentL1Continuity({
         stateRoot,
         accountId: runtime.accountId,
@@ -235,7 +208,8 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
           : undefined;
     const conversationId = transportConversationId ?? syntheticConversationId;
     if (!conversationId) throw new TypeError(`${action} requires conversation_id, event_id, or turn_id`);
-    const continuityId = requestedContinuityId ?? conversationId;
+    const existingEvent = eventId ? (await listCaptureEvents(stateRoot, runtime.accountId, { eventId, limit: 1 }))[0] : undefined;
+    const continuityId = requestedContinuityId ?? existingEvent?.continuity_id ?? conversationId;
 
     const status =
       action === "commit" ? "complete" :
@@ -250,7 +224,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       turn: {
         ...(stableEventId ? { event_id: stableEventId } : {}),
         host: runtime.source.platform,
-        conversation_id: conversationId,
+        conversation_id: existingEvent?.conversation_id ?? conversationId,
         continuity_id: continuityId,
         ...(turnId ? { turn_id: turnId } : {}),
         ...(optionalString(args.previous_event_id) ? { previous_event_id: optionalString(args.previous_event_id) } : {}),
@@ -283,56 +257,92 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         console.error("[memhub] turn distillation queue:", distillation_queue_error);
       }
     }
+    let distillationAck: { queued: boolean; job_id?: string } | undefined;
+    if (distillation) {
+      const rec = objectRecord(distillation);
+      const jobs = Array.isArray(rec.jobs) ? rec.jobs : [];
+      const firstJob = jobs.length > 0 ? objectRecord(jobs[0]) : undefined;
+      const jobId = typeof firstJob?.job_id === "string" ? firstJob.job_id : undefined;
+      distillationAck = {
+        queued: Boolean(rec.queued || jobs.length > 0),
+        ...(jobId ? { job_id: jobId } : {})
+      };
+    }
+    const storedEvent = (action === "open" || action === "commit") && !result.project_id
+      ? (await listCaptureEvents(stateRoot, runtime.accountId, { eventId: result.turn.event_id, limit: 1 }))[0] : undefined;
+    const resolution = storedEvent ? await resolveCaptureProject(storedEvent,
+      ref => runtime.projects.resolve(runtime.accountId, ref), stateRoot) : undefined;
+    const clarification = storedEvent && resolution?.source !== "keep_global"
+      ? await projectClarification({ stateRoot, accountId: runtime.accountId, projects: runtime.projects,
+          text: storedEvent.user_text ?? "", candidate: resolution?.candidate,
+          continuityId: storedEvent.continuity_id, rateLimit: true }) : undefined;
     return jsonResult({
-      ...result,
-      ...(distillation ? { distillation } : {}),
+      ok: true,
+      action,
+      turn_id: turnId ?? result.turn.turn_id ?? null,
+      event_id: result.turn.event_id ?? stableEventId ?? null,
+      continuity_id: result.turn.continuity_id,
+      status: result.turn.status,
+      project_id: result.project_id ?? projectId ?? null,
+      ingested: Boolean(result.turn.ingested),
+      ...(clarification ? { project_resolution: clarification } : {}),
+      ...(distillationAck ? { distillation: distillationAck } : {}),
       ...(distillation_queue_error ? { distillation_queue_error } : {}),
       transport_conversation_id: transportConversationId ?? null
     });
   });
 
   server.registerTool("memmy_context", {
-    description: "每轮使用 Memhub 时先调用本工具，结合当前请求和显式 project/workspace 证据读取长期记忆。conversation_id/continuity_id 仅为可选 provenance/continuity 信息，不参与项目选择。项目解析顺序只使用当前轮显式 project/workspace、精确 registry alias 和唯一 semantic candidate；无法唯一解析时保持 global-only。业务记忆/架构只来自唯一 primary project；可复用 Skill 可跨项目单独召回。对能够证明当前 revision 的 L2/L3/L4 Memory 返回 exact evidenceRef，下游蒸馏必须原样回传。",
+    description: "conversation_id 不参与项目选择；不猜测项目，project/workspace 冲突时拒绝，透传 evidenceRef；出现 clarification 时询问用户后调用 memmy_turn action=assign。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
         query: { type: "string", description: "当前用户请求或需要补充上下文的问题" },
+        detail: { type: "string", enum: ["brief", "full"], description: "输出模式：brief（默认，精简瘦身）或 full（完整模式）" },
+        max_content_bytes: { type: "integer", minimum: 2000, maximum: 512000, description: "总内容字节预算上限，范围 2000-512000" },
         conversation_id: { type: "string", description: "可选 transport provenance；不参与项目选择" },
-        continuity_id: { type: "string", description: "可选 continuity provenance；不参与项目选择" },
-        project: { type: "string", description: "明确项目 slug；用户未明确时不要猜" },
-        workspace_project: { type: "string", description: "由工作区/仓库确定的项目 slug" },
-        branch: { type: "string", description: "可选项目内 Branch id/name；只收窄当前任务 retrieval，不建立新的记忆层。" },
+        continuity_id: { type: "string", description: "Explicit continuity key; user-assigned bindings may select the project" },
+        project: { type: "string", description: "明确项目 slug；禁止盲目猜测项目" },
+        workspace_project: { type: "string", description: "由工作区/仓库确定的项目 slug；与 project 冲突时拒绝" },
+        branch: { type: "string", description: "可选项目内 Branch id/name；仅收窄任务 retrieval，不建立新记忆层" },
         semantic_projects: {
           type: "array",
           items: { type: "string" },
-          description: "当前 Harness/分类器对本轮 primary project 的候选。唯一候选可解析项目；多个冲突候选触发 global-only。"
+          description: "语义项目候选列表；非唯一时保持 global-only"
         },
         capability_projects: {
           type: "array",
           items: { type: "string" },
-          description: "可从这些其他项目召回 artifact:skill / Skill-layer 能力；不召回其业务记忆。省略时默认从当前账号已知项目中检索可复用 Skills。"
+          description: "可复用 Skill 检索候选项目列表；默认检索已知项目"
         },
         cross_project_skills: {
           type: "boolean",
-          description: "是否启用跨项目可复用 Skill 召回；默认 true。"
+          description: "是否启用跨项目可复用 Skill 召回；默认 true"
         },
-        limit: { type: "integer", minimum: 1, maximum: 50, description: "每类记忆最大召回数量" }
+        limit: { type: "integer", minimum: 1, maximum: 50, description: "每类记忆最大召回条数" }
       },
       required: ["query"],
       additionalProperties: false
     } as JsonSchemaType)
   }, async (args) => {
     const query = requiredString(args.query, "query");
+    const detail = args.detail === "full" ? "full" : "brief";
+    const maxContentBytes = optionalInteger(args.max_content_bytes);
     const projectRecords = await knownProjectRecords(runtime);
     const knownProjects = projectRecords.map((project) => project.projectId);
     const requestedCapabilityProjects = stringArray(args.capability_projects) ?? [];
     const crossProjectSkills = optionalBoolean(args.cross_project_skills) ?? true;
+    const continuityResolution = !optionalString(args.project) && !optionalString(args.workspace_project) && optionalString(args.continuity_id)
+      ? await resolveCaptureProject({ account_id: runtime.accountId, event_id: `context:${randomUUID()}`,
+          continuity_id: optionalString(args.continuity_id), timestamp: new Date().toISOString() },
+          ref => runtime.projects.resolve(runtime.accountId, ref), stateRoot) : undefined;
     const capsule = await runtime.router.context({
       accountId: runtime.accountId,
       userId: runtime.userId,
       query,
       conversationId: optionalString(args.conversation_id),
-      projectId: optionalString(args.project),
+      continuityId: optionalString(args.continuity_id),
+      projectId: optionalString(args.project) ?? continuityResolution?.projectId ?? undefined,
       workspaceProjectId: optionalString(args.workspace_project),
       branchId: optionalString(args.branch),
       semanticProjectIds: stringArray(args.semantic_projects),
@@ -340,7 +350,9 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       reusableSkillProjectIds: crossProjectSkills
         ? (requestedCapabilityProjects.length > 0 ? requestedCapabilityProjects : knownProjects)
         : [],
-      limit: optionalInteger(args.limit)
+      limit: optionalInteger(args.limit),
+      detail,
+      maxContentBytes
     });
     await attachExactEvidenceRefsToContext(stateRoot, runtime, capsule);
     for (const item of [...capsule.globalMemory, ...capsule.projectMemory]) {
@@ -363,23 +375,49 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
           : item;
       }));
     }
-    const candidateQuery = optionalString(args.project) ?? optionalString(args.workspace_project) ?? query;
-    const projectCandidates = capsule.resolvedProjectId === null || optionalString(args.project) || optionalString(args.workspace_project)
-      ? await runtime.projects.suggest(runtime.accountId, candidateQuery, 8)
-      : [];
+    const turnKnowledgePlan = await buildTurnKnowledgePlan({
+      query,
+      capsule,
+      detail,
+      dedupe: true,
+      hydrateEvidence: async (evidenceRef) => {
+        const item = await hydrateMemoryEvidence({ stateRoot, accountId: runtime.accountId, evidenceRef });
+        return { content: item.content };
+      }
+    });
+
+    const isExplicitlyResolved = capsule.resolvedProjectId !== null &&
+      capsule.recallScope === "global_and_project" &&
+      (capsule.resolutionSource === "deterministic_binding" || capsule.resolutionSource === "exact_alias");
+
     const relevantTodoQuery = capsule.branchContext
       ? `${query}\n${capsule.branchContext.name}\n${capsule.branchContext.goal}`
       : query;
-    return jsonResult({
-      ...capsule,
-      progressiveDisclosure: {
-        version: "progressive-disclosure-v1",
-        discover: "memmy_context",
-        contextualize: "memhub_memory action=load evidence_ref=<exact-ref>",
-        hydrateSkill: "memhub_skill action=load skill_id=<skill-id>",
-        rule: "Load full content only for the selected exact revision or Skill; do not eagerly hydrate all recalled items."
-      },
-      projectCandidates: projectCandidates.map((project) => ({
+
+    let finalProjectCandidates: unknown[];
+    if (detail !== "full" && isExplicitlyResolved) {
+      const resolvedProject = projectRecords.find((p) => p.projectId === capsule.resolvedProjectId);
+      if (resolvedProject) {
+        const descBytes = Buffer.byteLength(resolvedProject.description, "utf8");
+        const description = descBytes <= 240
+          ? resolvedProject.description
+          : utf8Prefix(resolvedProject.description, 240);
+        const relevantTodos = relevantProjectTodos(resolvedProject.todos, relevantTodoQuery, 5, 200);
+        finalProjectCandidates = [{
+          project: resolvedProject.projectId,
+          name: resolvedProject.name,
+          description,
+          relevantTodos
+        }];
+      } else {
+        finalProjectCandidates = [];
+      }
+    } else {
+      const candidateQuery = optionalString(args.project) ?? optionalString(args.workspace_project) ?? query;
+      const candidates = capsule.resolvedProjectId === null || optionalString(args.project) || optionalString(args.workspace_project)
+        ? await runtime.projects.suggest(runtime.accountId, candidateQuery, 8)
+        : [];
+      finalProjectCandidates = candidates.map((project) => ({
         project: project.projectId,
         name: project.name,
         description: project.description,
@@ -388,27 +426,94 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         matchedBy: project.matchedBy,
         descriptionMissing: !project.description,
         ...(project.projectId === capsule.resolvedProjectId
-          ? { relevantTodos: relevantProjectTodos(project.todos, relevantTodoQuery) }
+          ? { relevantTodos: relevantProjectTodos(project.todos, relevantTodoQuery, 1) }
           : {})
-      }))
-    });
+      }));
+    }
+
+    let finalDiagnostics = capsule.retrievalDiagnostics;
+    if (detail !== "full" && capsule.retrievalDiagnostics) {
+      const diag = capsule.retrievalDiagnostics;
+      const combinedQueryTerms = uniqueStrings([
+        ...diag.lanes.global.queryTerms,
+        ...diag.lanes.project.queryTerms,
+        ...diag.lanes.skills.queryTerms
+      ]) ?? [];
+      finalDiagnostics = {
+        version: diag.version,
+        requestedLimit: diag.requestedLimit,
+        finalLimit: diag.finalLimit,
+        candidateLimit: diag.candidateLimit,
+        queryTerms: combinedQueryTerms,
+        weights: {
+          semanticWeight: diag.lanes.project.semanticWeight,
+          lexicalWeight: diag.lanes.project.lexicalWeight,
+          diversityPenalty: diag.lanes.project.diversityPenalty
+        },
+        lanes: {
+          global: {
+            candidateCount: diag.lanes.global.candidateCount,
+            dedupedCount: diag.lanes.global.dedupedCount,
+            emittedCount: diag.lanes.global.emittedCount
+          },
+          project: {
+            candidateCount: diag.lanes.project.candidateCount,
+            dedupedCount: diag.lanes.project.dedupedCount,
+            emittedCount: diag.lanes.project.emittedCount
+          },
+          skills: {
+            candidateCount: diag.lanes.skills.candidateCount,
+            dedupedCount: diag.lanes.skills.dedupedCount,
+            emittedCount: diag.lanes.skills.emittedCount
+          }
+        },
+        ...(diag.coreStatus ? { coreStatus: diag.coreStatus } : {})
+      } as unknown as typeof capsule.retrievalDiagnostics;
+    }
+
+    const responsePayload: Record<string, unknown> = {
+      ...capsule,
+      ...(finalDiagnostics ? { retrievalDiagnostics: finalDiagnostics } : {}),
+      turnKnowledgePlan,
+      projectCandidates: finalProjectCandidates
+    };
+    if (capsule.resolvedProjectId === null && continuityResolution?.source !== "keep_global") {
+      const clarification = await projectClarification({ stateRoot, accountId: runtime.accountId,
+        projects: runtime.projects, text: query, continuityId: optionalString(args.continuity_id),
+        rateLimit: Boolean(optionalString(args.continuity_id)) });
+      if (clarification) responsePayload.clarification = clarification;
+    }
+
+    if (detail === "full") {
+      responsePayload.progressiveDisclosure = {
+        version: "progressive-disclosure-v1",
+        discover: "memmy_context",
+        contextualize: "memhub_memory action=load evidence_ref=<exact-ref>",
+        hydrateSkill: "memhub_skill action=load skill_id=<skill-id>",
+        rule: "Load full content only for the selected exact revision or Skill; do not eagerly hydrate all recalled items."
+      };
+    }
+
+    return jsonResult(responsePayload, detail === "full");
   });
 
   server.registerTool("memhub_memory", {
-    description: "Progressive-disclosure Memory read + explicit-user-authorized L3/L4 governance. action=load hydrates one exact evidenceRef (L1/L2/L3/L4) returned by memmy_context. action=plan prepares a full canonical L3 or L4 replacement; the model MUST show proposed_content to the user in full and ask for explicit confirmation. After the user confirms, capture that confirmation as L1 and call action=execute with the one-time authorization_id plus confirmation_evidence_ref. L3 is project-scoped; L4 is account-scoped. This direct-authority path never auto-promotes between layers and never replaces Todo/Project Architecture/Skill state.",
+    description: "Progressive-disclosure 记忆读取与 L3/L4 治理。action=load 按 exact evidenceRef 水合单条记忆；action=why 查看证据链；action=plan 准备 L3/L4 替换，必须全文向用户展示并获明确授权，并先把该确认记录为 L1；action=execute 凭 authorization_id 与 confirmation_evidence_ref 执行。禁止自动提级。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
-        action: { type: "string", enum: ["load", "plan", "execute"] },
-        evidence_ref: { type: "string", description: "load: exact evidenceRef returned by memmy_context; do not reconstruct it." },
-        kind: { type: "string", enum: ["l3", "l4"], description: "plan only. L3=project durable rules/experience; L4=account-wide durable profile/rules." },
-        content: { type: "string", description: "plan only. The complete final canonical L3/L4 body, not a patch or append fragment." },
-        base_evidence_ref: { type: "string", description: "plan only. Exact current L3/L4 evidenceRef from memmy_context. Required whenever that layer already has active memory." },
-        project: { type: "string", description: "L3 plan only: explicit project slug/name/alias." },
-        workspace_project: { type: "string", description: "L3 plan only: current workspace project; disagreement with project is rejected." },
-        note: { type: "string", description: "plan only: short reason for the user-authorized change." },
-        authorization_id: { type: "string", description: "execute only: one-time id returned by the exact plan the user approved." },
-        confirmation_evidence_ref: { type: "string", description: "execute only: exact l1:<event-id> for the user's explicit confirmation turn." }
+        action: { type: "string", enum: ["load", "why", "plan", "execute"], description: "操作类型：load/why/plan/execute" },
+        evidence_ref: { type: "string", description: "load/why: memmy_context 返回的 exact evidenceRef" },
+        query: { type: "string", description: "why: 待审查因果或决策背景的具体问题" },
+        max_sources: { type: "integer", minimum: 1, maximum: 8, description: "why: 每节最大证据数；默认 4" },
+        kind: { type: "string", enum: ["l3", "l4"], description: "plan: 记忆层级，l3 为项目经验，l4 为全局规则" },
+        content: { type: "string", description: "plan: 完整的 L3/L4 正文全文，非增量 patch" },
+        base_evidence_ref: { type: "string", description: "plan: 当前层级 exact evidenceRef" },
+        project: { type: "string", description: "L3 plan: 明确项目 slug；与 workspace_project 冲突时拒绝" },
+        workspace_project: { type: "string", description: "L3 plan: 工作区项目；与 project 冲突时拒绝" },
+        note: { type: "string", description: "plan: 变更原因简述" },
+        authorization_id: { type: "string", description: "execute: plan 返回的单次授权标识" },
+        confirmation_evidence_ref: { type: "string", description: "execute: 用户明确确认轮的 l1:<event-id>" }
       },
       required: ["action"],
       additionalProperties: false
@@ -431,6 +536,15 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
           source_of_truth: item.revision_id ? "distillation-revision-ledger" : "durable-l1-capture"
         }
       });
+    }
+    if (action === "why") {
+      return jsonResult(await explainMemoryWhy({
+        stateRoot,
+        accountId: runtime.accountId,
+        evidenceRef: requiredString(args.evidence_ref, "evidence_ref"),
+        query: requiredString(args.query, "query"),
+        maxSources: optionalInteger(args.max_sources)
+      }));
     }
     if (action === "plan") {
       const kind = requiredString(args.kind, "kind");
@@ -462,7 +576,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
         confirmationEvidenceRef: requiredString(args.confirmation_evidence_ref, "confirmation_evidence_ref")
       }));
     }
-    throw new TypeError("action must be load, plan, or execute");
+    throw new TypeError("action must be load, why, plan, or execute");
   });
 
   server.registerTool("memhub_branch", {
@@ -470,13 +584,13 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
-        action: { type: "string", enum: ["list", "create", "close", "reopen"] },
-        project: { type: "string", description: "项目 slug/name/alias" },
-        workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 不一致时拒绝" },
+        action: { type: "string", enum: ["list", "create", "close", "reopen"], description: "操作类型：list/create/close/reopen" },
+        project: { type: "string", description: "项目 slug/name/alias；与 workspace_project 冲突时拒绝" },
+        workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 冲突时拒绝" },
         branch: { type: "string", description: "Branch id/name；close/reopen 必填" },
         name: { type: "string", description: "create 时的 Branch 名称" },
-        goal: { type: "string", description: "create 时明确当前 workstream 要完成什么；用于 retrieval filtering" },
-        include_closed: { type: "boolean", description: "list 时是否包含 closed Branch；默认 false" }
+        goal: { type: "string", description: "create 时明确 workstream 目标，用于检索过滤" },
+        include_closed: { type: "boolean", description: "list 是否包含已关闭 Branch；默认 false" }
       },
       required: ["action"],
       additionalProperties: false
@@ -527,17 +641,17 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
-        action: { type: "string", enum: ["load", "record", "status", "plan", "execute"] },
+        action: { type: "string", enum: ["load", "record", "status", "plan", "execute"], description: "操作类型：load/record/status/plan/execute" },
         skill_id: { type: "string", description: "memmy_context 返回的 Skill memory id" },
         execution_id: { type: "string", description: "load 返回；record 时必须原样回传" },
         stage: { type: "string", enum: ["invoked", "success", "failure", "user_correction"], description: "action=record 的执行阶段" },
-        executor: { type: "string", description: "实际执行 Harness/MCP/tool executor，例如 codex / chatgpt / claude-code" },
-        note: { type: "string", description: "简短执行结果、修订理由或用户纠正摘要；不要写隐藏 chain-of-thought" },
+        executor: { type: "string", description: "实际执行 Harness/executor，如 codex/chatgpt/claude-code" },
+        note: { type: "string", description: "简短执行结果、修订理由或纠正摘要；不要写隐藏 chain-of-thought" },
         operation: { type: "string", enum: ["revise", "retire"], description: "action=plan 的治理操作" },
         content: { type: "string", description: "revise 时的完整新版 Skill 过程" },
         title: { type: "string", description: "revise 时的 Skill 标题" },
-        version: { type: "string", description: "revise 时严格递增的 numeric dotted 版本，例如 1.1.0" },
-        tags: { type: "array", items: { type: "string" }, description: "新版的业务检索标签（不可自行声明 scope/provenance）" },
+        version: { type: "string", description: "revise 时严格递增的 numeric dotted 版本，如 1.1.0" },
+        tags: { type: "array", items: { type: "string" }, description: "新版业务检索标签（不可自行声明 scope/provenance）" },
         authorization_id: { type: "string", description: "plan 返回的一次性治理授权；仅在用户明确批准后执行" }
       },
       required: ["action", "skill_id"],
@@ -563,106 +677,10 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       });
     }
     if (action === "plan") {
-      if (skill.status !== "activated") throw new Error("only an active Skill can be revised or retired");
-      const operation = requiredString(args.operation, "operation");
-      if (operation !== "revise" && operation !== "retire") throw new TypeError("operation must be revise or retire");
-      const note = requiredString(args.note, "note");
-      if (note.length > 2_000) throw new TypeError("note is too long");
-      let version: string | undefined;
-      let content: string | undefined;
-      let title: string | undefined;
-      let tags: string[] | undefined;
-      if (operation === "revise") {
-        if (!skill.sourceAgentId || !skill.sourceSkillId || !skill.sourceSkillVersion) {
-          throw new Error("Skill has no stable source identity/version; repair provenance before revision");
-        }
-        if (!skill.accountProvenanceVerified) throw new Error("Skill account provenance is not verified for revision");
-        version = requiredString(args.version, "version");
-        assertNextSkillVersion(skill.sourceSkillVersion, version);
-        content = requiredString(args.content, "content");
-        validateDistillationCandidate({ kind: "skill", content, evidence: {} });
-        title = optionalString(args.title) ?? skill.title;
-        tags = stringArray(args.tags) ?? skill.tags.filter((tag) =>
-          ["audit", "memory-integrity", "project-scoping", "reusable"].includes(tag)
-        );
-        if (tags.some((tag) => /^(?:artifact:|layer:|project:|global$|provenance:|evidence:|source-conversation:|distill-contract:|revision-of:|source-)/i.test(tag))) {
-          throw new Error("Skill business tags cannot override managed scope, provenance or revision identity");
-        }
-        if (content === skill.body) throw new Error("Skill revision must change the actual procedure");
-      }
-      const authorizationId = randomUUID();
-      // Governance plans require a real user approval round-trip. Ten minutes is
-      // too short for chat/MCP transports where the next user turn may arrive
-      // well after the plan was rendered. Keep the authorization one-shot and
-      // fingerprint-bound, but allow a normal human approval window.
-      const expiresAt = Date.now() + 24 * 60 * 60_000;
-      skillMutationAuthorizations.set(authorizationId, {
-        accountId: runtime.accountId, skillId, operation,
-        expectedFingerprint: skillFingerprint(skill),
-        ...(content ? { content } : {}), ...(title ? { title } : {}),
-        ...(version ? { version } : {}), ...(tags ? { tags } : {}),
-        note, expiresAt
-      });
-      return jsonResult({
-        status: "awaiting_user_authorization", operation, skill_id: skillId,
-        source_skill_id: skill.sourceSkillId,
-        previous_version: skill.sourceSkillVersion,
-        ...(version ? { next_version: version, next_content_sha256: createHash("sha256").update(content!).digest("hex") } : {}),
-        impact: operation === "revise"
-          ? "Create a new version under the same source skill identity and archive the previous memory id; preserve its history and telemetry."
-          : "Archive this Skill so it no longer appears as an active candidate; preserve its history and telemetry.",
-        note, authorization_id: authorizationId, expires_at: new Date(expiresAt).toISOString(),
-        instructions: "Show this exact plan to the user and call action=execute only after explicit approval."
-      });
+      return jsonResult(await planSkillMutation({ runtime, args, skillId, skill }));
     }
     if (action === "execute") {
-      const authorizationId = requiredString(args.authorization_id, "authorization_id");
-      const plan = skillMutationAuthorizations.get(authorizationId);
-      if (!plan || plan.accountId !== runtime.accountId || plan.skillId !== skillId) {
-        throw new Error("invalid or already-used Skill authorization");
-      }
-      skillMutationAuthorizations.delete(authorizationId);
-      if (plan.expiresAt < Date.now()) throw new Error("Skill authorization expired; create a new plan");
-      if (plan.expectedFingerprint !== skillFingerprint(skill) || skill.status !== "activated") {
-        throw new Error("Skill changed after plan; review a fresh plan before execution");
-      }
-      if (plan.operation === "retire") {
-        await runtime.memoryClient.viewerPost("/api/v1/skills/archive", { skillId, reason: plan.note });
-        return jsonResult({ ok: true, operation: "retire", skill_id: skillId, status: "archived", history_preserved: true });
-      }
-      if (!skill.sourceAgentId || !skill.sourceSkillId || !plan.content || !plan.version) {
-        throw new Error("Skill revision provenance is incomplete");
-      }
-      const projectId = skill.projectId
-        ? await runtime.projects.resolve(runtime.accountId, skill.projectId)
-        : null;
-      if (skill.projectId && !projectId) throw new Error("Skill project is unknown or inactive");
-      const result = await runtime.memory.distill({
-        accountId: runtime.accountId, userId: runtime.userId,
-        kind: "skill", projectId, content: plan.content,
-        title: plan.title, tags: uniqueStrings([...(plan.tags ?? []), `revision-of:${skillId}`]),
-        sourceHarness: skill.sourceAgentId, artifactId: skill.sourceSkillId,
-        version: plan.version,
-        evidenceRefs: skill.tags.filter((tag) => tag.startsWith("evidence:")).map((tag) => tag.slice(9)),
-        contractVersion: DISTILLATION_CONTRACT_VERSION,
-        provenance: {
-          platform: runtime.source.platform, transport: runtime.source.transport,
-          principal: runtime.source.principalId, connection: runtime.source.connectionId,
-          account: runtime.accountId, authenticated_account: runtime.source.authenticatedAccount
-        }
-      });
-      const newId = requireMemoryResultId(result);
-      if (newId === skillId) throw new Error("Skill revision must create a separate version; old history was not archived automatically");
-      try {
-        await runtime.memoryClient.viewerPost("/api/v1/skills/archive", { skillId, reason: `superseded by ${newId}: ${plan.note}` });
-      } catch (error) {
-        throw new Error(`new Skill version ${newId} was created but archiving prior ${skillId} failed; reconcile before using both: ${String(error)}`);
-      }
-      return jsonResult({
-        ok: true, operation: "revise", previous_skill_id: skillId,
-        skill_id: newId, source_skill_id: skill.sourceSkillId,
-        version: plan.version, previous_status: "archived", history_preserved: true
-      });
+      return jsonResult(await executeSkillMutation({ stateRoot, runtime, args, skillId, skill }));
     }
     if (skill.status !== "activated" && action === "load") {
       throw new Error("archived or inactive Skill cannot be loaded for new execution");
@@ -715,34 +733,39 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   });
 
   server.registerTool("memhub_distill", {
-    description: "统一的 L2/L3/L4/Skill 蒸馏入口。L2=项目发展时间线，并可同时产出 evidence-backed project_description；L3=项目内用户长期规则/经验/偏好，L4=跨项目用户画像，Skill=正交的可执行流程。语义整理由当前 Harness 模型完成；Memhub 负责证据边界、scope、版本、provenance 与提交。consolidate 是 EverOS-style reflection 的只读计划：选择历史 revision → merge/re-extract → 用现有 canonical artifact 提交 replacement，不新增记忆层。",
+    description: "统一的 L2/L3/L4/Skill 蒸馏入口。L2=项目时间线，可产出 evidence-backed project_description；L3=项目规则/经验；L4=跨项目画像；Skill=可执行流程。语义整理由当前 Harness 完成，Memhub 负责证据边界、scope、版本与提交。consolidate 为 L2/L3 只读整理计划；不新增记忆层。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
-        action: { type: "string", enum: ["audit", "discover", "consolidate", "recover_ingest", "reconcile_derived", "reconcile_l4", "next", "renew", "submit", "skip"], description: "audit 只读审计；discover 扫描 L1；consolidate 为 L2/L3 生成 select→merge→re-extract→supersede 只读计划；recover/reconcile 处理缺口；next/renew/submit/skip 处理正式蒸馏。" },
+        action: { type: "string", enum: ["audit", "discover", "consolidate", "recover_ingest", "reconcile_derived", "reconcile_l4", "reconcile_commit", "next", "renew", "submit", "skip"], description: "audit 审计；discover 扫描；consolidate 整理计划；recover/reconcile 处理缺口；next/renew/submit/skip 蒸馏" },
         event_id: { type: "string", description: "recover_ingest 必填的完整稳定 Capture event_id，仅恢复此事件" },
-        kind: { type: "string", enum: ["l2", "l3", "l4", "skill"], description: "目标层。next 可省略以领取任意待办；submit 必须与 job target 一致。" },
+        kind: { type: "string", enum: ["l2", "l3", "l4", "skill"], description: "目标层；next 可省略领取任意待办，submit 必须与 job target 一致" },
         content: { type: "string", description: "完整目标层内容" },
-        scope: { type: "string", enum: ["account", "project"], description: "L2/L3 必须 project；L4 必须 account；Skill 可两者。" },
+        scope: { type: "string", enum: ["account", "project"], description: "L2/L3 必须 project；L4 必须 account；Skill 可两者" },
         project: { type: "string", description: "project scope 的明确项目 slug" },
         workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 不一致时拒绝项目级操作" },
         title: { type: "string", description: "可选标题；Skill 必填" },
-        tags: { type: "array", items: { type: "string" } },
+        tags: { type: "array", items: { type: "string" }, description: "业务检索标签" },
         source_harness: { type: "string", description: "产生该沉淀的 Harness，例如 codex / claude-code" },
-        artifact_id: { type: "string", description: "可覆盖默认 canonical artifact id；Skill 必填，且同一 workflow 的所有 revision 必须保持稳定不变" },
-        version: { type: "string", description: "Harness 侧产物版本；Skill 必填 numeric dotted 版本，例如 1.1.0" }
-        ,project_description: { type: "string", description: "L2 可附带 1-3 句项目描述，概括目标、范围与当前重点；必须来自同一批证据。人工描述存在时不会被覆盖。" }
-        ,evidence_refs: { type: "array", items: { type: "string" }, description: "支持该产物的精确证据引用。L2 使用不可变 L1 ref；L3/L4 必须原样使用 memmy_context 或 leased job 返回的 exact revision ref（l2:<memory-id>:<revision-id> / l3:<memory-id>:<revision-id>），禁止只提交稳定 Memory id 或自动解析 latest。" }
-        ,source_conversations: { type: "array", items: { type: "string" }, description: "产物来源对话 ID；与 distilled_by 分开保存" }
-        ,confidence: { type: "number", minimum: 0, maximum: 1 }
-        ,job_id: { type: "string", description: "submit/next 的 leased job，reconcile_derived 的已完成 L2 source job，或 reconcile_l4 的当前最新 L3 source job" }
-        ,lease_seconds: { type: "integer", minimum: 30, maximum: 900 }
-        ,lease_token_supported: { type: "boolean", description: "新客户端显式启用 opaque lease token；旧客户端默认保持原有 harness lease 协议" }
-        ,lease_token: { type: "string", description: "next 返回的 opaque lease token；启用后 next 续取、renew、submit、skip 均须原样提供" }
-        ,evidence_offset: { type: "integer", minimum: 0, description: "大 evidence job 分片读取偏移；action=next + job_id 时继续读取同一 lease" }
-        ,evidence_chunk_chars: { type: "integer", minimum: 10000, maximum: 200000, description: "大 evidence 每次最多返回字符数；默认 120000" }
-        ,inspect_contract: { type: "boolean", description: "只返回 Memhub 蒸馏规则，不写入任何内容" }
-        ,dry_run: { type: "boolean", description: "按当前契约校验候选与 scope，但不写入 Memory Core" }
+        artifact_id: { type: "string", description: "覆盖默认 canonical artifact id；Skill 必填且同一 workflow 保持稳定" },
+        version: { type: "string", description: "Harness 侧产物版本；Skill 必填 numeric dotted 版本，例如 1.1.0" },
+        project_description: { type: "string", description: "L2 可附带 1-3 句项目描述，概括目标范围；人工描述存在时不覆盖" },
+        evidence_refs: { type: "array", items: { type: "string" }, description: "支持产物的精确证据引用。L2 用 L1 ref；L3/L4 须原样使用 exact revision ref" },
+        source_conversations: { type: "array", items: { type: "string" }, description: "产物来源对话 ID；与 distilled_by 分开保存" },
+        confidence: { type: "number", minimum: 0, maximum: 1, description: "置信度，范围 0-1" },
+        job_id: { type: "string", description: "submit/next 的 leased job，或 reconcile 的 source job" },
+        lease_seconds: { type: "integer", minimum: 30, maximum: 900, description: "租约秒数，30-900" },
+        lease_token_supported: { type: "boolean", description: "新客户端启用 opaque lease token 协议" },
+        lease_token: { type: "string", description: "next 返回的 opaque lease token；后续操作须原样提供" },
+        evidence_offset: { type: "integer", minimum: 0, description: "大 evidence job 分片读取偏移" },
+        evidence_chunk_chars: { type: "integer", minimum: 10000, maximum: 200000, description: "大 evidence 每次最多返回字符数；默认 120000" },
+        commit_id: { type: "string", description: "reconcile_commit: inspect 返回的提交 ID；省略时列出本账户记录" },
+        reconcile_mode: { type: "string", enum: ["inspect", "reconcile", "abandon"], description: "inspect 查看冻结候选；reconcile 只对账不重写 Core；abandon 须操作员确认" },
+        commit_generation: { type: "string", description: "对账或放弃时必须回传 inspect 的 generation" },
+        operator_confirmation: { type: "string", description: "明确知晓 Core 可能已写入后，由操作员确认 abandon:<generation>" },
+        operator_reason: { type: "string", description: "放弃冻结提交的操作员原因；原记录保留到正常终态清理" },
+        inspect_contract: { type: "boolean", description: "只返回 Memhub 蒸馏规则，不写入任何内容" },
+        dry_run: { type: "boolean", description: "按当前契约校验候选与 scope，但不写入 Memory Core" }
       },
       required: [],
       additionalProperties: false
@@ -752,6 +775,15 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     const action = optionalString(args.action);
     const sourceHarness = optionalString(args.source_harness) ?? runtime.source.platform ?? "mcp-harness";
     const leaseToken = optionalString(args.lease_token);
+    if (action === "reconcile_commit") {
+      const mode = optionalString(args.reconcile_mode) ?? "inspect";
+      if (!["inspect", "reconcile", "abandon"].includes(mode)) throw new Error("invalid reconcile_mode");
+      const { reconcileDistillationCommit } = await import("./distillation-submit.js");
+      return jsonResult(await reconcileDistillationCommit({ stateRoot, runtime,
+        commitId: optionalString(args.commit_id), mode: mode as "inspect" | "reconcile" | "abandon",
+        generation: optionalString(args.commit_generation), confirmation: optionalString(args.operator_confirmation),
+        reason: optionalString(args.operator_reason) }));
+    }
     if (action === "audit") {
       return jsonResult(await auditDistillationControl({
         stateRoot,
@@ -855,12 +887,13 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   });
 
   server.registerTool("memmy_project_list", {
-    description: "只读列出当前账号的项目注册表。默认仅返回 active 项目；include_archived 可显式查看 archived 项目，include_inactive 可查看 merged/deleted/archived 历史状态。返回 canonical project slug、显示名、description、aliases 和状态；query 可按相似名称检索候选。模型在准备创建项目、绑定一个不确定项目、或发现大小写/近似名称时，应先调用本工具，用名称相似度 + description 判断是否已有同一项目，禁止盲目新建。",
+    description: "只读列出当前账号项目注册表。默认返回摘要（description 最多 280 字符及 pendingTodoCount）；detail=true 返回完整详情。返回 canonical project slug、显示名、description、aliases 和状态。准备创建项目、绑定不确定项目或发现近似名称时，用相似度 + description 判断是否已有同一项目，禁止盲目新建。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
-        query: { type: "string", description: "可选的项目名称/slug/关键词，用于查找相似项目候选" },
-        include_archived: { type: "boolean", description: "是否显式包含 archived 项目；默认 false。归档项目保留全部 Memory，但不会出现在普通列表中。" },
+        detail: { type: "boolean", description: "是否返回完整项目详情；默认 false，仅返回摘要" },
+        query: { type: "string", description: "可选项目名称/slug/关键词，用于查找相似项目候选" },
+        include_archived: { type: "boolean", description: "是否显式包含 archived 项目；默认 false" },
         include_inactive: { type: "boolean", description: "是否包含 archived/merged/deleted 历史项目；默认 false" },
         limit: { type: "integer", minimum: 1, maximum: 20, description: "相似候选最大数量；默认 8" }
       },
@@ -877,10 +910,11 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
           includeArchived: includeInactive || includeArchived
         })
       : [];
+    const format = optionalBoolean(args.detail) ? projectForModel : projectSummaryForModel;
     return jsonResult({
-      projects: projects.map(projectForModel),
+      projects: projects.map(format),
       matches: matches.map((project) => ({
-        ...projectForModel(project),
+        ...format(project),
         similarity: project.similarity,
         matchedBy: project.matchedBy
       })),
@@ -889,16 +923,16 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   });
 
   server.registerTool("memhub_todo", {
-    description: "项目待办的一等 MCP 工具。使用 Project Registry 作为唯一事实源，支持 list/add/complete/reopen；不要把待办写进 Project Architecture、项目 description 或 L2/L3。list 在未指定 project/workspace_project 时列出账号下所有 active project 的待办；项目级写操作必须显式提供 project 或 workspace_project。",
+    description: "项目待办的一等 MCP 工具。使用 Project Registry 作为唯一事实源，支持 list/add/complete/reopen；禁止把待办写进 Project Architecture、项目 description 或 L2/L3。list 在未指定项目时列出所有 active project 待办；写操作必须显式提供 project 或 workspace_project。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
-        action: { type: "string", enum: ["list", "add", "complete", "reopen"] },
-        project: { type: "string", description: "明确项目 slug/name/alias；写操作建议显式提供。" },
-        workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 不一致时拒绝项目级操作。" },
-        text: { type: "string", description: "add 时必填的待办内容，最长 2000 字符。" },
-        todo_id: { type: "string", description: "complete/reopen 时必填。" },
-        status: { type: "string", enum: ["pending", "done", "all"], description: "list 过滤；默认 pending。" }
+        action: { type: "string", enum: ["list", "add", "complete", "reopen"], description: "操作类型：list/add/complete/reopen" },
+        project: { type: "string", description: "明确项目 slug/name/alias；与 workspace_project 冲突时拒绝" },
+        workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 冲突时拒绝项目级操作" },
+        text: { type: "string", description: "add 时必填的待办内容，最长 2000 字符" },
+        todo_id: { type: "string", description: "complete/reopen 时必填" },
+        status: { type: "string", enum: ["pending", "done", "all"], description: "list 过滤；默认 pending" }
       },
       required: ["action"],
       additionalProperties: false
@@ -984,18 +1018,18 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   });
 
   server.registerTool("memmy_project_manage", {
-    description: "受控项目管理工具。支持 create/update/archive/unarchive/delete/merge，但所有修改都必须先 action=plan；plan 只返回一次性 authorization_id 和影响说明，不修改数据。模型必须把计划展示给用户，并在收到针对该计划的明确授权后才能 action=execute。禁止把 plan 本身、历史授权或模型推断当成授权。archive 是可恢复的非破坏性归档：保留全部 Memory/别名/待办，默认项目列表、路由和管理界面隐藏；unarchive 恢复为 active。delete 是逻辑删除，不物理清空 Memory；merge 将 source 变成 target 的历史 alias，未来写入统一到 target，旧 alias 下的历史记忆仍参与召回。",
+    description: "受控项目管理工具。支持 create/update/archive/unarchive/delete/merge。所有修改必须先 action=plan，返回一次性 authorization_id 和影响说明，不修改数据。模型必须把计划展示给用户，并在收到针对该计划的明确授权后才能 action=execute。禁止把 plan 本身、历史授权或模型推断当成授权。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
-        action: { type: "string", enum: ["plan", "execute"] },
-        operation: { type: "string", enum: ["create", "update", "archive", "unarchive", "delete", "merge"] },
-        project: { type: "string", description: "create 时为新 canonical slug；其它操作为 source/current project ref" },
+        action: { type: "string", enum: ["plan", "execute"], description: "操作类型：plan/execute" },
+        operation: { type: "string", enum: ["create", "update", "archive", "unarchive", "delete", "merge"], description: "操作：create/update/archive/unarchive/delete/merge" },
+        project: { type: "string", description: "create 为新 canonical slug；其它为当前项目 ref" },
         target: { type: "string", description: "merge 的目标 canonical project ref" },
-        name: { type: "string", description: "create/update 的显示名；不改变稳定 canonical slug" },
-        description: { type: "string", description: "create 必填；update 可修改。用于 AI 项目消歧。" },
-        aliases: { type: "array", items: { type: "string" }, description: "create/update 的显式别名集合" },
-        authorization_id: { type: "string", description: "execute 时必须使用刚才 plan 返回的一次性授权 ID" }
+        name: { type: "string", description: "create/update 显示名；不改变稳定 canonical slug" },
+        description: { type: "string", description: "create 必填；update 可修改。用于项目消歧" },
+        aliases: { type: "array", items: { type: "string" }, description: "create/update 显式别名集合" },
+        authorization_id: { type: "string", description: "execute 时必须提供刚才 plan 返回的一次性授权 ID" }
       },
       required: ["action"],
       additionalProperties: false
@@ -1003,201 +1037,25 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
   }, async (args) => {
     const action = requiredString(args.action, "action");
     if (action === "plan") {
-      await knownProjectRecords(runtime);
-      const operation = requiredString(args.operation, "operation");
-      if (!["create", "update", "archive", "unarchive", "delete", "merge"].includes(operation)) throw new TypeError("unsupported project management operation");
-      const project = requiredString(args.project, "project");
-      const payload: Record<string, unknown> = { project };
-      let impact: Record<string, unknown>;
-
-      if (operation === "create") {
-        const description = requiredString(args.description, "description");
-        if (await runtime.projects.resolve(runtime.accountId, project)) {
-          throw new Error(`project already exists or aliases to an existing project: ${project}`);
-        }
-        payload.description = description;
-        if (optionalString(args.name)) payload.name = optionalString(args.name);
-        if (stringArray(args.aliases)) payload.aliases = stringArray(args.aliases);
-        impact = {
-          createsCanonicalProject: project,
-          similarProjects: (await runtime.projects.suggest(runtime.accountId, project, 6)).map(projectForModel),
-          requiresDescription: true
-        };
-      } else {
-        const canonical = operation === "unarchive"
-          ? await runtime.projects.resolve(runtime.accountId, project, { includeArchived: true })
-          : await runtime.projects.resolve(runtime.accountId, project);
-        if (!canonical) throw new Error(`unknown or inactive project: ${project}`);
-        payload.project = canonical;
-        if (operation === "update") {
-          const hasName = typeof args.name === "string";
-          const hasDescription = typeof args.description === "string";
-          const hasAliases = Array.isArray(args.aliases);
-          if (!hasName && !hasDescription && !hasAliases) throw new TypeError("update requires name, description, or aliases");
-          if (hasName && !String(args.name).trim()) throw new TypeError("name must be a non-empty string");
-          if (hasAliases && (args.aliases as unknown[]).some((item) => typeof item !== "string" || !item.trim())) {
-            throw new TypeError("aliases must contain only non-empty strings; use [] to clear aliases");
-          }
-          const current = (await runtime.projects.list(runtime.accountId)).find((item) => item.projectId === canonical);
-          if (!current) throw new Error(`unknown or inactive project: ${canonical}`);
-          const normalizedAliases = hasAliases ? stringArray(args.aliases) ?? [] : current.aliases;
-          const sameAliases = [...normalizedAliases].sort().join("\u0000") === [...current.aliases].sort().join("\u0000");
-          if ((!hasName || String(args.name).trim() === current.name) &&
-              (!hasDescription || String(args.description).trim() === (current.manualDescription ?? "")) &&
-              (!hasAliases || sameAliases)) {
-            throw new TypeError("update has no effective changes; provide a different name, description, or aliases");
-          }
-          if (hasName) payload.name = String(args.name);
-          if (hasDescription) payload.description = String(args.description);
-          if (hasAliases) payload.aliases = stringArray(args.aliases) ?? [];
-          impact = {
-            project: canonical,
-            stableCanonicalSlug: canonical,
-            changesMetadataOnly: true
-          };
-        } else if (operation === "archive") {
-          const blockers = (await unfinishedDistillationJobsForProject(stateRoot, runtime, canonical))
-            .filter((job) => job.status === "pending" || job.status === "leased");
-          const historicalFailed = (await unfinishedDistillationJobsForProject(stateRoot, runtime, canonical))
-            .filter((job) => job.status === "failed");
-          impact = {
-            project: canonical,
-            logicalArchive: true,
-            memoryPurged: false,
-            hiddenByDefault: true,
-            restorable: true,
-            blockedByDistillationJobs: blockers.map((job) => ({
-              job_id: job.job_id,
-              status: job.status,
-              target: job.target
-            })),
-            preservedFailedDistillationJobs: historicalFailed.map((job) => ({
-              job_id: job.job_id,
-              status: job.status,
-              target: job.target
-            })),
-            note: "All durable evidence, aliases and Todos remain stored. The project is removed from normal routing/list/UI until unarchived."
-          };
-        } else if (operation === "unarchive") {
-          const current = (await runtime.projects.list(runtime.accountId, { includeInactive: true }))
-            .find((item) => item.projectId === canonical);
-          if (!current || current.state !== "archived") throw new Error(`project is not archived: ${project}`);
-          impact = {
-            project: canonical,
-            restoresActiveRouting: true,
-            memoryPreserved: true,
-            aliasesPreserved: true,
-            todosPreserved: true
-          };
-        } else if (operation === "delete") {
-          const blockers = await unfinishedDistillationJobsForProject(stateRoot, runtime, canonical);
-          impact = {
-            project: canonical,
-            logicalDelete: true,
-            memoryPurged: false,
-            blockedByDistillationJobs: blockers.map((job) => ({
-              job_id: job.job_id,
-              status: job.status,
-              target: job.target
-            })),
-            note: "Existing durable evidence is retained; the project becomes unavailable for new routing/writes."
-          };
-        } else {
-          const target = requiredString(args.target, "target");
-          const canonicalTarget = await runtime.projects.resolve(runtime.accountId, target);
-          if (!canonicalTarget) throw new Error(`unknown merge target: ${target}`);
-          if (canonicalTarget === canonical) throw new Error("source and target already resolve to the same project");
-          payload.target = canonicalTarget;
-          impact = {
-            source: canonical,
-            target: canonicalTarget,
-            logicalMerge: true,
-            futureWritesUse: canonicalTarget,
-            historicalAliasRecallPreserved: true,
-            physicalMemoryRewrite: false
-          };
-        }
-      }
-
-      const authorizationId = randomUUID();
-      // Project governance has the same human-in-the-loop approval boundary as
-      // Skill governance; use the same one-day approval window. Execute remains
-      // one-shot and validates the planned object before mutation.
-      const expiresAt = Date.now() + 24 * 60 * 60_000;
-      projectMutationAuthorizations.set(authorizationId, {
-        accountId: runtime.accountId,
-        operation: operation as "create" | "update" | "archive" | "unarchive" | "delete" | "merge",
-        payload,
-        expiresAt
-      });
-      return jsonResult({
-        status: "awaiting_user_authorization",
-        operation,
-        payload,
-        impact,
-        authorization_id: authorizationId,
-        expires_at: new Date(expiresAt).toISOString(),
-        instructions: "Show this plan to the user. Call action=execute with authorization_id only after the user explicitly approves this exact plan."
-      });
+      return jsonResult(await planProjectMutation({ stateRoot, runtime, args, projectForModel }));
     }
     if (action !== "execute") throw new TypeError("action must be plan or execute");
-    const authorizationId = requiredString(args.authorization_id, "authorization_id");
-    const authorization = projectMutationAuthorizations.get(authorizationId);
-    if (!authorization || authorization.accountId !== runtime.accountId) throw new Error("invalid or already-used project authorization");
-    projectMutationAuthorizations.delete(authorizationId);
-    if (authorization.expiresAt < Date.now()) throw new Error("project authorization expired; create a new plan");
-    const project = requiredString(authorization.payload.project, "project");
-    let result: unknown;
-    if (authorization.operation === "create") {
-      result = await runtime.projects.create(runtime.accountId, {
-        projectId: project,
-        name: optionalString(authorization.payload.name),
-        description: requiredString(authorization.payload.description, "description"),
-        aliases: stringArray(authorization.payload.aliases)
-      });
-    } else if (authorization.operation === "update") {
-      result = await runtime.projects.update(runtime.accountId, project, {
-        ...(typeof authorization.payload.name === "string" ? { name: authorization.payload.name } : {}),
-        ...(typeof authorization.payload.description === "string" ? { description: authorization.payload.description } : {}),
-        ...(Array.isArray(authorization.payload.aliases) ? { aliases: stringArray(authorization.payload.aliases) ?? [] } : {})
-      });
-    } else if (authorization.operation === "archive") {
-      const blockers = (await unfinishedDistillationJobsForProject(stateRoot, runtime, project))
-        .filter((job) => job.status === "pending" || job.status === "leased");
-      if (blockers.length > 0) {
-        throw new Error(`project has ${blockers.length} active distillation job(s); complete or resolve them before archive`);
-      }
-      result = await runtime.projects.archive(runtime.accountId, project);
-    } else if (authorization.operation === "unarchive") {
-      result = await runtime.projects.unarchive(runtime.accountId, project);
-    } else if (authorization.operation === "delete") {
-      const blockers = await unfinishedDistillationJobsForProject(stateRoot, runtime, project);
-      if (blockers.length > 0) {
-        throw new Error(`project has ${blockers.length} unfinished distillation job(s); complete, skip, or resolve them before delete`);
-      }
-      result = await runtime.projects.delete(runtime.accountId, project);
-    } else {
-      result = await runtime.projects.merge(
-        runtime.accountId,
-        project,
-        requiredString(authorization.payload.target, "target")
-      );
-    }
-    return jsonResult({ ok: true, operation: authorization.operation, result });
+    return jsonResult(await executeProjectMutation({ stateRoot, runtime, args }));
   });
 
   server.registerTool("memmy_project", {
-    description: "项目上下文 + Project Architecture。Project 只由当前调用的显式 project/workspace_project、exact alias 或唯一 semantic evidence 解析，不保存 host conversation binding。current 读取当前显式项目；architecture 只读当前架构；architecture_plan/execute 为受控完整替换；architecture_history 读取审计历史。",
+    description: "项目上下文与 Project Architecture。Project 只由显式 project/workspace_project、exact alias 或唯一 semantic evidence 解析，不保存 host conversation binding。current 读当前项目；architecture 读架构；architecture_plan/execute 受控完整替换；architecture_history 读历史；list 读项目列表（默认摘要）。",
     inputSchema: fromJsonSchema<Record<string, unknown>>({
       type: "object",
       properties: {
-        action: { type: "string", enum: ["list", "current", "architecture", "architecture_plan", "architecture_execute", "architecture_history"] },
-        project: { type: "string" },
-        workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 不一致时拒绝操作" },
-        query: { type: "string", description: "architecture 时用于选择最相关的架构模块" },
-        content: { type: "string", description: "architecture_plan：完整最终 canonical Architecture 正文，不是 patch/append 片段。" },
-        authorization_id: { type: "string", description: "architecture_execute：用户明确批准对应 plan 后使用的一次性 authorization id。" },
-        limit: { type: "integer", minimum: 1, maximum: 100, description: "architecture_history 返回条数，默认 20。" }
+        detail: { type: "boolean", description: "list 是否返回完整项目详情；默认 false，仅返回摘要" },
+        action: { type: "string", enum: ["list", "current", "architecture", "architecture_plan", "architecture_execute", "architecture_history"], description: "操作类型：list/current/architecture/architecture_plan/architecture_execute/architecture_history" },
+        project: { type: "string", description: "明确项目 slug/alias；与 workspace_project 冲突时拒绝" },
+        workspace_project: { type: "string", description: "当前工作区解析出的 project；与 project 冲突时拒绝操作" },
+        query: { type: "string", description: "architecture 时用于选择最相关架构模块" },
+        content: { type: "string", description: "architecture_plan：完整最终 canonical Architecture 正文，非 patch 片段" },
+        authorization_id: { type: "string", description: "architecture_execute：用户批准对应 plan 后使用的一次性 authorization id" },
+        limit: { type: "integer", minimum: 1, maximum: 100, description: "architecture_history 返回条数，默认 20" }
       },
       required: ["action"],
       additionalProperties: false
@@ -1206,7 +1064,7 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
     const action = requiredString(args.action, "action");
     if (action === "list") {
       const details = await knownProjectRecords(runtime);
-      return jsonResult({ projects: details.map((project) => project.projectId), projectDetails: details.map(projectForModel) });
+      return jsonResult({ projects: details.map((project) => project.projectId), projectDetails: details.map(optionalBoolean(args.detail) ? projectForModel : projectSummaryForModel) });
     }
     if (action === "current") {
       await knownProjectRecords(runtime);
@@ -1259,102 +1117,10 @@ export function createMemhubMcpServerForRuntime(runtime: MemhubRuntime, stateRoo
       });
     }
     if (action === "architecture_plan") {
-      const explicitEvidence = await resolveExplicitProjectEvidence(runtime, {
-        project: optionalString(args.project),
-        workspaceProject: optionalString(args.workspace_project)
-      });
-      if (!explicitEvidence.projectId) throw new TypeError("architecture_plan requires project or workspace_project");
-      const canonical = explicitEvidence.projectId;
-      const current = await runtime.architecture.inspectProjectArchitecture({
-        accountId: runtime.accountId,
-        projectId: canonical
-      });
-      if (!current) {
-        throw new Error(`no canonical local workspace found for Project Architecture: ${canonical}`);
-      }
-      const content = normalizeArchitecturePlanContent(requiredString(args.content, "content"));
-      if (normalizeArchitecturePlanContent(current.content || "# empty") === content && current.exists) {
-        throw new TypeError("Project Architecture plan has no effective content change");
-      }
-      const authorizationId = randomUUID();
-      const expiresAt = Date.now() + 24 * 60 * 60_000;
-      architectureMutationAuthorizations.set(authorizationId, {
-        accountId: runtime.accountId,
-        projectId: canonical,
-        expectedPath: current.path,
-        expectedFingerprint: current.fingerprint,
-        content,
-        expiresAt
-      });
-      return jsonResult({
-        status: "awaiting_user_authorization",
-        operation: "replace_project_architecture",
-        project: canonical,
-        path: current.path,
-        existing: current.exists,
-        current_fingerprint: current.fingerprint,
-        proposed_content: content,
-        proposed_sha256: createHash("sha256").update(content, "utf8").digest("hex"),
-        impact: "Replace the canonical Project Architecture document only. This does not modify L1/L2/L3/L4, Todo, Project Registry metadata, or legacy normify-* files.",
-        authorization_id: authorizationId,
-        expires_at: new Date(expiresAt).toISOString(),
-        instructions: "Show proposed_content to the user in full and call architecture_execute only after explicit approval of this exact replacement."
-      });
+      return jsonResult(await planArchitectureMutation({ runtime, args, resolveExplicitProjectEvidence }));
     }
     if (action === "architecture_execute") {
-      const authorizationId = requiredString(args.authorization_id, "authorization_id");
-      const plan = architectureMutationAuthorizations.get(authorizationId);
-      if (!plan || plan.accountId !== runtime.accountId) throw new Error("invalid or already-used Project Architecture authorization");
-      architectureMutationAuthorizations.delete(authorizationId);
-      if (plan.expiresAt < Date.now()) throw new Error("Project Architecture authorization expired; create a fresh plan");
-      const explicitEvidence = await resolveExplicitProjectEvidence(runtime, {
-        project: optionalString(args.project) ?? plan.projectId,
-        workspaceProject: optionalString(args.workspace_project)
-      });
-      if (explicitEvidence.projectId !== plan.projectId) throw new Error("Project Architecture authorization scope changed; create a fresh plan");
-      const current = await runtime.architecture.inspectProjectArchitecture({ accountId: runtime.accountId, projectId: plan.projectId });
-      if (!current || current.path !== plan.expectedPath || current.fingerprint !== plan.expectedFingerprint) {
-        throw new Error("Project Architecture changed after plan; create a fresh plan and ask for approval again");
-      }
-      const revision = await prepareArchitectureRevision({
-        stateRoot,
-        accountId: runtime.accountId,
-        projectId: plan.projectId,
-        path: current.path,
-        beforeExists: current.exists,
-        beforeFingerprint: current.fingerprint,
-        beforeContent: current.content,
-        proposedContent: plan.content
-      });
-      const written = await runtime.architecture.writeProjectArchitecture({
-        accountId: runtime.accountId,
-        projectId: plan.projectId,
-        expectedPath: plan.expectedPath,
-        expectedFingerprint: plan.expectedFingerprint,
-        content: plan.content
-      });
-      let audit;
-      try {
-        audit = await commitArchitectureRevision({
-          stateRoot,
-          accountId: runtime.accountId,
-          projectId: plan.projectId,
-          revisionId: revision.revision_id,
-          afterFingerprint: written.after.fingerprint
-        });
-      } catch (error) {
-        throw new Error(`Project Architecture was written but audit commit failed; revision ${revision.revision_id} remains prepared for reconciliation: ${String(error)}`);
-      }
-      return jsonResult({
-        ok: true,
-        operation: "replace_project_architecture",
-        project: plan.projectId,
-        path: written.after.path,
-        fingerprint: written.after.fingerprint,
-        revision_id: audit.revision_id,
-        history_preserved: true,
-        rollback_available: true
-      });
+      return jsonResult(await executeArchitectureMutation({ stateRoot, runtime, args, resolveExplicitProjectEvidence }));
     }
     throw new TypeError(`unsupported memmy_project action: ${action}`);
   });
@@ -1456,502 +1222,32 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     ...runtimeOptions,
     controlRoot: runtimeOptions.controlRoot ?? stateRoot
   };
+  await recoverCaptureIndex(stateRoot);
   if (httpPort !== undefined) {
-    await serveHttp(effectiveRuntimeOptions, { stateRoot, port: httpPort, path: httpPath, basePath, publicHost, allowJit });
+    await serveHttp(
+      effectiveRuntimeOptions,
+      { stateRoot, port: httpPort, path: httpPath, basePath, publicHost, allowJit },
+      {
+        createServerForRuntime: createMemhubMcpServerForRuntime,
+        queueIdleDistillation,
+        unfinishedDistillationJobsForProject,
+        assertManagedMemory,
+        knownProjectRecords
+      }
+    );
     return;
   }
   console.error(`[memhub] serving stdio account=${resolveLocalAccountId(effectiveRuntimeOptions)}`);
-  await serveStdio(() => createMemhubMcpServerForRuntime(createMemhubRuntime(effectiveRuntimeOptions), stateRoot));
-}
-
-const WEB_ASSETS = {
-  "logo-mark.png": readFileSync(fileURLToPath(new URL("../web-assets/logo-mark.png", import.meta.url))),
-  "logo-lockup.png": readFileSync(fileURLToPath(new URL("../web-assets/logo-lockup.png", import.meta.url)))
-} as const;
-
-async function serveHttp(
-  runtimeOptions: MemhubRuntimeOptions,
-  options: { stateRoot: string; port: number; path: string; basePath: string; publicHost?: string; allowJit: boolean }
-): Promise<void> {
-  await ensureLocalAdminToken(options.stateRoot);
-  const handlers = new Map<string, ReturnType<typeof toNodeHandler>>();
-  const runtimes = new Map<string, MemhubRuntime>();
-  const validateHost = options.publicHost === undefined
-    ? localhostHostValidation()
-    : hostHeaderValidation(["localhost", "127.0.0.1", "[::1]", options.publicHost]);
-  const validateOrigin = options.publicHost === undefined
-    ? localhostOriginValidation()
-    : originValidation(["localhost", "127.0.0.1", "[::1]", options.publicHost]);
-  const healthPath = options.basePath === "/" ? "/health" : `${options.basePath}/health`;
-
-  const runtimeFor = (accountId: string, source = runtimeOptions.source): MemhubRuntime => {
-    const sourceKey = source
-      ? [source.platform, source.transport, source.principalId ?? "", source.connectionId ?? "", source.authenticatedAccount ?? ""].join("|")
-      : "default";
-    const runtimeKey = `${accountId}|${sourceKey}`;
-    let runtime = runtimes.get(runtimeKey);
-    if (!runtime) {
-      runtime = createMemhubRuntime({ ...runtimeOptions, accountId, source });
-      runtimes.set(runtimeKey, runtime);
-    }
-    return runtime;
-  };
-
-  const handlerFor = (accountId: string, source = runtimeOptions.source) => {
-    const sourceKey = source
-      ? [source.platform, source.transport, source.principalId ?? "", source.connectionId ?? "", source.authenticatedAccount ?? ""].join("|")
-      : "default";
-    const handlerKey = `${accountId}|${sourceKey}`;
-    let handler = handlers.get(handlerKey);
-    if (handler) return handler;
-    handler = toNodeHandler(
-      createMcpHandler(() => createMemhubMcpServerForRuntime(runtimeFor(accountId, source), options.stateRoot)),
-      { onerror: (error) => console.error("[memhub] MCP HTTP error:", error.message) }
-    );
-    handlers.set(handlerKey, handler);
-    return handler;
-  };
-
-  const http = createServer((request, response) => {
-    const requestId = randomUUID();
-    const startedAt = Date.now();
-    response.setHeader("x-memhub-request-id", requestId);
-    response.once("finish", () => {
-      if (response.statusCode < 400) return;
-      console.error(JSON.stringify({
-        component: "memhub-gateway", request_id: requestId,
-        method: request.method, route: (request.url ?? "/").split("?", 1)[0],
-        status: response.statusCode, duration_ms: Date.now() - startedAt
-      }));
-    });
-    void (async () => {
-      const url = new URL(request.url ?? "/", "http://localhost");
-      if (!validateHost(request, response) || !validateOrigin(request, response)) return;
-      const forwardedProto = singleHeader(request.headers["x-forwarded-proto"])?.split(",", 1)[0]?.trim().toLowerCase();
-      const requestHost = singleHeader(request.headers.host)?.split(":", 1)[0]?.toLowerCase();
-      if (options.publicHost && requestHost === options.publicHost.toLowerCase() && forwardedProto === "http") {
-        response.writeHead(308, {
-          location: `https://${options.publicHost}${request.url ?? "/"}`,
-          "cache-control": "no-store"
-        }).end();
-        return;
-      }
-      response.setHeader("strict-transport-security", "max-age=3600");
-      if (url.pathname === healthPath) {
-        if (request.method !== "GET" && request.method !== "HEAD") {
-          response.writeHead(405, { allow: "GET, HEAD" }).end();
-          return;
-        }
-        response.writeHead(200, {
-          "content-type": "application/json",
-          "cache-control": "no-store",
-          ...webSecurityHeaders()
-        });
-        response.end(request.method === "HEAD" ? undefined : JSON.stringify({ ok: true, service: "memhub", uptime_seconds: Math.floor(process.uptime()) }));
-        return;
-      }
-      if (options.basePath === "/" && url.pathname !== options.path) {
-        url.pathname = url.pathname === "/" ? "/memhub" : `/memhub${url.pathname}`;
-      }
-      if (url.pathname === "/") {
-        response.writeHead(302, { location: "/memhub", "cache-control": "no-store" }).end();
-        return;
-      }
-      if (url.pathname === "/memhub") {
-        if (request.method !== "GET" && request.method !== "HEAD") {
-          response.writeHead(405, { allow: "GET, HEAD" }).end();
-          return;
-        }
-        response.writeHead(200, {
-          "content-type": "text/html; charset=utf-8",
-          "cache-control": "public, max-age=300",
-          ...webSecurityHeaders()
-        });
-        response.end(request.method === "HEAD" ? undefined : rewriteHtmlForBasePath(renderLanding(), options.basePath));
-        return;
-      }
-      if (url.pathname.startsWith("/memhub/assets/")) {
-        if (request.method !== "GET" && request.method !== "HEAD") {
-          response.writeHead(405, { allow: "GET, HEAD" }).end();
-          return;
-        }
-        const assetName = url.pathname.slice("/memhub/assets/".length) as keyof typeof WEB_ASSETS;
-        const asset = WEB_ASSETS[assetName];
-        if (!asset) {
-          response.writeHead(404, { "cache-control": "no-store" }).end();
-          return;
-        }
-        response.writeHead(200, {
-          "content-type": "image/png",
-          "cache-control": "public, max-age=86400, immutable",
-          ...webSecurityHeaders()
-        });
-        response.end(request.method === "HEAD" ? undefined : asset);
-        return;
-      }
-      if (url.pathname === "/memhub/docs" || url.pathname.startsWith("/memhub/docs/")) {
-        if (request.method !== "GET" && request.method !== "HEAD") {
-          response.writeHead(405, { allow: "GET, HEAD" }).end();
-          return;
-        }
-        response.writeHead(200, {
-          "content-type": "text/html; charset=utf-8",
-          "cache-control": "public, max-age=300",
-          ...webSecurityHeaders()
-        });
-        response.end(request.method === "HEAD" ? undefined : rewriteHtmlForBasePath(renderDocs(url.pathname), options.basePath));
-        return;
-      }
-      if (url.pathname.startsWith("/memhub/user") || url.pathname.startsWith("/memhub/admin")) {
-        let accounts = await listAccounts(options.stateRoot);
-        const localControl = isLocalControlRequest(request);
-        let summary: (typeof accounts)[number];
-        if (localControl) {
-          const token = basicPassword(singleHeader(request.headers.authorization));
-          if (!(await verifyLocalAdminToken(options.stateRoot, token))) {
-            response.writeHead(401, {
-              "content-type": "text/plain; charset=utf-8",
-              "cache-control": "no-store",
-              "www-authenticate": 'Basic realm="Memhub local admin", charset="UTF-8"'
-            }).end("Local administrator token required");
-            return;
-          }
-          summary = localAdminAccount(
-            accounts,
-            runtimeOptions.accountId ?? process.env.MEMHUB_LOCAL_ADMIN_ACCOUNT ?? process.env.MEMHUB_OWNER_ACCOUNT_ID
-          );
-        } else {
-          if (options.publicHost === undefined) {
-            response.writeHead(404).end();
-            return;
-          }
-          const assertion = singleHeader(request.headers["cf-access-jwt-assertion"]);
-          if (!assertion) {
-            response.writeHead(401, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" }).end("Cloudflare Access authentication required");
-            return;
-          }
-          const identity = await verifyCloudflareAccessJwt(options.stateRoot, options.publicHost, assertion);
-          let account;
-          try {
-            account = await resolveCloudflareAccount(options.stateRoot, identity, { allowJit: options.allowJit });
-            if (account.created) accounts = await listAccounts(options.stateRoot);
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            if (!options.allowJit && message.includes("未加入 Memhub 本地允许列表")) {
-              response.writeHead(403, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...webSecurityHeaders() });
-              response.end(rewriteHtmlForBasePath(renderUnprovisionedAccount(identity.email), options.basePath));
-              return;
-            }
-            throw error;
-          }
-          summary = accounts.find((item) => item.account_id === account.account_id)!;
-        }
-        const isAdmin = summary.role === "admin";
-        if (url.pathname.startsWith("/memhub/admin") && !isAdmin) {
-          response.writeHead(403, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" }).end("Administrator access required");
-          return;
-        }
-        const adminView = url.pathname.startsWith("/memhub/admin");
-        const selectedRef = adminView ? optionalString(url.searchParams.get("account_id")) : undefined;
-        const selectedAccount = selectedRef
-          ? accounts.find((item) =>
-              item.account_id === selectedRef ||
-              item.username === selectedRef ||
-              item.cloudflare_email === selectedRef.toLowerCase())
-          : summary;
-        if (!selectedAccount) {
-          response.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" })
-            .end(JSON.stringify({ error: "account_not_found" }));
-          return;
-        }
-        const runtime = runtimeFor(selectedAccount.account_id);
-        const apiPath = adminView ? "/memhub/admin/api" : "/memhub/user/api";
-        const actionPath = adminView ? "/memhub/admin/action" : "/memhub/user/action";
-        if (url.pathname === apiPath && request.method === "GET") {
-          await handleMemoryControlRead({
-            response,
-            url,
-            stateRoot: options.stateRoot,
-            runtime,
-            accounts,
-            selectedAccount,
-            adminView
-          });
-          return;
-        }
-        if (url.pathname === actionPath && request.method === "POST") {
-          await handleMemoryControlAction({
-            request, response, stateRoot: options.stateRoot, runtime, accounts, selectedAccount, adminView,
-            unfinishedDistillationJobsForProject, assertManagedMemory
-          });
-          return;
-        }
-        const projects = await knownProjectRecords(runtime);
-        const visibleAccounts = isAdmin && adminView ? accounts : [];
-        response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...webSecurityHeaders() });
-        response.end(rewriteHtmlForBasePath(renderConsole({ account: summary, projects, accounts: visibleAccounts, adminView, localControl, selectedAccountId: selectedAccount.account_id }), options.basePath));
-        return;
-      }
-      // OAuth-capable MCP clients may canonicalize the resource URI with a
-      // trailing slash. Cloudflare Managed OAuth protects both forms, so the
-      // origin must treat both forms as the same MCP endpoint.
-      const mcpPath = url.pathname.endsWith("/") && url.pathname.length > 1
-        ? url.pathname.slice(0, -1)
-        : url.pathname;
-      if (mcpPath !== options.path) {
-        response.writeHead(404).end();
-        return;
-      }
-
-      if (options.publicHost === undefined || isLocalControlRequest(request)) {
-        handlerFor(resolveLocalAccountId(runtimeOptions))(request, response);
-        return;
-      }
-
-      const assertion = request.headers["cf-access-jwt-assertion"];
-      if (typeof assertion !== "string" || !assertion) {
-        response.writeHead(401, { "content-type": "application/json", "cache-control": "no-store" });
-        response.end(JSON.stringify({ error: "missing_cloudflare_access_jwt" }));
-        return;
-      }
-      try {
-        const identity = await verifyCloudflareAccessJwt(options.stateRoot, options.publicHost, assertion);
-        const account = await resolveCloudflareAccount(options.stateRoot, identity, { allowJit: options.allowJit });
-        handlerFor(account.account_id, {
-          platform: "remote-mcp",
-          transport: "mcp",
-          principalId: identity.sub ? `cloudflare:${identity.sub}` : `cloudflare-email:${identity.email}`,
-          connectionId: "cloudflare-managed-oauth",
-          authenticatedAccount: identity.email
-        })(request, response);
-      } catch (error) {
-        console.error("[memhub] HTTP identity error:", error);
-        if (!response.headersSent) {
-          response.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
-          response.end(JSON.stringify({
-            error: "identity_rejected",
-            message: error instanceof Error ? error.message : String(error)
-          }));
-        } else {
-          response.end();
-        }
-      }
-    })().catch((error) => {
-      const bodyError = asHttpJsonBodyError(error);
-      const status = bodyError?.statusCode ?? (error instanceof TypeError ? 400 : 500);
-      const code = bodyError?.code ?? (error instanceof TypeError ? "invalid_request" : "request_failed");
-      console.error("[memhub] HTTP request error:", error);
-      if (!response.headersSent) {
-        response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
-        response.end(JSON.stringify({
-          error: code,
-          message: error instanceof Error ? error.message : String(error)
-        }));
-      } else {
-        response.end();
-      }
-    });
-  });
-
-  http.keepAliveTimeout = 95_000;
-  http.headersTimeout = 100_000;
-  http.on("connection", (socket) => socket.setKeepAlive(true, 30_000));
-  await new Promise<void>((resolveReady, reject) => {
-    http.once("error", reject);
-    http.listen(options.port, "127.0.0.1", () => resolveReady());
-  });
-  const address = http.address();
-  const actualPort = typeof address === "object" && address !== null ? address.port : options.port;
-  console.error(`[memhub] listening on http://127.0.0.1:${actualPort}${options.path}`);
-  if (options.publicHost) {
-    console.error(`[memhub] Cloudflare Access allowlist enabled for https://${options.publicHost}${options.path}`);
-  }
-
-  // The durable ingested marker is the reconciliation source after a
-  // marker->enqueue crash. Scan once on startup instead of waiting for the
-  // next 60-second tick, and prevent overlapping full-account scans.
-  let inFlightDiscovery: Promise<void> | null = null;
-  const reconcile = (): Promise<void> => {
-    if (!inFlightDiscovery) {
-      const current = queueIdleDistillation(options.stateRoot, runtimeFor)
-        .catch((error) => {
-          console.error("[memhub] idle distillation scheduler:", error instanceof Error ? error.message : String(error));
-        })
-        .finally(() => {
-          if (inFlightDiscovery === current) inFlightDiscovery = null;
-        });
-      inFlightDiscovery = current;
-    }
-    return inFlightDiscovery;
-  };
-  void reconcile();
-  const idleTimer = setInterval(() => { void reconcile(); }, 60_000);
-  idleTimer.unref();
-}
-
-async function maybeQueueThresholdDistillation(input: {
-  stateRoot: string;
-  accountId: string;
-  projectId: string | null;
-}): Promise<unknown | null> {
-  const config = await getDistillationConfig(input.stateRoot);
-  if (!config.auto_enabled || !input.projectId) return null;
-  return discoverDistillationJobs({
-    stateRoot: input.stateRoot,
-    accountId: input.accountId,
-    resolveProject: async (hint) => hint === input.projectId ? input.projectId : null,
-    enqueue: true
-  });
-}
-
-async function queueIdleDistillation(
-  stateRoot: string,
-  runtimeForAccount: (accountId: string) => MemhubRuntime
-): Promise<void> {
-  const config = await getDistillationConfig(stateRoot);
-  // Frozen Core intents are a capture durability concern, not a distillation
-  // preference, so include complete un-ingested accounts even when automatic
-  // distillation is disabled.
-  const entries = await listCaptureIndexEntries(stateRoot, undefined, { completeOnly: true });
-  const failures: Error[] = [];
-  for (const accountId of new Set(entries.map((item) => item.account_id))) {
-    try {
-      const runtime = runtimeForAccount(accountId);
-      await reconcileFrozenCaptureIngests({ stateRoot, runtime });
-      if (!config.auto_enabled) continue;
-      await discoverDistillationJobs({
-        stateRoot,
-        accountId,
-        resolveProject: (hint) => runtime.projects.resolve(accountId, hint),
-        enqueue: true
-      });
-    } catch (error) {
-      failures.push(new Error(`account ${accountId}: ${error instanceof Error ? error.message : String(error)}`));
-    }
-  }
-  if (failures.length) throw new AggregateError(failures, "distillation discovery failed for one or more accounts");
+  await serveStdio(() => createMemhubMcpServer({ ...effectiveRuntimeOptions, controlRoot: stateRoot }));
 }
 
 function defaultStateRoot(): string {
-  return resolve(process.env.MEMHUB_STATE_ROOT ?? join(homedir(), ".memmy", "memhub"));
+  return resolve(resolveControlRoot());
 }
 
-function localAdminAccount(
-  accounts: Awaited<ReturnType<typeof listAccounts>>,
-  preferred?: string
-): Awaited<ReturnType<typeof listAccounts>>[number] {
-  const admins = accounts.filter((item) => item.role === "admin");
-  if (preferred) {
-    const match = admins.find((item) => item.account_id === preferred || item.username === preferred || item.cloudflare_email === preferred.toLowerCase());
-    if (match) return match;
-    throw new Error(`configured local admin account is not an administrator: ${preferred}`);
-  }
-  if (admins.length === 1) return admins[0]!;
-  if (admins.length === 0) throw new Error("local control plane requires at least one Memhub administrator account");
-  throw new Error("multiple administrator accounts exist; set MEMHUB_LOCAL_ADMIN_ACCOUNT to select the local control-plane identity");
-}
 
-function inlineJsonResult(value: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
-}
-
-async function loadSkillForAccount(runtime: MemhubRuntime, skillId: string): Promise<{
-  body: string;
-  tags: string[];
-  projectId?: string;
-  title: string;
-  status: string;
-  sourceAgentId?: string;
-  sourceSkillId?: string;
-  sourceSkillVersion?: string;
-  accountProvenanceVerified: boolean;
-}> {
-  const payload = objectRecord(await runtime.memoryClient.viewerGet(`/api/v1/memory/${encodeURIComponent(skillId)}`));
-  const item = objectRecord(payload.item ?? payload);
-  const memoryLayer = optionalString(item.memoryLayer) ?? optionalString(payload.memoryLayer);
-  const tags = stringArray(item.tags) ?? stringArray(payload.tags) ?? [];
-  if (memoryLayer !== "Skill" || !tags.includes("artifact:skill")) {
-    throw new Error("requested memory is not a Memhub reusable Skill");
-  }
-  const body = optionalString(item.body) ?? optionalString(payload.body);
-  if (!body?.trim()) throw new Error("Skill body is unavailable");
-  const namespace = objectRecord(item.namespace ?? payload.namespace);
-  const tenantId = optionalString(namespace.tenantId);
-  if (tenantId && tenantId !== runtime.accountId) throw new Error("Skill is outside current account scope");
-  const metadata = objectRecord(item.metadata ?? payload.metadata);
-  const info = objectRecord(metadata.info);
-  const internal = objectRecord(objectRecord(metadata.properties).internal_info);
-  const sourceTenantId = optionalString(internal.source_namespace_tenant_id);
-  if (sourceTenantId && sourceTenantId !== runtime.accountId) throw new Error("Skill source belongs to another account");
-  const accountTags = tags.filter((tag) => tag.startsWith("provenance:account:"));
-  if (accountTags.length > 0 && !accountTags.includes(`provenance:account:${runtime.accountId}`)) {
-    throw new Error("Skill provenance belongs to another account");
-  }
-  const accountProvenanceVerified = tenantId === runtime.accountId ||
-    sourceTenantId === runtime.accountId || accountTags.includes(`provenance:account:${runtime.accountId}`);
-  if (!accountProvenanceVerified) {
-    throw new Error("Skill account ownership is not verifiable; do not load across account boundaries");
-  }
-  const projectId = optionalString(namespace.projectId) ?? optionalString(info.project_id) ?? projectIdFromSkillTags(tags);
-  return {
-    body, tags,
-    title: optionalString(item.title) ?? optionalString(payload.title) ?? "Reusable Skill",
-    status: optionalString(item.status) ?? optionalString(payload.status) ?? "unknown",
-    sourceAgentId: optionalString(internal.source_agent_id),
-    sourceSkillId: optionalString(internal.source_skill_id),
-    sourceSkillVersion: optionalString(internal.source_skill_version),
-    accountProvenanceVerified,
-    ...(projectId ? { projectId } : {})
-  };
-}
-
-function skillFingerprint(skill: Awaited<ReturnType<typeof loadSkillForAccount>>): string {
-  return createHash("sha256").update(JSON.stringify([
-    skill.body, skill.title, skill.tags, skill.status, skill.projectId,
-    skill.sourceAgentId, skill.sourceSkillId, skill.sourceSkillVersion
-  ])).digest("hex");
-}
-
-function projectIdFromSkillTags(tags: readonly string[]): string | undefined {
-  const tag = tags.find((value) => value.startsWith("project:"));
-  const projectId = tag?.slice("project:".length).trim();
-  return projectId || undefined;
-}
-
-function relevantProjectTodos(todos: readonly ProjectTodo[] | undefined, query: string): Array<{
-  id: string;
-  text: string;
-  status: ProjectTodo["status"];
-  completedAt?: string;
-  matchedTerms: string[];
-}> {
-  const queryTerms = (uniqueStrings(tokenizeRetrievalText(query)) ?? []).slice(0, 32);
-  const todoList = todos ?? [];
-  if (queryTerms.length === 0 || todoList.length === 0) return [];
-  const scored = todoList
-    .map((todo) => {
-      const todoTerms = new Set(tokenizeRetrievalText(todo.text));
-      const matchedTerms = queryTerms.filter((term) => todoTerms.has(term));
-      return { todo, matchedTerms, score: matchedTerms.length };
-    })
-    .filter((item) => item.score > 0)
-    .sort((left, right) =>
-      right.score - left.score ||
-      Number(right.todo.status === "pending") - Number(left.todo.status === "pending") ||
-      right.todo.updatedAt.localeCompare(left.todo.updatedAt)
-    );
-  const topScore = scored[0]?.score ?? 0;
-  const minimumScore = queryTerms.length <= 2 ? 1 : Math.max(2, Math.ceil(topScore * 0.4));
-  return scored
-    .filter((item) => item.score >= minimumScore)
-    .slice(0, 1)
-    .map(({ todo, matchedTerms }) => ({
-      id: todo.id,
-      text: todo.text,
-      status: todo.status,
-      ...(todo.completedAt ? { completedAt: todo.completedAt } : {}),
-      matchedTerms
-    }));
+function inlineJsonResult(value: unknown, pretty = true) {
+  return { content: [{ type: "text" as const, text: pretty ? JSON.stringify(value, null, 2) : JSON.stringify(value) }] };
 }
 
 function requiredString(value: unknown, field: string): string {
@@ -1974,321 +1270,16 @@ function objectRecord(value: unknown): Record<string, unknown> {
 
 async function assertManagedMemory(runtime: MemhubRuntime, memoryId: string): Promise<void> {
   for (const kind of ["l2", "l3", "l4", "skills"] as const) {
-    const payload = objectRecord(await runtime.memoryClient.viewerGet(
-      `/api/v1/${kind}?limit=500&userId=${encodeURIComponent(runtime.userId)}`
-    ));
-    const items = Array.isArray(payload.items) ? payload.items : [];
-    if (items.some((item) => objectRecord(item).id === memoryId)) return;
+    for (let page = 1; ; page++) {
+      const params = new URLSearchParams({ limit: "100", page: String(page), userId: runtime.userId });
+      const payload = objectRecord(await runtime.memoryClient.viewerGet(`/api/v1/${kind}?${params}`));
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      if (items.some((item) => objectRecord(item).id === memoryId)) return;
+      if (payload.hasNext !== true && !(typeof payload.totalPages === "number" && page < payload.totalPages)) break;
+      if (!items.length) break;
+    }
   }
   throw new Error(`managed memory not found for account: ${memoryId}`);
-}
-
-async function attachExactEvidenceRefsToContext(
-  stateRoot: string,
-  runtime: MemhubRuntime,
-  capsule: { globalMemory: ContextItem[]; projectMemory: ContextItem[] }
-): Promise<void> {
-  const jobs = await listDistillationJobs(stateRoot, runtime.accountId);
-  const items = [...capsule.globalMemory, ...capsule.projectMemory];
-  for (const item of items) {
-    const layer = item.provenance?.memoryLayer;
-    const prefix = layer === "L2" ? "l2" : layer === "L3" ? "l3" : layer === "L4" ? "l4" : null;
-    if (!prefix || !item.updatedAt) continue;
-    const updatedAt = Date.parse(item.updatedAt);
-    if (!Number.isFinite(updatedAt)) continue;
-    const candidate = jobs
-      .filter((job) =>
-        job.status === "completed" &&
-        job.target === prefix &&
-        job.result_kind === prefix &&
-        job.result_id === item.id &&
-        Boolean(job.result_content?.trim()) &&
-        Boolean(distillationResultTimestamp(job))
-      )
-      .sort((a, b) =>
-        (distillationResultTimestamp(b) ?? "").localeCompare(distillationResultTimestamp(a) ?? "") ||
-        b.job_id.localeCompare(a.job_id)
-      )
-      .find((job) => {
-        const committedAt = Date.parse(distillationResultTimestamp(job)!);
-        // Core and the local revision ledger are committed by the same submit
-        // operation but do not share one clock write. A narrow window proves
-        // this is the current revision while rejecting stale historical jobs.
-        return Number.isFinite(committedAt) && Math.abs(updatedAt - committedAt) <= 60_000;
-      });
-    if (candidate) item.evidenceRef = `${prefix}:${item.id}:${candidate.job_id}`;
-  }
-}
-
-async function validateDistillationEvidenceChain(input: {
-  stateRoot: string;
-  runtime: MemhubRuntime;
-  kind: "l2" | "l3" | "l4" | "skill";
-  projectId: string | null;
-  evidenceRefs: string[];
-  job?: DistillationJob;
-}): Promise<DistillationEvidenceItem[]> {
-  if (input.kind === "skill") return [];
-
-  if (input.job) {
-    const expectedLayer = input.kind === "l2" ? "L1" : input.kind === "l3" ? "L2" : "L3";
-    if (input.job.evidence.length === 0 || input.job.evidence.some((item) => item.layer !== expectedLayer)) {
-      throw new Error(`${input.kind.toUpperCase()} job evidence must come from ${expectedLayer}`);
-    }
-    const projectStorageIds = input.projectId
-      ? new Set(await input.runtime.projects.storageIds(input.runtime.accountId, input.projectId))
-      : null;
-    if (input.kind === "l2") {
-      if (!input.projectId || input.job.evidence.some((item) => {
-        if (!item.project_id || !projectStorageIds?.has(item.project_id) || item.layer !== "L1") return true;
-        if (item.kind === "turn") return !item.user_text?.trim() || !item.assistant_text?.trim();
-        if (item.kind === "memory") return !item.content?.trim();
-        return true;
-      })) throw new Error("L2 job requires project-scoped L1 turn or Memory evidence");
-      if (input.job.reason === "migration") {
-        await validateMigrationL1EvidenceScope(input.runtime, input.projectId, input.job.evidence);
-      }
-      return structuredClone(input.job.evidence);
-    }
-    if (input.kind === "l3") {
-      if (!input.projectId || input.job.evidence.some((item) => !item.project_id || !projectStorageIds?.has(item.project_id))) {
-        throw new Error("L3 job evidence must be L2 from the same project");
-      }
-      return structuredClone(input.job.evidence);
-    }
-    const projects = new Set(input.job.evidence.map((item) => item.project_id).filter(Boolean));
-    if (projects.size < 2) throw new Error("L4 job requires L3 evidence from at least two projects");
-    return structuredClone(input.job.evidence);
-  }
-
-  if (input.kind === "l2") {
-    if (!input.projectId) throw new Error("L2 evidence requires a resolved project");
-    const projectStorageIds = new Set(await input.runtime.projects.storageIds(input.runtime.accountId, input.projectId));
-    const captures = await listCaptureEvents(input.stateRoot, input.runtime.accountId);
-    const byId = new Map(captures.map((item) => [item.event_id, item]));
-    const resolved: DistillationEvidenceItem[] = [];
-    for (const ref of input.evidenceRefs) {
-      const eventId = parseLayerEvidenceRef(ref, "l1");
-      const event = byId.get(eventId);
-      if (!event || !event.ingested || event.capture_status !== "complete" || !event.user_text?.trim() || !event.assistant_text?.trim()) {
-        throw new Error(`L2 evidence does not resolve to a complete ingested L1 turn: ${ref}`);
-      }
-      if (!event.project_hint || !projectStorageIds.has(event.project_hint)) {
-        throw new Error(`L2 evidence belongs to another or unresolved project: ${ref}`);
-      }
-      resolved.push({
-        ref,
-        kind: "turn",
-        layer: "L1",
-        timestamp: event.timestamp,
-        project_id: event.project_hint,
-        conversation_id: event.conversation_id,
-        user_text: event.user_text.trim(),
-        assistant_text: event.assistant_text.trim(),
-        ...(event.reasoning_summary?.trim() ? { reasoning_summary: event.reasoning_summary.trim() } : {})
-      });
-    }
-    return resolved;
-  }
-
-  const expectedLayer = input.kind === "l3" ? "L2" : "L3";
-  const expectedPrefix = input.kind === "l3" ? "l2" : "l3";
-  const projectStorageIds = input.kind === "l3" && input.projectId
-    ? new Set(await input.runtime.projects.storageIds(input.runtime.accountId, input.projectId))
-    : null;
-  const jobs = await listDistillationJobs(input.stateRoot, input.runtime.accountId);
-  const candidateRefs = completedRevisionCandidates(jobs, expectedPrefix, projectStorageIds);
-  const resolved: DistillationEvidenceItem[] = [];
-  const projects = new Set<string>();
-
-  for (const ref of input.evidenceRefs) {
-    const parsed = parseVersionedLayerEvidenceRef(ref, expectedPrefix);
-    if (!parsed) {
-      throw exactEvidenceRefError({
-        requiredLayer: expectedLayer,
-        received: ref,
-        projectId: input.projectId,
-        expectedPrefix,
-        candidateRefs
-      });
-    }
-    const source = jobs.find((item) => item.job_id === parsed.revisionId);
-    if (!source ||
-        source.status !== "completed" ||
-        source.target !== expectedPrefix ||
-        source.result_kind !== expectedPrefix ||
-        source.result_id !== parsed.memoryId ||
-        !source.result_content?.trim() ||
-        !distillationResultTimestamp(source)) {
-      throw exactEvidenceRefError({
-        requiredLayer: expectedLayer,
-        received: ref,
-        projectId: input.projectId,
-        expectedPrefix,
-        candidateRefs
-      });
-    }
-    const project = source.project_id?.trim();
-    if (!project) {
-      throw new Error(`${expectedLayer} revision is missing project provenance: ${ref}`);
-    }
-    if (input.kind === "l3" && !projectStorageIds?.has(project)) {
-      throw new Error(`L3 evidence belongs to another project: ${ref}`);
-    }
-    projects.add(project);
-    resolved.push({
-      ref,
-      kind: "artifact",
-      layer: expectedLayer,
-      timestamp: distillationResultTimestamp(source)!,
-      project_id: project,
-      title: canonicalLayerTitle(expectedPrefix, project),
-      content: source.result_content
-    });
-  }
-  if (input.kind === "l4" && projects.size < 2) {
-    throw new Error("L4 requires L3 evidence from at least two distinct projects");
-  }
-  return resolved;
-}
-
-function completedRevisionCandidates(
-  jobs: DistillationJob[],
-  expectedPrefix: "l2" | "l3",
-  projectStorageIds: Set<string> | null
-): string[] {
-  return jobs
-    .filter((job) =>
-      job.status === "completed" &&
-      job.target === expectedPrefix &&
-      job.result_kind === expectedPrefix &&
-      Boolean(job.result_id?.trim()) &&
-      Boolean(job.result_content?.trim()) &&
-      Boolean(distillationResultTimestamp(job)) &&
-      (!projectStorageIds || Boolean(job.project_id && projectStorageIds.has(job.project_id)))
-    )
-    .sort((a, b) =>
-      (distillationResultTimestamp(b) ?? "").localeCompare(distillationResultTimestamp(a) ?? "") ||
-      b.job_id.localeCompare(a.job_id)
-    )
-    .slice(0, 5)
-    .map((job) => `${expectedPrefix}:${job.result_id}:${job.job_id}`);
-}
-
-function exactEvidenceRefError(input: {
-  requiredLayer: "L2" | "L3";
-  received: string;
-  projectId: string | null;
-  expectedPrefix: "l2" | "l3";
-  candidateRefs: string[];
-}): Error {
-  return new Error([
-    "MEMHUB_EVIDENCE_REF_INVALID",
-    `required_layer: ${input.requiredLayer}`,
-    `received: ${input.received}`,
-    `resolved_project: ${input.projectId ?? "account"}`,
-    `valid_evidence_ref_example: ${input.expectedPrefix}:<memory-id>:<revision-id>`,
-    "hint: Use the exact evidenceRef returned by memmy_context; do not rebuild it from the stable Memory id.",
-    ...(input.candidateRefs.length > 0
-      ? [`candidate_evidence_refs: ${input.candidateRefs.join(", ")}`]
-      : [])
-  ].join(" | "));
-}
-
-function parseVersionedLayerEvidenceRef(
-  ref: string,
-  expectedPrefix: "l2" | "l3"
-): { memoryId: string; revisionId: string } | null {
-  const prefix = `${expectedPrefix}:`;
-  if (!ref.startsWith(prefix)) return null;
-  const value = ref.slice(prefix.length).trim();
-  const separator = value.lastIndexOf(":");
-  if (separator <= 0 || separator === value.length - 1) return null;
-  const memoryId = value.slice(0, separator).trim();
-  const revisionId = value.slice(separator + 1).trim();
-  return memoryId && revisionId ? { memoryId, revisionId } : null;
-}
-
-async function unfinishedDistillationJobsForProject(
-  stateRoot: string,
-  runtime: MemhubRuntime,
-  projectId: string
-): Promise<DistillationJob[]> {
-  const jobs = await listDistillationJobs(stateRoot, runtime.accountId);
-  const blockers: DistillationJob[] = [];
-  for (const job of jobs) {
-    if (job.scope !== "project" || !job.project_id || job.status === "completed") continue;
-    const canonical = await runtime.projects.resolve(runtime.accountId, job.project_id);
-    if (job.project_id === projectId || canonical === projectId) blockers.push(job);
-  }
-  return blockers;
-}
-
-async function validateMigrationL1EvidenceScope(
-  runtime: MemhubRuntime,
-  projectId: string,
-  evidence: DistillationJob["evidence"]
-): Promise<void> {
-  const storageIds = await runtime.projects.storageIds(runtime.accountId, projectId);
-  const scopedMemoryIds = new Set<string>();
-  for (const storageProjectId of storageIds) {
-    for (let page = 1; page <= 100; page += 1) {
-      const params = new URLSearchParams({
-        userId: runtime.userId,
-        projectId: storageProjectId,
-        page: String(page),
-        limit: "200"
-      });
-      const payload = objectRecord(await runtime.memoryClient.viewerGet(`/api/v1/l1?${params.toString()}`));
-      const items = Array.isArray(payload.items) ? payload.items.map(objectRecord) : [];
-      for (const item of items) {
-        if (typeof item.id === "string" && item.id.trim()) scopedMemoryIds.add(item.id.trim());
-      }
-      if (payload.hasNext !== true) break;
-    }
-  }
-
-  const scopedRawTurnIds = new Set<string>();
-  for (const storageProjectId of storageIds) {
-    for (let page = 1; page <= 100; page += 1) {
-      const params = new URLSearchParams({
-        userId: runtime.userId,
-        projectId: storageProjectId,
-        page: String(page),
-        limit: "100"
-      });
-      const payload = objectRecord(await runtime.memoryClient.viewerGet(`/api/v1/raw-turns?${params.toString()}`));
-      const items = Array.isArray(payload.items) ? payload.items.map(objectRecord) : [];
-      for (const item of items) {
-        if (typeof item.rawTurnId === "string" && item.rawTurnId.trim()) scopedRawTurnIds.add(item.rawTurnId.trim());
-      }
-      if (payload.hasNext !== true) break;
-    }
-  }
-
-  for (const item of evidence) {
-    if (item.kind === "memory") {
-      const match = /^l1-memory:(.+)$/.exec(item.ref);
-      if (!match?.[1] || !scopedMemoryIds.has(match[1])) {
-        throw new Error(`migration L1 memory evidence is outside project scope: ${item.ref}`);
-      }
-      continue;
-    }
-    if (item.kind === "turn") {
-      const match = /^raw-turn:(.+)$/.exec(item.ref);
-      if (!match?.[1] || !scopedRawTurnIds.has(match[1])) {
-        throw new Error(`migration raw-turn evidence is outside project scope: ${item.ref}`);
-      }
-    }
-  }
-}
-
-function parseLayerEvidenceRef(ref: string, expectedPrefix: "l1" | "l2" | "l3"): string {
-  const prefix = `${expectedPrefix}:`;
-  if (!ref.startsWith(prefix)) throw new Error(`expected ${expectedPrefix.toUpperCase()} evidence ref: ${ref}`);
-  const id = ref.slice(prefix.length).trim();
-  if (!id) throw new Error(`invalid ${expectedPrefix.toUpperCase()} evidence ref: ${ref}`);
-  return id;
 }
 
 function stringArray(value: unknown): string[] | undefined {
@@ -2305,36 +1296,22 @@ function uniqueStrings(values: string[]): string[] | undefined {
   return normalized.length ? [...new Set(normalized)] : undefined;
 }
 
-function normalizeArchitecturePlanContent(value: string): string {
-  const normalized = value.replace(/\r\n/g, "\n").trim();
-  if (!normalized) throw new TypeError("Project Architecture content must be non-empty");
-  return `${normalized}\n`;
-}
-
-function canonicalLayerTitle(kind: "l2" | "l3", projectId: string): string {
-  return kind === "l2"
-    ? `Project Timeline · ${projectId}`
-    : `Project Rules & Experience · ${projectId}`;
-}
-
-function memoryResultId(value: unknown): string | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const record = value as Record<string, unknown>;
-  for (const key of ["id", "memoryId", "skillId"] as const) {
-    const candidate = record[key];
-    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
-  }
-  return undefined;
-}
-
-function requireMemoryResultId(value: unknown): string {
-  const id = memoryResultId(value);
-  if (!id) throw new Error("Memory Core did not return a stable result id for history distillation");
-  return id;
-}
-
 async function knownProjectRecords(runtime: MemhubRuntime): Promise<ProjectDescriptor[]> {
   return runtime.projects.list(runtime.accountId);
+}
+
+function projectSummaryForModel(project: ProjectDescriptor): Record<string, unknown> {
+  const chars = Array.from(project.description);
+  return {
+    project: project.projectId,
+    name: project.name,
+    aliases: project.aliases,
+    state: project.state,
+    descriptionSource: project.descriptionSource ?? (project.description ? "legacy" : "empty"),
+    description: chars.slice(0, 280).join(""),
+    ...(chars.length > 280 ? { descriptionTruncated: true } : {}),
+    pendingTodoCount: (project.todos ?? []).filter((todo) => todo.status === "pending").length
+  };
 }
 
 function projectForModel(project: ProjectDescriptor): Record<string, unknown> {
@@ -2366,65 +1343,6 @@ function optionalBoolean(value: unknown): boolean | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "boolean") throw new TypeError("value must be a boolean");
   return value;
-}
-
-async function resolveToolScope(
-  runtime: MemhubRuntime,
-  input: { scope: string; project?: string; workspaceProject?: string }
-): Promise<{ projectId: string | null; resolutionSource: string }> {
-  if (input.scope !== "global" && input.scope !== "project") {
-    throw new TypeError("scope must be global or project");
-  }
-  if (input.scope === "global") {
-    return {
-      projectId: null,
-      resolutionSource: "global"
-    };
-  }
-  const explicitEvidence = await resolveExplicitProjectEvidence(runtime, {
-    project: input.project,
-    workspaceProject: input.workspaceProject
-  });
-  const projectId = explicitEvidence.projectId;
-  const resolutionSource = explicitEvidence.resolutionSource ?? "unresolved";
-  if (input.scope === "project" && projectId === null) {
-    throw new Error("project scope requires explicit current workspace_project or project evidence");
-  }
-  return {
-    projectId,
-    resolutionSource
-  };
-}
-
-async function resolveExplicitProjectEvidence(
-  runtime: MemhubRuntime,
-  input: { project?: string; workspaceProject?: string }
-): Promise<{ projectId: string | null; resolutionSource: string | null }> {
-  const projectRef = input.project?.trim() || undefined;
-  const workspaceRef = input.workspaceProject?.trim() || undefined;
-  if (!projectRef && !workspaceRef) return { projectId: null, resolutionSource: null };
-  await knownProjectRecords(runtime);
-
-  const resolveOne = async (reference: string, field: string): Promise<string> => {
-    const canonical = await runtime.projects.resolve(runtime.accountId, reference);
-    if (canonical) return canonical;
-    const candidates = await runtime.projects.suggest(runtime.accountId, reference, 5);
-    throw new Error(`unknown ${field} "${reference}". Use memmy_project_list before project-scoped operations. Similar: ${candidates.map((item) => item.projectId).join(", ") || "none"}`);
-  };
-
-  const explicit = projectRef ? await resolveOne(projectRef, "project") : null;
-  const workspace = workspaceRef ? await resolveOne(workspaceRef, "workspace_project") : null;
-  if (explicit && workspace && explicit !== workspace) {
-    throw new Error(`project/workspace conflict: project resolves to "${explicit}" but workspace_project resolves to "${workspace}"`);
-  }
-  return {
-    projectId: workspace ?? explicit,
-    resolutionSource: workspace && explicit
-      ? "workspace_and_project"
-      : workspace
-        ? "workspace_project"
-        : "explicit_project"
-  };
 }
 
 const invokedArg = process.argv[1];

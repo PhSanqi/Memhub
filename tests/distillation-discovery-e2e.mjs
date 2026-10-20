@@ -1,17 +1,18 @@
+import { createTestRoot, isolateTestEnvironment } from "./test-isolation.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { captureIngestedAt, isCaptureIngested, markCaptureIngested, readCaptureIngestIntentStatus, storeCaptureEvent, withCaptureIngestAttempt } from "../dist/capture.js";
+import { closeCaptureIndexDb, captureIngestedAt, isCaptureIngested, markCaptureIngested, readCaptureIngestIntentStatus, storeCaptureEvent, withCaptureIngestAttempt } from "../dist/capture.js";
 import { ingestCaptureIntoMemory } from "../dist/capture-ingest.js";
 import { recoverCaptureIngest } from "../dist/capture-recovery.js";
 import { auditDistillationPipeline } from "../dist/distillation-audit.js";
 import { discoverDistillationJobs } from "../dist/distillation-discovery.js";
 import { enqueueDistillationJob, getDistillationConfig, listDistillationJobs, setDistillationConfig } from "../dist/distillation-jobs.js";
 
-const root = await mkdtemp(join(tmpdir(), "memhub-discovery-"));
+const root = await createTestRoot("memhub-discovery-");
+isolateTestEnvironment(root, root);
 
 function testActor(accountId, name) {
   return { account_id: accountId, actor_id: `actor:${name}`, name };
@@ -25,7 +26,7 @@ try {
       timestamp: new Date().toISOString(),
       ...(project ? { project_hint: project } : {}),
       user_text: `user ${id}`,
-      ...(status === "complete" ? { assistant_text: `assistant ${id}` } : {}),
+      ...(status === "complete" ? { assistant_text: `assistant ${id}`, tool_summary: `tool ${id}` } : {}),
       capture_status: status
     });
     if (status === "complete") await markCaptureIngested(root, device.account_id, stored.event.event_id);
@@ -80,6 +81,10 @@ try {
   let jobs = await listDistillationJobs(root, device.account_id);
   assert.equal(jobs.length, 1);
   assert.deepEqual(jobs[0].evidence_refs.sort(), ["l1:alpha-1", "l1:alpha-2"]);
+  assert.equal(jobs[0].evidence[0].source_kinds.user_text, "user_said");
+  assert.equal(jobs[0].evidence[0].source_kinds.assistant_text, "agent_inferred");
+  assert.equal(jobs[0].evidence[0].source_kinds.tool_summary, "tool_output");
+  assert.equal(jobs[0].evidence[0].tool_summary, "tool alpha-1");
   assert.equal((await discover()).already_queued, 2);
   await capture("alpha-3");
   assert.equal((await discover()).waiting, 2);
@@ -442,6 +447,7 @@ try {
     dirtyIndex.prepare("INSERT INTO capture_index_dirty(account_id,event_id) VALUES (?,?)")
       .run(auditDevice.account_id, "injected-dirty-event");
   } finally {
+    dirtyIndex.pragma("wal_checkpoint(TRUNCATE)");
     dirtyIndex.close();
   }
   await assert.rejects(auditDistillationPipeline({
@@ -454,6 +460,8 @@ try {
     cleanIndex.prepare("DELETE FROM capture_index_dirty WHERE account_id=?")
       .run(auditDevice.account_id);
   } finally {
+    // The fixture publishes its manual repair just as a capture mutator does.
+    cleanIndex.pragma("wal_checkpoint(TRUNCATE)");
     cleanIndex.close();
   }
   const sha = (value) => createHash("sha256").update(value, "utf8").digest("hex");
@@ -476,6 +484,7 @@ try {
     project_hint: "alpha", user_text: "raw user", assistant_text: "raw assistant",
     capture_status: "complete"
   });
+  closeCaptureIndexDb(uninitializedRoot);
   await rm(join(uninitializedRoot, "capture-index.sqlite"));
   await assert.rejects(auditDistillationPipeline({
     stateRoot: uninitializedRoot, accountId: auditDevice.account_id,
@@ -535,5 +544,6 @@ try {
   assert.equal((await stat(intentIndexPath)).mtimeMs, indexBeforeIntentAudit.mtimeMs);
   console.log("distillation-discovery-e2e: ok");
 } finally {
+  closeCaptureIndexDb();
   await rm(root, { recursive: true, force: true });
 }

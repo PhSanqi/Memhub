@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -26,7 +26,17 @@ for (const [label, component] of Object.entries(manifest.components)) {
     hash.update(createHash("sha256").update(await readFile(file)).digest("hex"), "utf8");
     hash.update("\u0001");
   }
-  assert.equal(files.length, component.files, `${label}: file count drift`);
-  assert.equal(hash.digest("hex"), component.sha256, `${label}: vendor tree drift`);
+  const sha256 = hash.digest("hex");
+  if (process.argv.includes("--refresh")) {
+    component.files = files.length;
+    component.sha256 = sha256;
+  } else {
+    assert.equal(files.length, component.files, `${label}: file count drift`);
+    assert.equal(sha256, component.sha256, `${label}: vendor tree drift`);
+  }
+}
+if (process.argv.includes("--refresh")) {
+  manifest.createdAt = new Date().toISOString();
+  await writeFile(join(root, "vendor", "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
 }
 console.log("vendor-manifest-e2e: ok");

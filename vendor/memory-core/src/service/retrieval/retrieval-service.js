@@ -986,6 +986,32 @@ export class RetrievalService {
             return this.searchNoRead(request, startedAt);
         }
         const context = this.deps.resolveContext(request);
+        const skillProjects = uniq(request.projectIds ?? request.namespace?.projectIds ?? []);
+        if (skillProjects.length > 1 && request.layers?.length === 1 && request.layers[0] === "Skill" &&
+            request.tags?.includes("artifact:skill")) {
+            // One transport search retains the same candidate quota and ranking
+            // for each project as separate project-scoped searches.
+            const responses = await Promise.all(skillProjects.map(projectId => this.search({
+                ...request, accountWide: false, projectIds: undefined,
+                namespace: { ...context.namespace, projectId, accountWide: false, projectIds: undefined }
+            })));
+            const hits = responses.flatMap(response => response.hits);
+            return {
+                ...responses[0], hits,
+                candidateMemoryIds: uniq(responses.flatMap(response => response.candidateMemoryIds)),
+                sourceMemoryIds: uniq(responses.flatMap(response => response.sourceMemoryIds)),
+                droppedDueToBudget: responses.flatMap(response => response.droppedDueToBudget),
+                status: uniq(responses.flatMap(response => response.status)),
+                injectedContext: request.includeInjectedContext === false ? emptyInjectedContext()
+                    : buildInjectedContext(hits, request.contextBudget ?? 1800, [], request.retrievalMode ?? "search", request.contextHints, request.injectedContextQuery ?? request.query, { ...this.retrievalTuningConfig(), timeZone }).injectedContext,
+                tierLatencyMs: {
+                    search: Math.max(...responses.map(response => response.tierLatencyMs.search)),
+                    rerank: Math.max(...responses.map(response => response.tierLatencyMs.rerank)),
+                    budget: Math.max(...responses.map(response => response.tierLatencyMs.budget)),
+                    total: Date.now() - startedAt
+                }
+            };
+        }
         const retrievalMode = request.retrievalMode ?? "search";
         const episode = request.episodeId
             ? this.deps.requireEpisode(request.episodeId)
@@ -1024,6 +1050,14 @@ export class RetrievalService {
         const semanticLayers = dynamicCurrentQuery
             ? requestedSemanticLayers.filter((layer) => layer !== "L1")
             : requestedSemanticLayers;
+        const accountSkillSearch = Boolean(
+            (semanticLayers.length === 1 && semanticLayers[0] === "Skill") &&
+            request.tags?.includes("artifact:skill") &&
+            (request.accountWide === true || request.namespace?.accountWide === true ||
+             (Array.isArray(request.projectIds) && request.projectIds.length > 0) ||
+             (Array.isArray(request.namespace?.projectIds) && request.namespace.projectIds.length > 0))
+        );
+        const skillProjectIds = request.projectIds ?? request.namespace?.projectIds;
         const searchAt = Date.now();
         const candidateCount = onboardingFirstReportHit
             ? 1
@@ -1032,6 +1066,8 @@ export class RetrievalService {
                 : this.candidatePool.retrievalCandidateCount({
                     userId: context.userId,
                     projectId: context.namespace.projectId,
+                    projectIds: skillProjectIds,
+                    accountWideSkill: accountSkillSearch,
                     layers: semanticLayers,
                     tags: request.tags
                 });
@@ -1062,6 +1098,8 @@ export class RetrievalService {
                 : await this.retrieveSearchMemories({
                     userId: context.userId,
                     projectId: context.namespace.projectId,
+                    projectIds: skillProjectIds,
+                    accountWideSkill: accountSkillSearch,
                     query: retrievalQuery,
                     queryVectorText,
                     queryExtract,
@@ -1073,7 +1111,11 @@ export class RetrievalService {
                     targetSkillId: request.targetSkillId,
                     currentAgentId: context.namespace.source
                 });
-        const projectScopedMemories = filterMemoriesForProjectRecallScope(retrievalOutput.memories, context.namespace.projectId);
+        const projectScopedMemories = filterMemoriesForProjectRecallScope(
+            retrievalOutput.memories,
+            context.namespace.projectId,
+            { accountWideSkill: accountSkillSearch, projectIds: skillProjectIds }
+        );
         const memories = projectScopedMemories;
         const allowedMemoryIds = new Set(memories.map((memory) => memory.id));
         const allowedEpisodeIds = new Set(memories.flatMap((memory) => {
@@ -1186,6 +1228,7 @@ export class RetrievalService {
             },
             status: uniq([
                 ...filteredHits.status,
+                ...(retrievalOutput.status ?? []),
                 ...(dynamicCurrentQuery ? ["dynamic_current:refresh_required"] : []),
                 ...(!this.deps.memoryAddEnabled() ? ["memory_add:disabled:no_recall_log"] : [])
             ]),
@@ -1270,7 +1313,7 @@ export class RetrievalService {
     }
     async retrieveSearchMemories(input) {
         if (input.limit <= 0 || input.layers.length === 0) {
-            return { retrieval: emptyRetrievalResult(), memories: [] };
+            return { retrieval: emptyRetrievalResult(), memories: [], status: [] };
         }
         const runQuery = async (query, queryVectorText, queryExtract) => {
             const config = this.retrievalTuningConfig();
@@ -1280,6 +1323,8 @@ export class RetrievalService {
             const hasVectorCandidates = this.candidatePool.hasRetrievalVectorCandidates({
                 userId: input.userId,
                 projectId: input.projectId,
+                projectIds: input.projectIds,
+                accountWideSkill: input.accountWideSkill,
                 layers: input.layers,
                 tags: input.tags
             });
@@ -1287,6 +1332,8 @@ export class RetrievalService {
             const candidatePool = await this.candidatePool.indexedRetrievalCandidatePool({
                 userId: input.userId,
                 projectId: input.projectId,
+                projectIds: input.projectIds,
+                accountWideSkill: input.accountWideSkill,
                 compiledQuery,
                 queryVector,
                 layers: input.layers,
@@ -1297,10 +1344,11 @@ export class RetrievalService {
             });
             const memories = candidatePool.memories;
             if (memories.length === 0) {
-                return { retrieval: emptyRetrievalResult(), memories };
+                return { retrieval: emptyRetrievalResult(), memories, status: candidatePool.status ?? [] };
             }
             return {
                 memories,
+                status: candidatePool.status ?? [],
                 retrieval: retrievePluginMemories({
                     query,
                     queryVector,
@@ -1327,7 +1375,8 @@ export class RetrievalService {
         const outputs = await Promise.all(queries.map((query) => runQuery(query, query === input.query ? input.queryVectorText : query, query === input.query ? input.queryExtract : null)));
         return {
             retrieval: mergeRetrievalResults(outputs.map((output) => output.retrieval), input.limit, QUERY_REWRITE_RRF_CONSTANT, QUERY_REWRITE_PER_QUERY_MIN_KEEP),
-            memories: uniqMemories(outputs.flatMap((output) => output.memories))
+            memories: uniqMemories(outputs.flatMap((output) => output.memories)),
+            status: uniq(outputs.flatMap((output) => output.status ?? []))
         };
     }
     async filterRecallHits(query, hits) {

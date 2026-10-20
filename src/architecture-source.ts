@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ContextItem } from "./context-capsule.js";
 import { withFileMutationLock } from "./file-mutation-lock.js";
+import { validateProjectId } from "./project-registry.js";
 
 export interface ProjectArchitectureDocument {
   projectId: string;
@@ -56,6 +57,7 @@ export class FileProjectArchitectureSource implements ProjectArchitectureSource 
   private readonly rootDir: string;
   private readonly managedRootDir: string;
   private readonly maxChars: number;
+  private static readonly directoryCache = new Map<string, { expires: number; dirs: ArchitectureDir[] }>();
 
   constructor(options: FileProjectArchitectureSourceOptions) {
     this.rootDir = resolve(options.rootDir);
@@ -74,10 +76,13 @@ export class FileProjectArchitectureSource implements ProjectArchitectureSource 
     query: string;
   }): Promise<ContextItem[]> {
     const accountId = requireNonEmpty(input.accountId, "accountId");
-    const projectId = requireNonEmpty(input.projectId, "projectId");
+    const projectId = validateProjectId(input.projectId);
     const query = requireNonEmpty(input.query, "query");
-    let candidates = (await this.architectureDirs(accountId))
-      .filter((item) => sameProject(item.projectId, projectId));
+    const managedPath = this.managedArchitecturePath(accountId, projectId);
+    let candidates: ArchitectureDir[] = await fileExists(managedPath)
+      ? [{ projectId, dir: dirname(managedPath), scope: "memhub-managed", format: "managed-project-doc" }]
+      : (await this.architectureDirs(accountId))
+        .filter((item) => sameProject(item.projectId, projectId));
     const managedCandidates = candidates.filter((item) => item.scope === "memhub-managed");
     if (managedCandidates.length > 0) candidates = managedCandidates;
     if (candidates.length === 0) return [];
@@ -141,7 +146,7 @@ export class FileProjectArchitectureSource implements ProjectArchitectureSource 
     projectId: string;
   }): Promise<ProjectArchitectureDocument | null> {
     const accountId = requireNonEmpty(input.accountId, "accountId");
-    const projectId = requireNonEmpty(input.projectId, "projectId");
+    const projectId = validateProjectId(input.projectId);
     const path = this.managedArchitecturePath(accountId, projectId);
     const managedDir = dirname(path);
     try {
@@ -171,9 +176,12 @@ export class FileProjectArchitectureSource implements ProjectArchitectureSource 
     content: string;
   }): Promise<{ before: ProjectArchitectureDocument; after: ProjectArchitectureDocument }> {
     requireNonEmpty(input.accountId, "accountId");
-    const projectId = requireNonEmpty(input.projectId, "projectId");
+    const projectId = validateProjectId(input.projectId);
     const normalizedContent = normalizeArchitectureContent(input.content);
     const expectedPath = resolve(requireNonEmpty(input.expectedPath, "expectedPath"));
+    if (expectedPath !== this.managedArchitecturePath(input.accountId.trim(), projectId)) {
+      throw new Error("Project Architecture target changed after plan; create a fresh plan");
+    }
     return withFileMutationLock(expectedPath, async () => {
       const before = await this.inspectProjectArchitecture({ accountId: input.accountId, projectId });
       if (!before) throw new Error(`no canonical workspace found for project: ${projectId}`);
@@ -187,6 +195,7 @@ export class FileProjectArchitectureSource implements ProjectArchitectureSource 
       const tmp = `${expectedPath}.tmp-${process.pid}-${Date.now()}`;
       await writeFile(tmp, normalizedContent, { encoding: "utf8", mode: 0o600 });
       await rename(tmp, expectedPath);
+      FileProjectArchitectureSource.directoryCache.clear();
       const after = await this.inspectProjectArchitecture({ accountId: input.accountId, projectId });
       if (!after || resolve(after.path) !== expectedPath) {
         throw new Error("Project Architecture write completed but canonical document could not be re-read");
@@ -196,6 +205,9 @@ export class FileProjectArchitectureSource implements ProjectArchitectureSource 
   }
 
   private async architectureDirs(accountId: string): Promise<ArchitectureDir[]> {
+    const cacheKey = JSON.stringify([this.rootDir, this.managedRootDir, accountId]);
+    const cached = FileProjectArchitectureSource.directoryCache.get(cacheKey);
+    if (cached && cached.expires > Date.now()) return cached.dirs;
     const results: ArchitectureDir[] = [];
     const managedAccountRoot = join(this.managedRootDir, accountHash(accountId));
     for (const dir of await childDirs(managedAccountRoot)) {
@@ -231,6 +243,11 @@ export class FileProjectArchitectureSource implements ProjectArchitectureSource 
       for (const child of await childDirs(workspaceContainer)) {
         if (await hasProjectArchitectureDocs(child)) {
           results.push({ projectId: basename(child), dir: child, scope: "project-repo", format: "project-docs" });
+          continue;
+        }
+        const nestedWorkspace = await singleNestedProjectWorkspace(child);
+        if (nestedWorkspace) {
+          results.push({ projectId: basename(child), dir: nestedWorkspace, scope: "project-repo", format: "project-docs" });
         }
       }
     }
@@ -239,14 +256,22 @@ export class FileProjectArchitectureSource implements ProjectArchitectureSource 
       const key = `${item.scope}\0${item.projectId}`;
       if (!unique.has(key)) unique.set(key, item);
     }
-    return [...unique.values()].sort((a, b) =>
+    const dirs = [...unique.values()].sort((a, b) =>
       (a.scope === b.scope ? 0 : a.scope === "memhub-managed" ? -1 : b.scope === "memhub-managed" ? 1 : a.scope === "account-scoped" ? -1 : 1) ||
       a.projectId.localeCompare(b.projectId)
     );
+    FileProjectArchitectureSource.directoryCache.set(cacheKey, { expires: Date.now() + 30_000, dirs });
+    return dirs;
   }
 
   private managedArchitecturePath(accountId: string, projectId: string): string {
-    return join(this.managedRootDir, accountHash(accountId), encodeURIComponent(projectId), "ARCHITECTURE.md");
+    const accountRoot = join(this.managedRootDir, accountHash(accountId));
+    const path = resolve(accountRoot, encodeURIComponent(validateProjectId(projectId)), "ARCHITECTURE.md");
+    const rel = relative(accountRoot, path);
+    if (!rel || isAbsolute(rel) || rel === ".." || rel.startsWith(`..${sep}`)) {
+      throw new Error("Project Architecture path must stay inside the account directory");
+    }
+    return path;
   }
 
   private async projectWorkspaceDir(projectId: string): Promise<string | null> {
@@ -261,6 +286,8 @@ export class FileProjectArchitectureSource implements ProjectArchitectureSource 
       for (const child of await childDirs(workspaceContainer)) {
         if (normalizeProjectFolder(basename(child)) !== wanted) continue;
         if (await isProjectRepositoryRoot(child) || await hasProjectArchitectureDocs(child)) return child;
+        const nestedWorkspace = await singleNestedProjectWorkspace(child);
+        if (nestedWorkspace) return nestedWorkspace;
       }
     }
     for (const child of await childDirs(this.rootDir)) {
@@ -280,6 +307,28 @@ async function workspaceContainers(rootDir: string): Promise<string[]> {
     if (/(^|[-_])workspaces?$/.test(name)) containers.push(child);
   }
   return containers;
+}
+
+async function singleNestedProjectWorkspace(projectContainer: string): Promise<string | null> {
+  const candidates: string[] = [];
+  for (const child of await childDirs(projectContainer)) {
+    if (basename(child).startsWith(".")) continue;
+    if (!await hasProjectArchitectureDocs(child)) continue;
+    if (!await isProjectRepositoryRoot(child)) continue;
+    candidates.push(child);
+  }
+  if (candidates.length <= 1) return candidates[0] ?? null;
+
+  // Canonical project containers may deliberately hold both a private
+  // runtime/development repository and a sanitized publish repository. Prefer
+  // the conventional <project>runtime (or plain runtime) child; if that does
+  // not resolve the ambiguity uniquely, fail closed instead of guessing.
+  const projectName = normalizeProjectFolder(basename(projectContainer));
+  const preferred = candidates.filter((child) => {
+    const name = normalizeProjectFolder(basename(child));
+    return name === `${projectName}runtime` || name === "runtime";
+  });
+  return preferred.length === 1 ? preferred[0]! : null;
 }
 
 interface ArchitectureDir {
@@ -350,7 +399,7 @@ function architectureDocument(
 function managedProjectIdFromDir(dir: string): string | null {
   try {
     const decoded = decodeURIComponent(basename(dir));
-    return decoded.trim() || null;
+    return validateProjectId(decoded);
   } catch {
     return null;
   }
@@ -422,8 +471,7 @@ async function childDirs(root: string): Promise<string[]> {
 
 async function fileExists(path: string): Promise<boolean> {
   try {
-    await readFile(path, "utf8");
-    return true;
+    return (await stat(path)).isFile();
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false;
     throw error;

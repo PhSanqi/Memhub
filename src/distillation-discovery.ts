@@ -1,4 +1,5 @@
-import { captureIndexStats, captureIngestedAt, captureIsFullyExcludedFromMemory, listCaptureEvents, listCaptureIndexEntries, type StoredCaptureEvent } from "./capture.js";
+import { resolve } from "node:path";
+import { captureIndexWatermark, captureIndexStats, captureIngestedAt, captureIsFullyExcludedFromMemory, listCaptureEvents, listCaptureIndexEntries, type StoredCaptureEvent } from "./capture.js";
 import { resolveCaptureProject } from "./capture-project-resolution.js";
 import {
   effectiveDistillationFailureKind,
@@ -32,6 +33,8 @@ export interface DiscoveryReport {
   cutover_missing: boolean;
 }
 
+const successfulScans = new Map<string, { watermark: string; config: string; fullAt: number; nextScanAt: number; report: DiscoveryReport }>();
+
 /** Reconcile durable L1 captures into jobs; semantic synthesis remains with the Harness. */
 export async function discoverDistillationJobs(input: {
   stateRoot: string;
@@ -39,8 +42,38 @@ export async function discoverDistillationJobs(input: {
   resolveProject: (projectHint: string) => Promise<string | null>;
   enqueue?: boolean;
   now?: Date;
+  skipUnchanged?: boolean;
 }): Promise<DiscoveryReport> {
   const config = await getDistillationConfig(input.stateRoot);
+  const scanKey = JSON.stringify([resolve(input.stateRoot), input.accountId]);
+  const scanTime = (input.now ?? new Date()).getTime();
+  const configKey = JSON.stringify(config);
+  const prior = successfulScans.get(scanKey);
+
+  // Explicit dry runs retain their full report. Only background reconciliation
+  // skips unchanged history until the next idle cutover. Unresolved evidence
+  // is never cached: new project resolution must take effect immediately.
+  if (input.skipUnchanged && input.enqueue && config.auto_enabled && config.auto_since && prior &&
+      prior.config === configKey && scanTime < prior.nextScanAt &&
+      scanTime >= prior.fullAt && scanTime - prior.fullAt < 15 * 60_000) {
+    const watermark = await captureIndexWatermark(input.stateRoot, input.accountId);
+    if (prior.watermark === watermark) {
+      return {
+        ...prior.report,
+        scanned: 0,
+        eligible: 0,
+        unresolved: 0,
+        privacy_excluded: 0,
+        workspace_resolved: 0,
+        already_queued: 0,
+        waiting: 0,
+        would_enqueue: 0,
+        queued: 0,
+        duplicates: 0
+      };
+    }
+  }
+
   const stats = await captureIndexStats(input.stateRoot, input.accountId);
   const unIngested = await listCaptureIndexEntries(input.stateRoot, input.accountId, { completeOnly: true, ingested: false });
   const jobs = await listDistillationJobs(input.stateRoot, input.accountId);
@@ -65,6 +98,7 @@ export async function discoverDistillationJobs(input: {
     cutover_missing: config.auto_enabled && !config.auto_since
   };
   if (!config.auto_enabled || !config.auto_since) return report;
+  const watermark = await captureIndexWatermark(input.stateRoot, input.accountId);
   const captures = await listCaptureEvents(input.stateRoot, input.accountId, {
     ingested: true,
     completeOnly: true
@@ -91,7 +125,7 @@ export async function discoverDistillationJobs(input: {
     const resolution = await resolveCaptureProject(event, async (hint) => {
       if (!resolved.has(hint)) resolved.set(hint, await input.resolveProject(hint));
       return resolved.get(hint) ?? null;
-    });
+    }, input.stateRoot);
     const projectId = resolution.projectId;
     if (!projectId) { report.unresolved += 1; continue; }
     if (resolution.source === "workspace_path") report.workspace_resolved += 1;
@@ -107,6 +141,7 @@ export async function discoverDistillationJobs(input: {
   }
   const now = input.now ?? new Date();
   const cutoff = new Date(now.getTime() - config.idle_minutes * 60_000).toISOString();
+  let nextScanAt = Infinity;
   for (const group of groups.values()) {
     group.captures.sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.event_id.localeCompare(b.event_id));
     const idle = group.captures.every((item) => (ingestedTimes.get(item.event_id) ?? "") <= cutoff);
@@ -114,6 +149,8 @@ export async function discoverDistillationJobs(input: {
       const batch = group.captures.slice(offset, offset + config.turn_threshold);
       if (batch.length < config.turn_threshold && !idle) {
         report.waiting += batch.length;
+        nextScanAt = Math.min(nextScanAt, group.captures.reduce((latest, item) =>
+          Math.max(latest, Date.parse(ingestedTimes.get(item.event_id)!) + config.idle_minutes * 60_000), 0));
         continue;
       }
       report.would_enqueue += 1;
@@ -144,5 +181,8 @@ export async function discoverDistillationJobs(input: {
       job.status === "failed" && effectiveDistillationFailureKind(job) === "invalid_legacy_evidence"
     ).length;
   }
+  if (input.enqueue && report.unresolved === 0) {
+    successfulScans.set(scanKey, { watermark, config: configKey, fullAt: scanTime, nextScanAt, report: { ...report } });
+  } else if (input.enqueue) successfulScans.delete(scanKey);
   return report;
 }

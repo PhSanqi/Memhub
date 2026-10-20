@@ -1,17 +1,34 @@
+import { assertTestPaths, createTestRoot, testEnvironment } from "./test-isolation.mjs";
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
+import { listenMemoryHttpServer } from "../vendor/memory-core/src/index.js";
+import { closeMemoryHttpServer } from "../vendor/memory-core/src/server/http.js";
+import { agentSourceAutomationEnabled, assertLoopbackBindHost } from "../vendor/memory-core/src/server/index.js";
 import { createLlmClient } from "../vendor/memory-core/src/model/llm.js";
-import { skillMetaFromMemory } from "../vendor/memory-core/src/algorithm/plugin-algorithms.js";
+import { compileRetrievalQuery, skillMetaFromMemory } from "../vendor/memory-core/src/algorithm/plugin-algorithms.js";
 import { memoryAddKey } from "../vendor/memory-core/src/service/import/memory-import-pipeline.js";
 import { PanelReadModel } from "../vendor/memory-core/src/service/read-model/panel-read.js";
-import { RuntimeRepository } from "../vendor/memory-core/src/storage/repositories.js";
-import { migrate } from "../vendor/memory-core/src/storage/schema.js";
+import { Repositories, RuntimeRepository } from "../vendor/memory-core/src/storage/repositories.js";
+import { IndexedCandidatePool } from "../vendor/memory-core/src/service/retrieval/indexed-candidate-pool.js";
+import { filterMemoriesForProjectRecallScope, memoryMatchesProjectRecallScope } from "../vendor/memory-core/src/service/retrieval/project-scope-filter.js";
+import { RetrievalService } from "../vendor/memory-core/src/service/retrieval/retrieval-service.js";
+import { migrate, SCHEMA_VERSION } from "../vendor/memory-core/src/storage/schema.js";
+import { FileProjectArchitectureSource } from "../dist/architecture-source.js";
+import { ContextRouter } from "../dist/context-router.js";
+import { MemoryRestContextSource } from "../dist/memory-source.js";
+import { rankRecallHits } from "../dist/retrieval-ranker.js";
+import { JsonProjectRegistry } from "../dist/project-registry.js";
+import { projectOptionLabel, renderConsole } from "../dist/web-ui.js";
 
-const root = await mkdtemp(join(tmpdir(), "memhub-vendor-regression-"));
+const root = await createTestRoot("memhub-vendor-regression-");
 try {
+  await testRegistryAuthoritativeReads();
+  testProjectOptionLabels();
+  await testRuntimeIsolation();
   testUnavailableAssignedModelIsNotConfigured();
   testStableArtifactMemoryKey();
   testV7ToV8Migration();
@@ -20,9 +37,113 @@ try {
   testPanelItemsIncludeBody();
   testSkillMetadataPrefersStructuredTitle();
   testConfigStatusRedactsSecrets();
+  testAgentSourceAutomationIsOptIn();
+  await testLoopbackListenerGuard();
+  await testChineseNoVectorRetrievalAndFtsFallback();
+  await testAccountWideSkillRetrievalAndIsolation();
   console.log("memhub-vendor-regressions: ok");
 } finally {
   await rm(root, { recursive: true, force: true });
+}
+
+async function testRegistryAuthoritativeReads() {
+  const architectureRoot = join(root, "fooruntime");
+  const aliasRoot = join(architectureRoot, "registered-alias");
+  await mkdir(join(aliasRoot, "docs"), { recursive: true });
+  await writeFile(join(architectureRoot, "ARCHITECTURE.md"), "# Unknown filesystem project\n");
+  await writeFile(join(aliasRoot, "package.json"), "{}\n");
+  await writeFile(join(aliasRoot, "docs", "ARCHITECTURE.md"), "# Registered alias architecture\n");
+  const architecture = new FileProjectArchitectureSource({ rootDir: architectureRoot });
+  assert.deepEqual(await architecture.listProjects("acct-test"), ["fooruntime", "registered-alias"]);
+  const registryPath = join(root, "readonly-registry.json");
+  const registry = new JsonProjectRegistry(registryPath);
+  await registry.create("acct-test", {
+    projectId: "canonical", aliases: ["registered-alias"], description: "Registered project."
+  });
+  await registry.create("acct-test", { projectId: "archived", description: "Inactive fixture." });
+  await registry.archive("acct-test", "archived");
+  await registry.create("other-account", { projectId: "other", description: "Other account fixture." });
+  const before = await readFile(registryPath);
+  const memory = { async recall() { return { globalMemory: [], projectMemory: [], reusableSkills: [] }; } };
+  const router = new ContextRouter(memory, architecture, registry);
+  assert.deepEqual(await router.listProjects("acct-test"), ["canonical"]);
+  for (const input of [
+    { query: "continue", projectId: "fooruntime" },
+    { query: "fooruntime", workspaceProjectId: "fooruntime" },
+    { query: "fooruntime", semanticProjectIds: ["fooruntime"] },
+    { query: "fooruntime", knownProjectIds: ["fooruntime", "new-alias"] },
+    { query: "continue", knownProjectIds: ["CANONICAL"] }
+  ]) {
+    const capsule = await router.context({ accountId: "acct-test", userId: "user", ...input });
+    assert.equal(capsule.resolvedProjectId, null);
+    assert.deepEqual(await readFile(registryPath), before, "context must not write registry bytes or add aliases");
+  }
+  for (const projectId of ["canonical", "REGISTERED-ALIAS"]) {
+    const capsule = await router.context({ accountId: "acct-test", userId: "user", projectId, query: "architecture" });
+    assert.equal(capsule.resolvedProjectId, "canonical");
+    assert.ok(capsule.projectArchitecture.some((item) => item.content.includes("Registered alias architecture")));
+    assert.ok(capsule.projectArchitecture.every((item) => item.projectId === "canonical"));
+  }
+  assert.deepEqual(await readFile(registryPath), before, "alias architecture lookup must remain read-only");
+  const missingPath = join(root, "never-created-registry.json");
+  const emptyRouter = new ContextRouter(memory, architecture, new JsonProjectRegistry(missingPath));
+  assert.deepEqual(await emptyRouter.listProjects("acct-test"), []);
+  assert.equal((await emptyRouter.context({ accountId: "acct-test", userId: "user", projectId: "fooruntime", query: "continue" })).resolvedProjectId, null);
+  await assert.rejects(readFile(missingPath), { code: "ENOENT" });
+  const unregisteredRouter = new ContextRouter(memory, architecture);
+  assert.deepEqual(await unregisteredRouter.listProjects("acct-test"), ["fooruntime", "registered-alias"]);
+  const legacy = await unregisteredRouter.context({ accountId: "acct-test", userId: "user", projectId: "fooruntime", knownProjectIds: ["extra"], query: "architecture" });
+  assert.equal(legacy.resolvedProjectId, "fooruntime");
+  assert.ok(legacy.projectArchitecture.some((item) => item.content.includes("Unknown filesystem project")));
+}
+
+function testProjectOptionLabels() {
+  for (const [name, projectId, expected] of [
+    ["memhub", "memhub", "memhub"],
+    ["MemHub", "memhub", "MemHub"],
+    ["Memory Hub", "memhub", "Memory Hub · memhub"],
+    ["", "memhub", "memhub"],
+    ["<Hub & Co>", "hub", "<Hub & Co> · hub"]
+  ]) {
+    assert.equal(projectOptionLabel({ name, projectId }), expected);
+  }
+  const account = { account_id: "acct-test", username: "tester", role: "admin" };
+  const html = renderConsole({ account, accounts: [account], projects: [
+    { projectId: "memhub", name: "MemHub", aliases: [], state: "active" },
+    { projectId: "hub", name: "<Hub & Co>", aliases: [], state: "active" }
+  ], adminView: true, localControl: true, selectedAccountId: account.account_id });
+  assert.ok(html.includes('<option value="memhub">MemHub</option>'));
+  assert.ok(html.includes('<option value="hub">&lt;Hub &amp; Co&gt; · hub</option>'));
+}
+
+async function testRuntimeIsolation() {
+  const stateRoot = join(root, "isolated-state");
+  const protectedPath = join(homedir(), ".memmy", "memhub", "fixture.json");
+  const inherited = {
+    PATH: process.env.PATH,
+    MEMHUB_OWNER_ACCOUNT_ID: "production-owner",
+    MEMHUB_MEMORY_TOKEN: "production-token",
+    MEMHUB_MEMORY_URL: "https://production.invalid",
+    MEMHUB_PROJECT_REGISTRY: protectedPath,
+    MEMHUB_BRANCHES: protectedPath,
+    MEMHUB_CONTROL_ROOT: protectedPath,
+    MEMHUB_FUTURE_CREDENTIAL: "production-credential"
+  };
+  const env = testEnvironment(stateRoot, root, {}, inherited);
+  assert.deepEqual(Object.keys(env).filter((key) => key.startsWith("MEMHUB_")).sort(), ["MEMHUB_ARCHITECTURE_ROOT", "MEMHUB_STATE_ROOT"]);
+  assert.equal(env.MEMHUB_STATE_ROOT, stateRoot);
+  assert.equal(env.MEMHUB_ARCHITECTURE_ROOT, root);
+  assert.equal(env.PATH, inherited.PATH);
+  for (const key of ["MEMHUB_STATE_ROOT", "MEMHUB_CONTROL_ROOT", "MEMHUB_PROJECT_REGISTRY", "MEMHUB_BRANCHES"]) {
+    assert.throws(() => testEnvironment(stateRoot, root, { [key]: protectedPath }), /~\/.memmy/);
+  }
+  // A sibling with a similar prefix is still outside the writable test tree.
+  assert.throws(() => assertTestPaths({ stateRoot: `${root}/../../../../memhubruntime-other` }), /under memhubruntime/);
+  if (process.platform !== "win32") {
+    const link = join(root, "escape-link");
+    await symlink(new URL("../..", import.meta.url), link);
+    assert.throws(() => assertTestPaths({ registry: join(link, "outside.json") }), /under memhubruntime/);
+  }
 }
 
 function testSkillMetadataPrefersStructuredTitle() {
@@ -39,6 +160,41 @@ function testSkillMetadataPrefersStructuredTitle() {
     updatedAt: "2026-10-08T00:00:00.000Z"
   };
   assert.equal(skillMetaFromMemory(memory)?.name, "Memhub Long-Term Content Audit");
+}
+
+function testAgentSourceAutomationIsOptIn() {
+  assert.equal(agentSourceAutomationEnabled({}), false, "automation must be off by default");
+  assert.equal(agentSourceAutomationEnabled({ MEMHUB_CORE_AGENT_SOURCE_AUTOMATION: "0" }), false);
+  assert.equal(agentSourceAutomationEnabled({ MEMHUB_CORE_AGENT_SOURCE_AUTOMATION: "true" }), false);
+  assert.equal(agentSourceAutomationEnabled({ MEMHUB_CORE_AGENT_SOURCE_AUTOMATION: "1" }), true);
+  const serverSource = readFileSync(new URL("../vendor/memory-core/src/server/index.js", import.meta.url), "utf8");
+  assert.match(serverSource, /startAgentSourceAutomation:\s*agentSourceAutomationEnabled\(\)/,
+    "the Core CLI call site must use the opt-in helper");
+  assert.doesNotMatch(serverSource, /startAgentSourceAutomation:\s*true/,
+    "the Core CLI must not start agent-source automation unconditionally");
+}
+
+async function testLoopbackListenerGuard() {
+  for (const host of ["127.0.0.1", "::1", "localhost"]) {
+    assert.doesNotThrow(() => assertLoopbackBindHost(host), host);
+  }
+  assert.throws(() => assertLoopbackBindHost("0.0.0.0"), /loopback/);
+  const options = {
+    service: {
+      nextWorkerRunAt() { return undefined; },
+      reconcileWorkerStartup() {},
+      async runWorkerOnce() { return { leased: 0, embeddingRetries: { leased: 0 } }; }
+    },
+    port: 0,
+    agentSourceExecutor: { startAutomation() {}, async dispose() {} }
+  };
+  await assert.rejects(listenMemoryHttpServer({ ...options, host: "0.0.0.0" }), /loopback/);
+  const listening = await listenMemoryHttpServer({ ...options, host: "127.0.0.1" });
+  try {
+    assert.match(listening.url, /^http:\/\/127\.0\.0\.1:\d+$/);
+  } finally {
+    await closeMemoryHttpServer(listening.server);
+  }
 }
 
 function testConfigStatusRedactsSecrets() {
@@ -86,7 +242,7 @@ function testPanelItemsIncludeBody() {
           };
         }
       },
-      processing: { get() { return undefined; } },
+      processing: { getMany() { return []; } },
       runtime: { latestChangeSeq() { return 0; } }
     },
     now: () => "2026-09-20T00:00:00.000Z"
@@ -103,7 +259,7 @@ function testPanelItemsProjectFilterPropagation() {
         count(filter) { seen.push({ phase: "count", filter }); return 0; },
         list(filter) { seen.push({ phase: "list", filter }); return []; }
       },
-      processing: { get() { return undefined; } },
+      processing: { getMany() { return []; } },
       runtime: { latestChangeSeq() { return 0; } }
     },
     now: () => "2026-09-20T00:00:00.000Z"
@@ -351,7 +507,7 @@ function testV7ToV8Migration() {
     insertRetry.run("retry-world", "world_model", "legacy-world");
 
     migrate(db);
-    assert.equal(db.prepare("SELECT MAX(version) version FROM schema_migrations").get().version, 8);
+    assert.equal(db.prepare("SELECT MAX(version) version FROM schema_migrations").get().version, SCHEMA_VERSION);
     assert.equal(db.pragma("integrity_check", { simple: true }), "ok");
     assert.deepEqual(
       db.prepare("SELECT id, status FROM memories WHERE id IN ('legacy-policy','legacy-world') ORDER BY id").all(),
@@ -388,6 +544,238 @@ function testV7ToV8Migration() {
     assert.equal(db.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='uq_evolution_jobs_l3_immutable_dedupe'").get(), undefined);
     migrate(db);
     assert.equal(db.pragma("integrity_check", { simple: true }), "ok");
+  } finally {
+    db.close();
+  }
+}
+
+async function testChineseNoVectorRetrievalAndFtsFallback() {
+  const db = new Database(":memory:");
+  try {
+    migrate(db);
+    const repos = new Repositories(db);
+    const now = "2026-10-11T00:00:00.000Z";
+    db.prepare(`INSERT INTO memories (
+      id, timeline, user_id, memory_value, tags_json, info_json, properties_json, memory_layer, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      "cjk-memory", "2026-10-11", "cjk-user",
+      "这里保存口令白虎 secret，并带旧标记 legacy_old。", "[]",
+      JSON.stringify({ project_id: "alpha" }),
+      JSON.stringify({ internal_info: { memory_layer: "L3", memory_kind: "project_profile" } }),
+      "L3", now, now
+    );
+    assert.equal(repos.memories.reindexFts(repos.memories.get("cjk-memory")), true);
+    assert.equal(repos.memories.hasVectorRows({
+      userId: "cjk-user", projectIds: ["alpha"], includeUnscopedProject: true, memoryLayer: ["L3"]
+    }), false, "fixture must prove the no-vector fallback path");
+
+    const pool = new IndexedCandidatePool({ repos, memoryHasImportPipeline: () => false });
+    const config = {
+      tier1TopK: 5, tier2TopK: 5, tier3TopK: 5, candidatePoolFactor: 2, keywordTopK: 10, tagFilter: "off"
+    };
+    const retrieve = (query) => pool.indexedRetrievalCandidatePool({
+      userId: "cjk-user", projectId: "alpha",
+      compiledQuery: compileRetrievalQuery(query, null, {}),
+      queryVector: undefined, layers: ["L3"], tags: [], config
+    });
+
+    const shortCjk = await retrieve("口令");
+    assert.deepEqual(shortCjk.memories.map((memory) => memory.id), ["cjk-memory"]);
+    assert.deepEqual(shortCjk.status, []);
+
+    db.prepare("UPDATE memories SET memory_value = ?, updated_at = ? WHERE id = ?").run(
+      "这里保存口令白虎 secret，并带当前标记 current_new。",
+      "2026-10-11T00:01:00.000Z", "cjk-memory"
+    );
+    assert.equal(repos.memories.reindexFts(repos.memories.get("cjk-memory")), true);
+    assert.equal(repos.memories.searchFtsIds("\"legacy_old\"", { userId: "cjk-user", memoryLayer: ["L3"] }, 5).length, 0);
+    assert.equal(repos.memories.searchFtsIds("\"current_new\"", { userId: "cjk-user", memoryLayer: ["L3"] }, 5).length, 1);
+
+    db.exec("DROP TABLE memories_fts");
+    const degraded = await retrieve("口令 secret");
+    assert.deepEqual(degraded.memories.map((memory) => memory.id), ["cjk-memory"],
+      "pattern fallback must keep the Chinese result when FTS is unavailable");
+    assert.deepEqual(degraded.status, ["fts_search:failed_pattern_fallback"]);
+  } finally {
+    db.close();
+  }
+}
+
+async function testAccountWideSkillRetrievalAndIsolation() {
+  const db = new Database(":memory:");
+  try {
+    migrate(db);
+    const repos = new Repositories(db);
+    const now = "2026-10-18T00:00:00.000Z";
+
+    const insertSkill = (id, userId, projectId, title, snippet) => {
+      db.prepare(`INSERT INTO memories (
+        id, timeline, user_id, memory_value, tags_json, info_json, properties_json, memory_layer, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'activated', ?, ?)`).run(
+        id, "2026-10-18", userId, snippet,
+        JSON.stringify(["artifact:skill", `project:${projectId}`]),
+        JSON.stringify({ project_id: projectId, title }),
+        JSON.stringify({ internal_info: { memory_layer: "Skill", memory_kind: "skill", skill: { status: "active", eta: 1 } } }),
+        "Skill", now, now
+      );
+      repos.memories.reindexFts(repos.memories.get(id));
+    };
+
+    insertSkill("skill-alpha-1", "user-alpha", "project-1", "Skill Alpha One", "Alpha diagnostic procedure one for debugging");
+    insertSkill("skill-alpha-2", "user-alpha", "project-2", "Skill Alpha Two", "Alpha deployment procedure two for release");
+    insertSkill("skill-beta-1", "user-beta", "project-1", "Skill Beta One", "Beta secret procedure one never leak");
+    insertSkill("skill-beta-2", "user-beta", "project-3", "Skill Beta Two", "Beta secret procedure two never leak");
+
+    // Insert non-skill memory to test layer protection
+    db.prepare(`INSERT INTO memories (
+      id, timeline, user_id, memory_value, tags_json, info_json, properties_json, memory_layer, status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'activated', ?, ?)`).run(
+      "l3-alpha-1", "2026-10-18", "user-alpha", "Project profile of project 1",
+      JSON.stringify(["project:project-1"]),
+      JSON.stringify({ project_id: "project-1", title: "Project 1 Profile" }),
+      JSON.stringify({ internal_info: { memory_layer: "L3", memory_kind: "project_profile" } }),
+      "L3", now, now
+    );
+    repos.memories.reindexFts(repos.memories.get("l3-alpha-1"));
+
+    const pool = new IndexedCandidatePool({ repos, memoryHasImportPipeline: () => false });
+
+    // 1. Candidate count: accountWideSkill finds all skills across projects for that user
+    const alphaCount = pool.retrievalCandidateCount({
+      userId: "user-alpha", layers: ["Skill"], tags: ["artifact:skill"], accountWideSkill: true
+    });
+    assert.equal(alphaCount, 2, "user-alpha sees exactly its 2 skills across project-1 and project-2");
+
+    const betaCount = pool.retrievalCandidateCount({
+      userId: "user-beta", layers: ["Skill"], tags: ["artifact:skill"], accountWideSkill: true
+    });
+    assert.equal(betaCount, 2, "user-beta sees exactly its 2 skills");
+
+    const alphaProject1Count = pool.retrievalCandidateCount({
+      userId: "user-alpha", projectIds: ["project-1"], layers: ["Skill"], tags: ["artifact:skill"], accountWideSkill: true
+    });
+    assert.equal(alphaProject1Count, 1, "explicit projectIds restricts to project-1");
+
+    // 2. Candidate retrieval: strict account isolation
+    const config = {
+      tier1TopK: 60, tier2TopK: 60, tier3TopK: 60, candidatePoolFactor: 2, keywordTopK: 60, tagFilter: "off", minRecallScore: 0, relativeThresholdFloor: 0
+    };
+    const alphaCandidates = await pool.indexedRetrievalCandidatePool({
+      userId: "user-alpha",
+      compiledQuery: compileRetrievalQuery("procedure", null, {}),
+      layers: ["Skill"],
+      tags: ["artifact:skill"],
+      accountWideSkill: true,
+      config
+    });
+    const alphaIds = alphaCandidates.memories.map((m) => m.id).sort();
+    assert.deepEqual(alphaIds, ["skill-alpha-1", "skill-alpha-2"]);
+    assert.ok(!alphaIds.includes("skill-beta-1"), "user-beta skills must NEVER leak into user-alpha candidate pool");
+    assert.ok(!alphaIds.includes("skill-beta-2"), "user-beta skills must NEVER leak into user-alpha candidate pool");
+
+    const betaCandidates = await pool.indexedRetrievalCandidatePool({
+      userId: "user-beta",
+      compiledQuery: compileRetrievalQuery("procedure", null, {}),
+      layers: ["Skill"],
+      tags: ["artifact:skill"],
+      accountWideSkill: true,
+      config
+    });
+    const betaIds = betaCandidates.memories.map((m) => m.id).sort();
+    assert.deepEqual(betaIds, ["skill-beta-1", "skill-beta-2"]);
+    assert.ok(!betaIds.includes("skill-alpha-1"), "user-alpha skills must NEVER leak into user-beta candidate pool");
+
+    // 3. Post-retrieval filter: memoryMatchesProjectRecallScope
+    const alphaSkill1 = repos.memories.get("skill-alpha-1");
+    const alphaSkill2 = repos.memories.get("skill-alpha-2");
+    const alphaL3 = repos.memories.get("l3-alpha-1");
+
+    assert.equal(memoryMatchesProjectRecallScope(alphaSkill1, undefined, { accountWideSkill: true }), true);
+    assert.equal(memoryMatchesProjectRecallScope(alphaSkill2, undefined, { accountWideSkill: true }), true);
+    assert.equal(memoryMatchesProjectRecallScope(alphaSkill1, undefined, { accountWideSkill: true, projectIds: ["project-1"] }), true);
+    assert.equal(memoryMatchesProjectRecallScope(alphaSkill2, undefined, { accountWideSkill: true, projectIds: ["project-1"] }), false);
+    // Non-Skill memories MUST NOT pass without exact project match even if accountWideSkill is true
+    assert.equal(memoryMatchesProjectRecallScope(alphaL3, undefined, { accountWideSkill: true }), false,
+      "non-Skill memory must not broaden across projects");
+    assert.equal(memoryMatchesProjectRecallScope(alphaL3, "project-1", { accountWideSkill: true }), true);
+
+    // 4. End-to-end RetrievalService search: account isolation
+    const deps = {
+      repos,
+      memoryHasImportPipeline: () => false,
+      memorySearchEnabled: () => true,
+      memoryAddEnabled: () => false,
+      resolveContext: (req) => ({
+        userId: req.userId ?? req.namespace?.userId ?? "user-alpha",
+        namespace: req.namespace ?? { source: "test", profileId: "default", userId: req.userId ?? "user-alpha" }
+      }),
+      turnStartRetrievalLimit: () => 10,
+      queryRewriteEnabled: () => false,
+      config: {
+        domain: "software_engineering",
+        algorithm: {
+          retrieval: { ...config, mmrLambda: 0.5, llmFilterEnabled: false },
+          l3Abstraction: { minConfidenceForRetrieval: 0.5 },
+          reward: { decayHalfLifeDays: 30 }
+        }
+      },
+      llm: { isConfigured: () => false },
+      skillLlm: { isConfigured: () => false }
+    };
+    const retrievalService = new RetrievalService(deps);
+
+    const alphaSearch = await retrievalService.search({
+      query: "procedure",
+      userId: "user-alpha",
+      namespace: { source: "test", profileId: "default", userId: "user-alpha" },
+      layers: ["Skill"],
+      tags: ["artifact:skill"],
+      accountWide: true
+    });
+    const alphaSearchIds = alphaSearch.hits.map((h) => h.id).sort();
+    assert.deepEqual(alphaSearchIds, ["skill-alpha-1", "skill-alpha-2"]);
+    assert.ok(!alphaSearchIds.some((id) => id.startsWith("skill-beta")), "account isolation: user-beta skills never returned");
+
+    const betaSearch = await retrievalService.search({
+      query: "procedure",
+      userId: "user-beta",
+      namespace: { source: "test", profileId: "default", userId: "user-beta" },
+      layers: ["Skill"],
+      tags: ["artifact:skill"],
+      accountWide: true
+    });
+    // A single account-wide request must retain each project's old 24-hit
+    // candidate window even when one project alone exceeds the shared limit.
+    for (let i = 0; i < 40; i++) {
+      insertSkill(`flood-${i}`, "user-alpha", "project-1", `Procedure ${i}`, `Alpha diagnostic procedure for debugging variant ${i}`);
+    }
+    const searchRequest = {
+      query: "procedure", userId: "user-alpha",
+      namespace: { source: "test", profileId: "default", userId: "user-alpha" },
+      layers: ["Skill"], tags: ["artifact:skill"], limit: 24, includeInjectedContext: false
+    };
+    const oldResponses = await Promise.all(["project-1", "project-2"].map(projectId => retrievalService.search({
+      ...searchRequest, namespace: { ...searchRequest.namespace, projectId }
+    })));
+    const combined = await retrievalService.search({ ...searchRequest, accountWide: true, projectIds: ["project-1", "project-2"] });
+    const oldHits = oldResponses.flatMap(response => response.hits);
+    assert.ok(oldHits.length > 24, "fixture exceeds the shared quota");
+    assert.deepEqual(combined.hits.map(hit => hit.id), oldHits.map(hit => hit.id), "single Core search preserves per-project candidate quotas");
+    let skillRequests = 0;
+    const source = new MemoryRestContextSource({ async search(request) {
+      if (!request.layers.includes("Skill")) return { debug: { hits: [] } };
+      skillRequests++;
+      return { debug: { hits: (await retrievalService.search({ ...request, userId: "user-alpha" })).hits } };
+    } });
+    const recalled = await source.recall({ accountId: "user-alpha", userId: "user-alpha", query: searchRequest.query,
+      projectId: null, limit: 6, reusableSkillProjectIds: ["project-1", "project-2"] });
+    const oldRankedIds = rankRecallHits(oldHits.sort((a, b) => b.score - a.score), searchRequest.query, 6).hits.map(row => row.hit.id);
+    assert.equal(skillRequests, 1);
+    assert.deepEqual(recalled.reusableSkills.map(hit => hit.id), oldRankedIds, "Memhub reranking matches the old per-project fan-out");
+
+    const betaSearchIds = betaSearch.hits.map((h) => h.id).sort();
+    assert.deepEqual(betaSearchIds, ["skill-beta-1", "skill-beta-2"]);
+    assert.ok(!betaSearchIds.some((id) => id.startsWith("skill-alpha")), "account isolation: user-alpha skills never returned");
   } finally {
     db.close();
   }

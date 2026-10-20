@@ -1,10 +1,10 @@
+import { createTestRoot, testEnvironment } from "./test-isolation.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer, request as httpRequest } from "node:http";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
@@ -30,7 +30,7 @@ import {
 
 const here = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const mcpEntry = resolve(here, "../dist/mcp.js");
-const root = await mkdtemp(join(tmpdir(), "memhub-mcp-"));
+const root = await createTestRoot("memhub-mcp-");
 const historyDbPath = join(root, "history.sqlite");
 const historyDb = new Database(historyDbPath);
 
@@ -62,7 +62,11 @@ function chromiumExecutable() {
 
 function spawnCapture(command, args) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const browserArgs = args.some((arg) => arg.startsWith("--user-data-dir="))
+      ? args : [...args, `--user-data-dir=${join(root, "chromium-profile")}`];
+    const child = spawn(command, browserArgs, {
+      env: testEnvironment(join(root, "chromium-state"), root), stdio: ["ignore", "pipe", "pipe"]
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8");
@@ -558,6 +562,11 @@ async function testLocalAdmin(memoryPort) {
   const stateRoot = join(root, "local-admin");
   const account = await addAccount(stateRoot, "admin-test", "admin@example.com");
   await setAccountRole(stateRoot, account.account_id, "admin");
+  await writeFile(join(stateRoot, "cloudflare-access.json"), JSON.stringify({
+    version: 1,
+    issuer: "https://team-test.cloudflareaccess.com",
+    audience: "test-audience"
+  }, null, 2) + "\n");
   const controlUserId = defaultMemoryUserId(account.account_id);
   memoryById.set("legacy-control-l1", {
     id: "legacy-control-l1",
@@ -633,7 +642,7 @@ async function testLocalAdmin(memoryPort) {
     "--memory-url", `http://127.0.0.1:${memoryPort}`,
     "--state-root", stateRoot,
     "--public-host", "memhub.example.test",
-  ], { env: { ...process.env, MEMHUB_MEMORY_DB: historyDbPath }, stdio: ["ignore", "pipe", "pipe"] });
+  ], { env: testEnvironment(stateRoot, root, { MEMHUB_MEMORY_DB: historyDbPath }), stdio: ["ignore", "pipe", "pipe"] });
   let stderr = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (data) => { stderr += data; });
@@ -648,6 +657,24 @@ async function testLocalAdmin(memoryPort) {
     });
     assert.equal(forwardedHttp.status, 308);
     assert.equal(forwardedHttp.headers.location, "https://memhub.example.test/memhub?source=http");
+    for (const metadataPath of [
+      "/.well-known/oauth-protected-resource/mcp",
+      "/.well-known/oauth-protected-resource"
+    ]) {
+      const metadataResponse = await fetch(`http://127.0.0.1:${port}${metadataPath}`);
+      assert.equal(metadataResponse.status, 200, `${metadataPath} must expose RFC 9728 protected-resource metadata`);
+      assert.equal(metadataResponse.headers.get("cache-control"), "no-store");
+      assert.deepEqual(await metadataResponse.json(), {
+        resource: "https://memhub.example.test/mcp",
+        authorization_servers: ["https://team-test.cloudflareaccess.com"]
+      });
+    }
+    const metadataHead = await fetch(`http://127.0.0.1:${port}/.well-known/oauth-protected-resource/mcp`, { method: "HEAD" });
+    assert.equal(metadataHead.status, 200);
+    assert.equal(await metadataHead.text(), "");
+    const metadataMutation = await fetch(`http://127.0.0.1:${port}/.well-known/oauth-protected-resource/mcp`, { method: "POST" });
+    assert.equal(metadataMutation.status, 405);
+    assert.equal(metadataMutation.headers.get("allow"), "GET, HEAD");
     const loopbackClient = new Client({ name: "memhub-local-public-host-test", version: "1.0.0" });
     await loopbackClient.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
     try {
@@ -659,7 +686,7 @@ async function testLocalAdmin(memoryPort) {
           user_text: "This live conversation has not reached assistant final yet."
         }
       })).content[0].text);
-      assert.equal(partialTurn.turn.status, "open");
+      assert.equal(partialTurn.status, "open");
     } finally {
       await loopbackClient.close();
     }
@@ -978,9 +1005,17 @@ async function testLocalAdmin(memoryPort) {
     const userTodoMutation = await fetch(`http://127.0.0.1:${port}/memhub/user/action`, {
       method: "POST",
       headers: { authorization, "content-type": "application/json" },
-      body: JSON.stringify({ action: "add-project-todo", project: "ui-beta", text: "must fail" })
+      body: JSON.stringify({ action: "add-project-todo", project: "ui-beta", text: "Complete the user-managed todo." })
     });
-    assert.equal(userTodoMutation.status, 403);
+    assert.equal(userTodoMutation.status, 200);
+    const userTodo = (await userTodoMutation.json()).result.todos.find((todo) => todo.text === "Complete the user-managed todo.");
+    assert.ok(userTodo?.id);
+    const userTodoComplete = await fetch(`http://127.0.0.1:${port}/memhub/user/action`, {
+      method: "POST", headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({ action: "set-project-todo-status", project: "ui-beta", todo_id: userTodo.id, status: "done" })
+    });
+    assert.equal(userTodoComplete.status, 200);
+    assert.equal((await userTodoComplete.json()).result.todos.find((todo) => todo.id === userTodo.id)?.status, "done");
     const retryCandidate = await enqueueDerivedDistillationJob({
       stateRoot,
       accountId: account.account_id,
@@ -1159,7 +1194,7 @@ async function testRootBasePath(memoryPort) {
     "--memory-url", `http://127.0.0.1:${memoryPort}`,
     "--state-root", stateRoot,
   ], {
-    env: { ...process.env, MEMHUB_BASE_PATH: "/", MEMHUB_MEMORY_DB: historyDbPath },
+    env: testEnvironment(stateRoot, root, { MEMHUB_BASE_PATH: "/", MEMHUB_MEMORY_DB: historyDbPath }),
     stdio: ["ignore", "pipe", "pipe"]
   });
   let stderr = "";
@@ -1218,10 +1253,16 @@ async function testStdio(memoryPort) {
   const architectureDir = join(root, "normify-alpha", "modules", "alpha");
   const currentArchitectureDir = join(root, "Memhub", "docs");
   const nestedBetaDir = join(root, "agent-workspace", "beta");
+  const nestedGammaRuntimeDir = join(root, "agent-workspace", "gamma", "gammaruntime");
+  const nestedGammaPublishDir = join(root, "agent-workspace", "gamma", "gammapublish");
   await mkdir(architectureDir, { recursive: true });
   await mkdir(currentArchitectureDir, { recursive: true });
   await mkdir(nestedBetaDir, { recursive: true });
+  await mkdir(join(nestedGammaRuntimeDir, "docs", "architecture"), { recursive: true });
+  await mkdir(join(nestedGammaPublishDir, "docs", "architecture"), { recursive: true });
   await writeFile(join(root, "Memhub", "package.json"), JSON.stringify({ name: "memhub-test-project" }) + "\n");
+  await writeFile(join(nestedGammaRuntimeDir, "package.json"), JSON.stringify({ name: "gamma-runtime" }) + "\n");
+  await writeFile(join(nestedGammaPublishDir, "package.json"), JSON.stringify({ name: "gamma-publish" }) + "\n");
   await writeFile(
     join(architectureDir, "core.md"),
     "# ALPHA Core Architecture\n\nBroker routes work to the harness router. Current constraint: preserve explicit workspace ownership.\n"
@@ -1233,6 +1274,14 @@ async function testStdio(memoryPort) {
   const betaRepoArchitecture = join(nestedBetaDir, "ARCHITECTURE.md");
   const betaRepoBody = "# Beta Repository Architecture\n\nRepository architecture is a read-only migration seed.\n";
   await writeFile(betaRepoArchitecture, betaRepoBody);
+  await writeFile(
+    join(nestedGammaRuntimeDir, "docs", "architecture", "overview.md"),
+    "# Gamma Nested Runtime Architecture\n\nThe project container owns one canonical nested runtime repository.\n"
+  );
+  await writeFile(
+    join(nestedGammaPublishDir, "docs", "architecture", "overview.md"),
+    "# Gamma Publish Architecture\n\nThis sanitized publish tree is not the canonical private architecture source.\n"
+  );
   const architectureReader = new FileProjectArchitectureSource({ rootDir: root });
   const betaTarget = await architectureReader.inspectProjectArchitecture({ accountId: "acct-test", projectId: "beta" });
   assert.ok(betaTarget);
@@ -1254,6 +1303,7 @@ async function testStdio(memoryPort) {
   assert.ok(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "alpha"));
   assert.ok(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "memhub"));
   assert.ok(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "beta"));
+  assert.ok(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "gamma"));
   assert.equal(discoveredArchitectureProjects.some((project) => project.toLowerCase() === "docs"), false);
   const currentDocs = await architectureReader.getProjectArchitecture({
     accountId: "acct-test",
@@ -1262,6 +1312,16 @@ async function testStdio(memoryPort) {
   });
   assert.ok(currentDocs.some((item) => /Memhub Current Architecture/.test(item.content)));
   assert.ok(currentDocs.some((item) => item.provenance?.format === "project-docs"));
+  const gammaDocs = await architectureReader.getProjectArchitecture({
+    accountId: "acct-test",
+    projectId: "gamma",
+    query: "nested runtime architecture"
+  });
+  assert.ok(gammaDocs.some((item) => /Gamma Nested Runtime Architecture/.test(item.content)));
+  assert.equal(gammaDocs.some((item) => /Gamma Publish Architecture/.test(item.content)), false);
+  const gammaTarget = await architectureReader.inspectProjectArchitecture({ accountId: "acct-test", projectId: "gamma" });
+  assert.ok(gammaTarget);
+  assert.match(gammaTarget.content, /Gamma Nested Runtime Architecture/);
   const betaDocs = await architectureReader.getProjectArchitecture({
     accountId: "acct-test",
     projectId: "beta",
@@ -1272,7 +1332,7 @@ async function testStdio(memoryPort) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [mcpEntry, "--account", "acct-test", "--memory-url", `http://127.0.0.1:${memoryPort}`, "--state-root", stateRoot, "--normify-root", root],
-    env: { ...process.env },
+    env: testEnvironment(stateRoot, root),
     stderr: "pipe"
   });
   const client = new Client({ name: "memhub-stdio-test", version: "1.0.0" });
@@ -1398,8 +1458,7 @@ async function listArchitectureAuditFiles(stateRoot) {
 async function testHttp(memoryPort) {
   const port = await freePort();
   const stateRoot = join(root, "state");
-  const httpEnv = { ...process.env, MEMHUB_MEMORY_DB: historyDbPath, MEMHUB_OWNER_ACCOUNT_ID: "acct-test" };
-  delete httpEnv.MEMHUB_ACCOUNT_ID;
+  const httpEnv = testEnvironment(stateRoot, root, { MEMHUB_MEMORY_DB: historyDbPath, MEMHUB_OWNER_ACCOUNT_ID: "acct-test" });
   const child = spawn(process.execPath, [
     mcpEntry,
     "--http", String(port),
@@ -1526,9 +1585,9 @@ async function testHttp(memoryPort) {
       assert.equal(opened.project_id, "alpha");
       const committed = JSON.parse((await directClient.callTool({
         name: "memmy_turn",
-        arguments: { action: "commit", event_id: opened.turn.event_id, project: "alpha", assistant_text: "direct turn committed" }
+        arguments: { action: "commit", event_id: opened.event_id, project: "alpha", assistant_text: "direct turn committed" }
       })).content[0].text);
-      assert.equal(committed.turn.ingested, true);
+      assert.equal(committed.ingested, true);
       assert.equal(committed.project_id, "alpha");
     } finally {
       await directClient.close();
@@ -1577,7 +1636,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     ["memhub_todo", ["list", "add", "complete", "reopen"], ["action"]],
     ["memhub_skill", ["load", "record", "status"], ["action", "skill_id"]],
     ["memhub_distill", ["audit", "discover", "consolidate", "recover_ingest", "reconcile_derived", "reconcile_l4", "next", "renew", "submit", "skip"], []],
-    ["memhub_memory", ["load", "plan", "execute"], ["action"]],
+    ["memhub_memory", ["load", "why", "plan", "execute"], ["action"]],
     ["memhub_branch", ["list", "create", "close", "reopen"], ["action"]],
     ["memmy_project", ["list", "current", "architecture", "architecture_plan", "architecture_execute", "architecture_history"], ["action"]]
   ]) {
@@ -1869,9 +1928,11 @@ async function exerciseClient(client, conversationId, stateRoot) {
       user_text: "Keep this original user message in L1."
     }
   })).content[0].text);
-  assert.equal(openedTurn.turn.status, "open");
-  assert.equal(openedTurn.turn.project_hint, "alpha");
-  const l1EventId = openedTurn.turn.event_id;
+  assert.equal(openedTurn.status, "open");
+  assert.equal(openedTurn.project_id, "alpha");
+  assert.equal(openedTurn.user_text, undefined);
+  assert.equal(openedTurn.assistant_text, undefined);
+  const l1EventId = openedTurn.event_id;
   await client.callTool({
     name: "memmy_turn",
     arguments: {
@@ -1908,7 +1969,11 @@ async function exerciseClient(client, conversationId, stateRoot) {
       tool_summary: "Final tool summary for this completed turn."
     }
   })).content[0].text);
-  assert.equal(committedTurn.turn.status, "complete");
+  assert.equal(committedTurn.status, "complete");
+  assert.equal(committedTurn.user_text, undefined);
+  assert.equal(committedTurn.assistant_text, undefined);
+  assert.equal(committedTurn.reasoning_summary, undefined);
+  assert.equal(committedTurn.tool_summary, undefined);
   const resumed = JSON.parse((await client.callTool({
     name: "memmy_turn",
     arguments: { action: "resume", conversation_id: conversationId, continuity_id: conversationId }
@@ -1917,6 +1982,12 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(resumed.turns.at(-1).reasoning_summary, "Final public audit summary for this completed turn.");
   assert.equal(resumed.turns.at(-1).tool_summary, "Final tool summary for this completed turn.");
   assert.equal(resumed.incomplete.length, 0);
+  const sourceCapture = (await listCaptureEvents(stateRoot, "acct-test")).find((item) => item.event_id === l1EventId);
+  assert.ok(sourceCapture);
+  assert.equal(sourceCapture.provenance.source_kinds.user_text, "user_said");
+  assert.equal(sourceCapture.provenance.source_kinds.assistant_text, "agent_inferred");
+  assert.equal(sourceCapture.provenance.source_kinds.reasoning_summary, "agent_inferred");
+  assert.equal(sourceCapture.provenance.source_kinds.tool_summary, "tool_output");
 
   const largeResultConversation = `${conversationId}-generic-large-result`;
   const largeResultOpen = JSON.parse((await client.callTool({
@@ -1929,13 +2000,24 @@ async function exerciseClient(client, conversationId, stateRoot) {
     }
   })).content[0].text);
   const largeAssistantText = "大".repeat(130_000);
-  let largeResultChunk = JSON.parse((await client.callTool({
+  const largeCommit = JSON.parse((await client.callTool({
     name: "memmy_turn",
     arguments: {
       action: "commit",
-      event_id: largeResultOpen.turn.event_id,
+      event_id: largeResultOpen.event_id,
       conversation_id: largeResultConversation,
       assistant_text: largeAssistantText
+    }
+  })).content[0].text);
+  assert.equal(largeCommit.status, "complete");
+  assert.equal(largeCommit.assistant_text, undefined);
+
+  let largeResultChunk = JSON.parse((await client.callTool({
+    name: "memmy_turn",
+    arguments: {
+      action: "resume",
+      conversation_id: largeResultConversation,
+      continuity_id: largeResultConversation
     }
   })).content[0].text);
   assert.equal(largeResultChunk.result_transport.mode, "chunked");
@@ -1952,8 +2034,8 @@ async function exerciseClient(client, conversationId, stateRoot) {
     largeResultJson += largeResultChunk.result_chunk;
   }
   const reconstructedLargeResult = JSON.parse(largeResultJson);
-  assert.equal(reconstructedLargeResult.turn.assistant_text, largeAssistantText);
-  assert.equal(reconstructedLargeResult.turn.status, "complete");
+  assert.equal(reconstructedLargeResult.turns.at(-1).assistant_text, largeAssistantText);
+  assert.equal(reconstructedLargeResult.turns.at(-1).status, "complete");
 
   const unboundOpen = JSON.parse((await client.callTool({
     name: "memmy_turn",
@@ -1964,9 +2046,10 @@ async function exerciseClient(client, conversationId, stateRoot) {
     }
   })).content[0].text);
   assert.equal(unboundOpen.transport_conversation_id, null);
-  assert.match(unboundOpen.turn.conversation_id, /^memhub-unbound:l1_/);
-  assert.equal(unboundOpen.turn.project_hint, "alpha");
-  const unboundEventId = unboundOpen.turn.event_id;
+  assert.equal(unboundOpen.project_id, "alpha");
+  const unboundEventId = unboundOpen.event_id;
+  assert.match(unboundEventId, /^l1_/);
+  assert.equal(unboundOpen.continuity_id, `memhub-unbound:${unboundEventId}`);
   const unboundCommit = JSON.parse((await client.callTool({
     name: "memmy_turn",
     arguments: {
@@ -1975,9 +2058,9 @@ async function exerciseClient(client, conversationId, stateRoot) {
       assistant_text: "The unbound transport turn still reaches complete L1 safely."
     }
   })).content[0].text);
-  assert.equal(unboundCommit.turn.event_id, unboundEventId);
-  assert.equal(unboundCommit.turn.status, "complete");
-  assert.equal(unboundCommit.turn.ingested, true);
+  assert.equal(unboundCommit.event_id, unboundEventId);
+  assert.equal(unboundCommit.status, "complete");
+  assert.equal(unboundCommit.ingested, true);
   assert.equal(unboundCommit.project_id, "alpha");
   const colonEventId = `codex:${conversationId}:colon-turn`;
   await client.callTool({
@@ -2015,7 +2098,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(JSON.parse(colonEvidenceDryRun.content[0].text).dryRun, true);
   const invalidResume = await client.callTool({ name: "memmy_turn", arguments: { action: "resume" } });
   assert.equal(invalidResume.isError, true);
-  assert.match(invalidResume.content[0].text, /resume requires continuity_id or conversation_id/);
+  assert.match(invalidResume.content[0].text, /resume requires continuity_id, conversation_id, or event_id/);
 
   const continuityContext = JSON.parse((await client.callTool({
     name: "memmy_context",
@@ -2030,6 +2113,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
   const contractPayload = JSON.parse(contractResult.content[0].text);
   assert.equal(contractPayload.contract.version, "memhub-distill-v3");
   assert.equal(contractPayload.contract.executor, "connected_mcp_or_harness_model");
+  assert.ok(contractPayload.contract.rules.some((rule) => /source_kinds/.test(rule)));
 
   const golden = await exerciseGoldenDistillationChain(client, stateRoot, conversationId, l1EventId);
   const writesBeforeDryRun = requests.filter((entry) => entry.url === "/api/v1/memory/add").length;
@@ -2048,13 +2132,18 @@ async function exerciseClient(client, conversationId, stateRoot) {
 
   const exactContext = JSON.parse((await client.callTool({
     name: "memmy_context",
-    arguments: { query: "__exact_evidence_ref_probe__", project: "alpha" }
+    arguments: { query: "__exact_evidence_ref_probe__", project: "alpha", detail: "full" }
   })).content[0].text);
   const exactL2 = exactContext.projectMemory.find((item) => item.id === golden.alphaL2Id);
   assert.ok(exactL2);
   assert.equal(exactL2.evidenceRef, golden.alphaL2Ref);
   assert.equal(exactL2.provenance.hydration.tool, "memhub_memory");
   assert.equal(exactContext.progressiveDisclosure.discover, "memmy_context");
+  assert.equal(exactContext.turnKnowledgePlan.version, "turn-knowledge-plan-v1");
+  assert.equal(exactContext.turnKnowledgePlan.persistence, "none");
+  assert.equal(exactContext.turnKnowledgePlan.model_calls, 0);
+  assert.ok(Array.isArray(exactContext.turnKnowledgePlan.required));
+  assert.ok(Array.isArray(exactContext.turnKnowledgePlan.supporting));
   const hydratedL2 = JSON.parse((await client.callTool({
     name: "memhub_memory",
     arguments: { action: "load", evidence_ref: exactL2.evidenceRef }
@@ -2063,6 +2152,19 @@ async function exerciseClient(client, conversationId, stateRoot) {
   assert.equal(hydratedL2.item.layer, "L2");
   assert.match(hydratedL2.item.content, /ALPHA/);
   assert.equal(hydratedL2.telemetry.hydrations, 1);
+  const whyL2 = JSON.parse((await client.callTool({
+    name: "memhub_memory",
+    arguments: {
+      action: "why",
+      evidence_ref: exactL2.evidenceRef,
+      query: "why did ALPHA keep explicit workspace ownership",
+      max_sources: 4
+    }
+  })).content[0].text);
+  assert.equal(whyL2.persistence, "none");
+  assert.equal(whyL2.root.layer, "L2");
+  assert.equal(whyL2.causal_review_contract.temporal_adjacency_is_not_causality, true);
+  assert.ok(Array.isArray(whyL2.direct_evidence));
 
   const governedL3Content = "# ALPHA Project Rules\n\n- Validate current state before modifying project truth.\n- Preserve explicit project and workspace boundaries.\n- User-confirmed rules replace the canonical L3 only after full-text approval.\n";
   const governedL3Plan = JSON.parse((await client.callTool({
@@ -2096,7 +2198,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: {
       action: "execute",
       authorization_id: governedL3Plan.authorization_id,
-      confirmation_evidence_ref: `l1:${l3Confirmation.turn.event_id}`
+      confirmation_evidence_ref: `l1:${l3Confirmation.event_id}`
     }
   })).content[0].text);
   assert.equal(governedL3.ok, true);
@@ -2108,7 +2210,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     name: "memmy_turn",
     arguments: {
       action: "commit",
-      event_id: l3Confirmation.turn.event_id,
+      event_id: l3Confirmation.event_id,
       conversation_id: `${conversationId}-l3-confirmation`,
       continuity_id: `${conversationId}-l3-confirmation`,
       assistant_text: "The explicitly approved full L3 replacement was committed."
@@ -2147,7 +2249,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: {
       action: "execute",
       authorization_id: governedL4Plan.authorization_id,
-      confirmation_evidence_ref: `l1:${l4Confirmation.turn.event_id}`
+      confirmation_evidence_ref: `l1:${l4Confirmation.event_id}`
     }
   })).content[0].text);
   assert.equal(governedL4.ok, true);
@@ -2158,7 +2260,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     name: "memmy_turn",
     arguments: {
       action: "commit",
-      event_id: l4Confirmation.turn.event_id,
+      event_id: l4Confirmation.event_id,
       conversation_id: `${conversationId}-l4-confirmation`,
       continuity_id: `${conversationId}-l4-confirmation`,
       assistant_text: "The explicitly approved full L4 replacement was committed."
@@ -2208,7 +2310,7 @@ async function exerciseClient(client, conversationId, stateRoot) {
     arguments: {
       action: "execute",
       authorization_id: staleGovernedPlan.authorization_id,
-      confirmation_evidence_ref: `l1:${staleConfirmation.turn.event_id}`
+      confirmation_evidence_ref: `l1:${staleConfirmation.event_id}`
     }
   });
   assert.equal(staleGovernedExecute.isError, true);
@@ -2602,7 +2704,7 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
   assert.equal(missingRepairProject.isError, true, "repair requires an explicit project");
   const alphaAfterDistilledDescription = parseTool(await client.callTool({
     name: "memmy_project_list",
-    arguments: { query: "alpha" }
+    arguments: { query: "alpha", detail: true }
   })).projects.find((project) => project.project === "alpha");
   assert.ok(alphaAfterDistilledDescription);
   assert.match(alphaAfterDistilledDescription.description, /^ALPHA project used by MCP integration tests \((?:re)?verified\)\.$/);
@@ -2670,15 +2772,15 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
     name: "memmy_turn",
     arguments: {
       action: "commit",
-      event_id: betaOpen.turn.event_id,
+      event_id: betaOpen.event_id,
       conversation_id: betaConversation,
       continuity_id: betaConversation,
       turn_id: `source-${betaConversation}`,
       assistant_text: "Second project evidence remains project-scoped until L4 aggregation."
     }
   }));
-  assert.equal(betaCommit.turn.project_hint, betaProject);
-  const betaCapture = (await listCaptureEvents(stateRoot, "acct-test")).find((item) => item.event_id === betaOpen.turn.event_id);
+  assert.equal(betaCommit.project_id, betaProject);
+  const betaCapture = (await listCaptureEvents(stateRoot, "acct-test")).find((item) => item.event_id === betaOpen.event_id);
   assert.ok(betaCapture);
   const betaQueued = await enqueueDistillationJob({
     stateRoot,
@@ -2767,14 +2869,14 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
     name: "memmy_turn",
     arguments: {
       action: "commit",
-      event_id: alphaOpenV2.turn.event_id,
+      event_id: alphaOpenV2.event_id,
       conversation_id: conversationId,
       continuity_id: conversationId,
       turn_id: `source-${conversationId}-v2`,
       assistant_text: "The second decision is now part of ALPHA current truth."
     }
   });
-  const alphaCaptureV2 = (await listCaptureEvents(stateRoot, "acct-test")).find((item) => item.event_id === alphaOpenV2.turn.event_id);
+  const alphaCaptureV2 = (await listCaptureEvents(stateRoot, "acct-test")).find((item) => item.event_id === alphaOpenV2.event_id);
   assert.ok(alphaCaptureV2);
   const alphaQueuedV2 = await enqueueDistillationJob({
     stateRoot,
@@ -2867,7 +2969,11 @@ async function exerciseGoldenDistillationChain(client, stateRoot, conversationId
 async function testProjectDescriptionPrecedence() {
   const path = join(root, "project-description-registry.json");
   const registry = new JsonProjectRegistry(path);
-  await registry.reconcile("acct-description", ["auto-project"]);
+  // Legacy empty descriptions remain supported without filesystem registration.
+  await writeFile(path, JSON.stringify({ version: 1, projects: ["auto-project", "distilled-target"].map((projectId) => ({
+    accountId: "acct-description", projectId, name: projectId, description: "", descriptionSource: "empty",
+    aliases: [], state: "active", createdAt: "2026-10-10T00:00:00.000Z", updatedAt: "2026-10-10T00:00:00.000Z"
+  })) }));
   let project = (await registry.list("acct-description")).find((item) => item.projectId === "auto-project");
   assert.ok(project);
   assert.equal(project.description, "");
@@ -2896,7 +3002,6 @@ async function testProjectDescriptionPrecedence() {
   assert.equal(project.distilledDescription, "A newer distilled description that must not overwrite the explicit manual description.");
   assert.deepEqual(project.descriptionEvidenceRefs, ["l1-memory:three"]);
 
-  await registry.reconcile("acct-description", ["distilled-target"]);
   await registry.updateDistilledDescription(
     "acct-description",
     "distilled-target",

@@ -22,22 +22,23 @@ export function distillationNextPayload(
         complete: true
       },
       instructions: job.target === "l2"
-        ? "Produce the requested L2 artifact from the supplied L1 evidence. First load the current canonical L2 from Memhub, preserve its existing timeline events and superseded history, then merge the new evidence into one full canonical timeline replacement. Never submit a delta-only L2 body. If evidence is insufficient, call action=skip with job_id."
-        : `Produce only the requested ${job.target.toUpperCase()} artifact from the supplied evidence. Read current Memhub context first so the result updates the canonical artifact rather than duplicating it. If evidence is insufficient for this layer, call action=skip with job_id.`
+        ? "Produce the requested L2 artifact from the supplied L1 evidence. First load the current canonical L2 from Memhub, preserve its existing timeline events and superseded history, then merge the new evidence into one full canonical timeline replacement. Never submit a delta-only L2 body. Write the result bilingually (English + Simplified Chinese, paired per section) as the contract requires. If evidence is insufficient, call action=skip with job_id."
+        : `Produce only the requested ${job.target.toUpperCase()} artifact from the supplied evidence. Read current Memhub context first so the result updates the canonical artifact rather than duplicating it. Write the result bilingually (English + Simplified Chinese, paired per item) as the contract requires. If evidence is insufficient for this layer, call action=skip with job_id.`
     };
   }
 
   const end = Math.min(evidenceDocument.length, evidenceOffset + evidenceChunkChars);
   const nextOffset = end < evidenceDocument.length ? end : null;
   const manifest = job.evidence.map((item) => {
-    const { content, user_text, assistant_text, reasoning_summary, ...metadata } = item;
+    const { content, user_text, assistant_text, reasoning_summary, tool_summary, ...metadata } = item;
     return {
       ...metadata,
       text_chars: {
         ...(content !== undefined ? { content: content.length } : {}),
         ...(user_text !== undefined ? { user_text: user_text.length } : {}),
         ...(assistant_text !== undefined ? { assistant_text: assistant_text.length } : {}),
-        ...(reasoning_summary !== undefined ? { reasoning_summary: reasoning_summary.length } : {})
+        ...(reasoning_summary !== undefined ? { reasoning_summary: reasoning_summary.length } : {}),
+        ...(tool_summary !== undefined ? { tool_summary: tool_summary.length } : {})
       }
     };
   });
@@ -55,8 +56,8 @@ export function distillationNextPayload(
     evidence_chunk: evidenceDocument.slice(evidenceOffset, end),
     instructions: nextOffset === null
       ? (job.target === "l2"
-        ? `All evidence chunks for ${job.job_id} have been read. Load the current canonical L2, preserve its prior timeline events, and merge this evidence into one full canonical replacement; never submit a delta-only L2 body. Call action=skip if the evidence is insufficient.`
-        : `All evidence chunks for ${job.job_id} have been read. Produce only the requested ${job.target.toUpperCase()} artifact, or call action=skip if the evidence is insufficient.`)
+        ? `All evidence chunks for ${job.job_id} have been read. Load the current canonical L2, preserve its prior timeline events, and merge this evidence into one full canonical replacement; never submit a delta-only L2 body. Write it bilingually (English + Simplified Chinese). Call action=skip if the evidence is insufficient.`
+        : `All evidence chunks for ${job.job_id} have been read. Produce only the requested ${job.target.toUpperCase()} artifact bilingually (English + Simplified Chinese), or call action=skip if the evidence is insufficient.`)
       : `This job uses chunked evidence. Keep the same lease owner and call action=next with job_id=${job.job_id}, source_harness=${job.leased_by ?? "<same-harness>"}, evidence_offset=${nextOffset}. Do not submit until evidence_transport.complete=true.`
   };
 }
@@ -71,12 +72,18 @@ export function distillationEvidenceDocument(job: DistillationJob): string {
       ...(item.layer ? [`layer: ${item.layer}`] : []),
       ...(item.project_id ? [`project_id: ${item.project_id}`] : []),
       ...(item.conversation_id ? [`conversation_id: ${item.conversation_id}`] : []),
-      ...(item.title ? [`title: ${item.title}`] : [])
+      ...(item.title ? [`title: ${item.title}`] : []),
+      ...(item.source_kinds?.user_text ? [`source_kind.user_text: ${item.source_kinds.user_text}`] : []),
+      ...(item.source_kinds?.assistant_text ? [`source_kind.assistant_text: ${item.source_kinds.assistant_text}`] : []),
+      ...(item.source_kinds?.reasoning_summary ? [`source_kind.reasoning_summary: ${item.source_kinds.reasoning_summary}`] : []),
+      ...(item.source_kinds?.tool_summary ? [`source_kind.tool_summary: ${item.source_kinds.tool_summary}`] : []),
+      ...(item.source_kinds?.content ? [`source_kind.content: ${item.source_kinds.content}`] : [])
     ];
     if (item.content !== undefined) lines.push("content:", item.content);
     if (item.user_text !== undefined) lines.push("user_text:", item.user_text);
     if (item.assistant_text !== undefined) lines.push("assistant_text:", item.assistant_text);
     if (item.reasoning_summary !== undefined) lines.push("reasoning_summary:", item.reasoning_summary);
+    if (item.tool_summary !== undefined) lines.push("tool_summary:", item.tool_summary);
     return lines.join("\n");
   }).join("\n\n");
 }

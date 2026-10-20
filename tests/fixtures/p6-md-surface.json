@@ -1,0 +1,1086 @@
+{
+  "generated_by": "tests/p6-md-surface-snapshot.mjs",
+  "note": "Generated from the unmodified mcp.ts surface before the P6-MD split. UUIDs, generated event ids, timestamps and uptime are normalized.",
+  "tools": [
+    {
+      "name": "memhub_result",
+      "description": "续取被 Memhub 分片的 MCP JSON 结果。当返回 result_transport.mode=chunked 时，按 result_id 和 next_offset 继续读取，按 offset 拼接 result_chunk 后解析原始 JSON。短结果不经过此工具。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "result_id": {
+            "type": "string",
+            "description": "大结果传输标识"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "续取起始字符偏移量"
+          },
+          "chunk_chars": {
+            "type": "integer",
+            "minimum": 10000,
+            "maximum": 200000,
+            "description": "每次续取字符数；默认 100000"
+          }
+        },
+        "required": [
+          "result_id",
+          "offset"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memmy_turn",
+      "description": "Record turns with open/commit; when project_resolution appears, ask the user then call assign.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "open",
+              "checkpoint",
+              "commit",
+              "failed",
+              "truncated",
+              "resume",
+              "assign"
+            ],
+            "description": "open/checkpoint/commit/failed/truncated/resume/assign"
+          },
+          "event_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 200
+          },
+          "keep_global": {
+            "type": "boolean"
+          },
+          "event_id": {
+            "type": "string",
+            "description": "open 返回的稳定 L1 event id；后续 checkpoint/commit/resume 原样回传"
+          },
+          "conversation_id": {
+            "type": "string",
+            "description": "可选 transport provenance；不用于 project/branch 路由"
+          },
+          "continuity_id": {
+            "type": "string",
+            "description": "Explicit continuity key; assign binds later turns"
+          },
+          "turn_id": {
+            "type": "string",
+            "description": "Harness 原生 turn id；可替代 event_id 做幂等定位"
+          },
+          "previous_event_id": {
+            "type": "string",
+            "description": "显式前序 L1 event id"
+          },
+          "project": {
+            "type": "string",
+            "description": "明确 canonical project；与 workspace_project 冲突时拒绝"
+          },
+          "workspace_project": {
+            "type": "string",
+            "description": "当前工作区解析出的 project；与 project 冲突时拒绝"
+          },
+          "user_text": {
+            "type": "string",
+            "description": "用户原始输入文本"
+          },
+          "assistant_text": {
+            "type": "string",
+            "description": "助手最终回答文本"
+          },
+          "reasoning_summary": {
+            "type": "string",
+            "description": "可公开审计的决策摘要，不得包含隐藏 chain-of-thought"
+          },
+          "tool_summary": {
+            "type": "string",
+            "description": "关键工具动作与结果摘要"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "description": "resume 最大返回轮数，默认 12"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memmy_context",
+      "description": "conversation_id 不参与项目选择；不猜测项目，project/workspace 冲突时拒绝，透传 evidenceRef；出现 clarification 时询问用户后调用 memmy_turn action=assign。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "当前用户请求或需要补充上下文的问题"
+          },
+          "detail": {
+            "type": "string",
+            "enum": [
+              "brief",
+              "full"
+            ],
+            "description": "输出模式：brief（默认，精简瘦身）或 full（完整模式）"
+          },
+          "max_content_bytes": {
+            "type": "integer",
+            "minimum": 2000,
+            "maximum": 512000,
+            "description": "总内容字节预算上限，范围 2000-512000"
+          },
+          "conversation_id": {
+            "type": "string",
+            "description": "可选 transport provenance；不参与项目选择"
+          },
+          "continuity_id": {
+            "type": "string",
+            "description": "Explicit continuity key; user-assigned bindings may select the project"
+          },
+          "project": {
+            "type": "string",
+            "description": "明确项目 slug；禁止盲目猜测项目"
+          },
+          "workspace_project": {
+            "type": "string",
+            "description": "由工作区/仓库确定的项目 slug；与 project 冲突时拒绝"
+          },
+          "branch": {
+            "type": "string",
+            "description": "可选项目内 Branch id/name；仅收窄任务 retrieval，不建立新记忆层"
+          },
+          "semantic_projects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "语义项目候选列表；非唯一时保持 global-only"
+          },
+          "capability_projects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "可复用 Skill 检索候选项目列表；默认检索已知项目"
+          },
+          "cross_project_skills": {
+            "type": "boolean",
+            "description": "是否启用跨项目可复用 Skill 召回；默认 true"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "description": "每类记忆最大召回条数"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memhub_memory",
+      "description": "Progressive-disclosure 记忆读取与 L3/L4 治理。action=load 按 exact evidenceRef 水合单条记忆；action=why 查看证据链；action=plan 准备 L3/L4 替换，必须全文向用户展示并获明确授权，并先把该确认记录为 L1；action=execute 凭 authorization_id 与 confirmation_evidence_ref 执行。禁止自动提级。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "load",
+              "why",
+              "plan",
+              "execute"
+            ],
+            "description": "操作类型：load/why/plan/execute"
+          },
+          "evidence_ref": {
+            "type": "string",
+            "description": "load/why: memmy_context 返回的 exact evidenceRef"
+          },
+          "query": {
+            "type": "string",
+            "description": "why: 待审查因果或决策背景的具体问题"
+          },
+          "max_sources": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8,
+            "description": "why: 每节最大证据数；默认 4"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "l3",
+              "l4"
+            ],
+            "description": "plan: 记忆层级，l3 为项目经验，l4 为全局规则"
+          },
+          "content": {
+            "type": "string",
+            "description": "plan: 完整的 L3/L4 正文全文，非增量 patch"
+          },
+          "base_evidence_ref": {
+            "type": "string",
+            "description": "plan: 当前层级 exact evidenceRef"
+          },
+          "project": {
+            "type": "string",
+            "description": "L3 plan: 明确项目 slug；与 workspace_project 冲突时拒绝"
+          },
+          "workspace_project": {
+            "type": "string",
+            "description": "L3 plan: 工作区项目；与 project 冲突时拒绝"
+          },
+          "note": {
+            "type": "string",
+            "description": "plan: 变更原因简述"
+          },
+          "authorization_id": {
+            "type": "string",
+            "description": "execute: plan 返回的单次授权标识"
+          },
+          "confirmation_evidence_ref": {
+            "type": "string",
+            "description": "execute: 用户明确确认轮的 l1:<event-id>"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memhub_branch",
+      "description": "项目内 Branch Context。Branch 是显式 task/workstream scope，不绑定 host conversation。create/list/close/reopen 管理 Branch 元数据；检索时由 memmy_context 显式传 branch。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "create",
+              "close",
+              "reopen"
+            ],
+            "description": "操作类型：list/create/close/reopen"
+          },
+          "project": {
+            "type": "string",
+            "description": "项目 slug/name/alias；与 workspace_project 冲突时拒绝"
+          },
+          "workspace_project": {
+            "type": "string",
+            "description": "当前工作区解析出的 project；与 project 冲突时拒绝"
+          },
+          "branch": {
+            "type": "string",
+            "description": "Branch id/name；close/reopen 必填"
+          },
+          "name": {
+            "type": "string",
+            "description": "create 时的 Branch 名称"
+          },
+          "goal": {
+            "type": "string",
+            "description": "create 时明确 workstream 目标，用于检索过滤"
+          },
+          "include_closed": {
+            "type": "boolean",
+            "description": "list 是否包含已关闭 Branch；默认 false"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memhub_skill",
+      "description": "Skill Router / Execution Lifecycle。memmy_context 返回精简候选；action=load 加载 Skill 与 execution_id，真正执行后 action=record 记录 invoked、success/failure、user_correction；status 查看 telemetry。修订或退役现有 Skill 必须 action=plan（operation=revise/retire）并向用户展示精确影响，取得针对该计划的明确批准后才 action=execute；保留稳定 source_skill_id，版本替换归档旧 memory id，不创建同名并行现行 Skill。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "load",
+              "record",
+              "status",
+              "plan",
+              "execute"
+            ],
+            "description": "操作类型：load/record/status/plan/execute"
+          },
+          "skill_id": {
+            "type": "string",
+            "description": "memmy_context 返回的 Skill memory id"
+          },
+          "execution_id": {
+            "type": "string",
+            "description": "load 返回；record 时必须原样回传"
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "invoked",
+              "success",
+              "failure",
+              "user_correction"
+            ],
+            "description": "action=record 的执行阶段"
+          },
+          "executor": {
+            "type": "string",
+            "description": "实际执行 Harness/executor，如 codex/chatgpt/claude-code"
+          },
+          "note": {
+            "type": "string",
+            "description": "简短执行结果、修订理由或纠正摘要；不要写隐藏 chain-of-thought"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "revise",
+              "retire"
+            ],
+            "description": "action=plan 的治理操作"
+          },
+          "content": {
+            "type": "string",
+            "description": "revise 时的完整新版 Skill 过程"
+          },
+          "title": {
+            "type": "string",
+            "description": "revise 时的 Skill 标题"
+          },
+          "version": {
+            "type": "string",
+            "description": "revise 时严格递增的 numeric dotted 版本，如 1.1.0"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "新版业务检索标签（不可自行声明 scope/provenance）"
+          },
+          "authorization_id": {
+            "type": "string",
+            "description": "plan 返回的一次性治理授权；仅在用户明确批准后执行"
+          }
+        },
+        "required": [
+          "action",
+          "skill_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memhub_distill",
+      "description": "统一的 L2/L3/L4/Skill 蒸馏入口。L2=项目时间线，可产出 evidence-backed project_description；L3=项目规则/经验；L4=跨项目画像；Skill=可执行流程。语义整理由当前 Harness 完成，Memhub 负责证据边界、scope、版本与提交。consolidate 为 L2/L3 只读整理计划；不新增记忆层。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "audit",
+              "discover",
+              "consolidate",
+              "recover_ingest",
+              "reconcile_derived",
+              "reconcile_l4",
+              "reconcile_commit",
+              "next",
+              "renew",
+              "submit",
+              "skip"
+            ],
+            "description": "audit 审计；discover 扫描；consolidate 整理计划；recover/reconcile 处理缺口；next/renew/submit/skip 蒸馏"
+          },
+          "event_id": {
+            "type": "string",
+            "description": "recover_ingest 必填的完整稳定 Capture event_id，仅恢复此事件"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "l2",
+              "l3",
+              "l4",
+              "skill"
+            ],
+            "description": "目标层；next 可省略领取任意待办，submit 必须与 job target 一致"
+          },
+          "content": {
+            "type": "string",
+            "description": "完整目标层内容"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "account",
+              "project"
+            ],
+            "description": "L2/L3 必须 project；L4 必须 account；Skill 可两者"
+          },
+          "project": {
+            "type": "string",
+            "description": "project scope 的明确项目 slug"
+          },
+          "workspace_project": {
+            "type": "string",
+            "description": "当前工作区解析出的 project；与 project 不一致时拒绝项目级操作"
+          },
+          "title": {
+            "type": "string",
+            "description": "可选标题；Skill 必填"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "业务检索标签"
+          },
+          "source_harness": {
+            "type": "string",
+            "description": "产生该沉淀的 Harness，例如 codex / claude-code"
+          },
+          "artifact_id": {
+            "type": "string",
+            "description": "覆盖默认 canonical artifact id；Skill 必填且同一 workflow 保持稳定"
+          },
+          "version": {
+            "type": "string",
+            "description": "Harness 侧产物版本；Skill 必填 numeric dotted 版本，例如 1.1.0"
+          },
+          "project_description": {
+            "type": "string",
+            "description": "L2 可附带 1-3 句项目描述，概括目标范围；人工描述存在时不覆盖"
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "支持产物的精确证据引用。L2 用 L1 ref；L3/L4 须原样使用 exact revision ref"
+          },
+          "source_conversations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "产物来源对话 ID；与 distilled_by 分开保存"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "置信度，范围 0-1"
+          },
+          "job_id": {
+            "type": "string",
+            "description": "submit/next 的 leased job，或 reconcile 的 source job"
+          },
+          "lease_seconds": {
+            "type": "integer",
+            "minimum": 30,
+            "maximum": 900,
+            "description": "租约秒数，30-900"
+          },
+          "lease_token_supported": {
+            "type": "boolean",
+            "description": "新客户端启用 opaque lease token 协议"
+          },
+          "lease_token": {
+            "type": "string",
+            "description": "next 返回的 opaque lease token；后续操作须原样提供"
+          },
+          "evidence_offset": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "大 evidence job 分片读取偏移"
+          },
+          "evidence_chunk_chars": {
+            "type": "integer",
+            "minimum": 10000,
+            "maximum": 200000,
+            "description": "大 evidence 每次最多返回字符数；默认 120000"
+          },
+          "commit_id": {
+            "type": "string",
+            "description": "reconcile_commit: inspect 返回的提交 ID；省略时列出本账户记录"
+          },
+          "reconcile_mode": {
+            "type": "string",
+            "enum": [
+              "inspect",
+              "reconcile",
+              "abandon"
+            ],
+            "description": "inspect 查看冻结候选；reconcile 只对账不重写 Core；abandon 须操作员确认"
+          },
+          "commit_generation": {
+            "type": "string",
+            "description": "对账或放弃时必须回传 inspect 的 generation"
+          },
+          "operator_confirmation": {
+            "type": "string",
+            "description": "明确知晓 Core 可能已写入后，由操作员确认 abandon:<generation>"
+          },
+          "operator_reason": {
+            "type": "string",
+            "description": "放弃冻结提交的操作员原因；原记录保留到正常终态清理"
+          },
+          "inspect_contract": {
+            "type": "boolean",
+            "description": "只返回 Memhub 蒸馏规则，不写入任何内容"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "按当前契约校验候选与 scope，但不写入 Memory Core"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memmy_project_list",
+      "description": "只读列出当前账号项目注册表。默认返回摘要（description 最多 280 字符及 pendingTodoCount）；detail=true 返回完整详情。返回 canonical project slug、显示名、description、aliases 和状态。准备创建项目、绑定不确定项目或发现近似名称时，用相似度 + description 判断是否已有同一项目，禁止盲目新建。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "detail": {
+            "type": "boolean",
+            "description": "是否返回完整项目详情；默认 false，仅返回摘要"
+          },
+          "query": {
+            "type": "string",
+            "description": "可选项目名称/slug/关键词，用于查找相似项目候选"
+          },
+          "include_archived": {
+            "type": "boolean",
+            "description": "是否显式包含 archived 项目；默认 false"
+          },
+          "include_inactive": {
+            "type": "boolean",
+            "description": "是否包含 archived/merged/deleted 历史项目；默认 false"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20,
+            "description": "相似候选最大数量；默认 8"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memhub_todo",
+      "description": "项目待办的一等 MCP 工具。使用 Project Registry 作为唯一事实源，支持 list/add/complete/reopen；禁止把待办写进 Project Architecture、项目 description 或 L2/L3。list 在未指定项目时列出所有 active project 待办；写操作必须显式提供 project 或 workspace_project。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "add",
+              "complete",
+              "reopen"
+            ],
+            "description": "操作类型：list/add/complete/reopen"
+          },
+          "project": {
+            "type": "string",
+            "description": "明确项目 slug/name/alias；与 workspace_project 冲突时拒绝"
+          },
+          "workspace_project": {
+            "type": "string",
+            "description": "当前工作区解析出的 project；与 project 冲突时拒绝项目级操作"
+          },
+          "text": {
+            "type": "string",
+            "description": "add 时必填的待办内容，最长 2000 字符"
+          },
+          "todo_id": {
+            "type": "string",
+            "description": "complete/reopen 时必填"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "done",
+              "all"
+            ],
+            "description": "list 过滤；默认 pending"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memmy_project_manage",
+      "description": "受控项目管理工具。支持 create/update/archive/unarchive/delete/merge。所有修改必须先 action=plan，返回一次性 authorization_id 和影响说明，不修改数据。模型必须把计划展示给用户，并在收到针对该计划的明确授权后才能 action=execute。禁止把 plan 本身、历史授权或模型推断当成授权。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "plan",
+              "execute"
+            ],
+            "description": "操作类型：plan/execute"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "create",
+              "update",
+              "archive",
+              "unarchive",
+              "delete",
+              "merge"
+            ],
+            "description": "操作：create/update/archive/unarchive/delete/merge"
+          },
+          "project": {
+            "type": "string",
+            "description": "create 为新 canonical slug；其它为当前项目 ref"
+          },
+          "target": {
+            "type": "string",
+            "description": "merge 的目标 canonical project ref"
+          },
+          "name": {
+            "type": "string",
+            "description": "create/update 显示名；不改变稳定 canonical slug"
+          },
+          "description": {
+            "type": "string",
+            "description": "create 必填；update 可修改。用于项目消歧"
+          },
+          "aliases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "create/update 显式别名集合"
+          },
+          "authorization_id": {
+            "type": "string",
+            "description": "execute 时必须提供刚才 plan 返回的一次性授权 ID"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "memmy_project",
+      "description": "项目上下文与 Project Architecture。Project 只由显式 project/workspace_project、exact alias 或唯一 semantic evidence 解析，不保存 host conversation binding。current 读当前项目；architecture 读架构；architecture_plan/execute 受控完整替换；architecture_history 读历史；list 读项目列表（默认摘要）。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "detail": {
+            "type": "boolean",
+            "description": "list 是否返回完整项目详情；默认 false，仅返回摘要"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "current",
+              "architecture",
+              "architecture_plan",
+              "architecture_execute",
+              "architecture_history"
+            ],
+            "description": "操作类型：list/current/architecture/architecture_plan/architecture_execute/architecture_history"
+          },
+          "project": {
+            "type": "string",
+            "description": "明确项目 slug/alias；与 workspace_project 冲突时拒绝"
+          },
+          "workspace_project": {
+            "type": "string",
+            "description": "当前工作区解析出的 project；与 project 冲突时拒绝操作"
+          },
+          "query": {
+            "type": "string",
+            "description": "architecture 时用于选择最相关架构模块"
+          },
+          "content": {
+            "type": "string",
+            "description": "architecture_plan：完整最终 canonical Architecture 正文，非 patch 片段"
+          },
+          "authorization_id": {
+            "type": "string",
+            "description": "architecture_execute：用户批准对应 plan 后使用的一次性 authorization id"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "description": "architecture_history 返回条数，默认 20"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "responses": {
+    "memmy_context": {
+      "success": [
+        {
+          "resolvedProjectId": null,
+          "resolutionSource": "none",
+          "recallScope": "global_only",
+          "globalMemory": [
+            {
+              "id": "global-surface",
+              "content": "Global surface memory."
+            }
+          ],
+          "projectMemory": [],
+          "reusableSkills": [],
+          "retrievalDiagnostics": {
+            "version": "retrieval-v1",
+            "requestedLimit": 6,
+            "finalLimit": 6,
+            "candidateLimit": 24,
+            "queryTerms": [
+              "surface",
+              "snapshot",
+              "context"
+            ],
+            "weights": {
+              "semanticWeight": 0.68,
+              "lexicalWeight": 0.32,
+              "diversityPenalty": 0.12
+            },
+            "lanes": {
+              "global": {
+                "candidateCount": 1,
+                "dedupedCount": 1,
+                "emittedCount": 1
+              },
+              "project": {
+                "candidateCount": 0,
+                "dedupedCount": 0,
+                "emittedCount": 0
+              },
+              "skills": {
+                "candidateCount": 0,
+                "dedupedCount": 0,
+                "emittedCount": 0
+              }
+            },
+            "coreStatus": []
+          },
+          "projectCandidates": []
+        }
+      ],
+      "error": [
+        {
+          "isError": true,
+          "message": "Input validation error: Invalid arguments for tool memmy_context: data must have required property 'query'"
+        }
+      ]
+    },
+    "memmy_turn.open": {
+      "success": [
+        {
+          "action": "open",
+          "status": "open",
+          "project_id": "alpha",
+          "continuity_id": "memhub-unbound:<l1-event>",
+          "ingested": false,
+          "transport_conversation_id": null
+        }
+      ]
+    },
+    "memmy_turn.commit": {
+      "success": [
+        {
+          "action": "commit",
+          "status": "complete",
+          "project_id": "alpha",
+          "ingested": true
+        }
+      ]
+    },
+    "memmy_turn": {
+      "error": [
+        {
+          "isError": true,
+          "message": "commit requires assistant_text"
+        }
+      ]
+    },
+    "memhub_memory": {
+      "success": [
+        {
+          "status": "awaiting_user_authorization",
+          "operation": "replace_canonical_memory",
+          "kind": "l4",
+          "scope": "account",
+          "proposed_content": "# Account profile\n\nSurface snapshot rule.\n",
+          "proposed_sha256": "55632ca059332a264cf26bb893a834781bf37e3b6f7622123e72b229d86fe476",
+          "contract": "memhub-user-authorized-memory-v1"
+        }
+      ],
+      "error": [
+        {
+          "isError": true,
+          "message": "evidence_ref must be l1:<event-id> or l2/l3/l4:<memory-id>:<revision-id>"
+        }
+      ]
+    },
+    "memhub_branch": {
+      "success": [
+        {
+          "project": "alpha",
+          "branches": []
+        }
+      ],
+      "error": [
+        {
+          "isError": true,
+          "message": "name is required"
+        }
+      ]
+    },
+    "memhub_skill": {
+      "success": [
+        {
+          "summary": {
+            "skill_id": "skill-surface-1",
+            "executions": 0,
+            "invoked": 0,
+            "successes": 0,
+            "failures": 0,
+            "user_corrections": 0,
+            "failure_rate": 0,
+            "correction_rate": 0,
+            "reliability": 0.5,
+            "successful_executions": 0,
+            "repeat_loads": 0,
+            "loaded_estimated_tokens": 0,
+            "promotion_state": "insufficient_evidence",
+            "promotion_score": 0,
+            "last_stage": null,
+            "last_timestamp": null
+          },
+          "status": "activated",
+          "source_skill_id": "surface-snapshot-procedure",
+          "source_skill_version": "1.0.0"
+        }
+      ],
+      "error": [
+        {
+          "isError": true,
+          "message": "memory core HTTP 404: {\"error\":\"not_found\"}"
+        }
+      ]
+    },
+    "memhub_distill": {
+      "success": [
+        {
+          "contract": {
+            "version": "memhub-distill-v3",
+            "executor": "connected_mcp_or_harness_model",
+            "memhub_role": "evidence_boundary_schema_validation_provenance_commit",
+            "rules": [
+              "Ground claims in supplied or explicitly referenced evidence; do not invent user facts.",
+              "Keep content source separate from the model/harness that performs distillation.",
+              "Respect L1 source_kinds: user_said is direct user evidence; agent_inferred, tool_output, and imported are not direct user assertions and must not silently override user-confirmed L3 truth. Treat conflicts as evidence for review/candidate updates rather than automatic replacement.",
+              "Do not turn system/developer prompts, tool schemas, safety policies, ambient suggestion prompts, or transient test instructions into user memory.",
+              "Use project scope only when the project is explicit or deterministically conversation-bound.",
+              "For L3 and L4, use exact immutable L2/L3 revision refs returned by Memhub (for example l2:<memory-id>:<revision-id>); never rebuild evidence from a stable Memory id or silently resolve the latest revision.",
+              "L2 is a project-scoped chronological development narrative derived from L1 turns; preserve sequence, state changes, decisions, current truth, and superseded history. Routine L2 submits are full canonical timeline replacements: retain prior timeline events and merge the new L1 evidence; delta-only replacement content is invalid.",
+              "When producing L2, also provide a concise evidence-backed project description when the project objective/scope/current focus is supported; Memhub stores it as distilled routing metadata without overwriting an explicit manual description.",
+              "L3 is a project-scoped set of durable user rules, preferences, experience, and working habits derived from L2; do not promote one-off events without support.",
+              "L4 is an account-scoped cross-project user profile derived from L3 artifacts; require repeated or cross-project evidence and do not infer sensitive traits.",
+              "Skill is an executable reusable procedure and is orthogonal to L1-L4.",
+              "Every Skill must use a stable artifact_id as source identity across revisions and a numeric dotted version; revisions replace/archive the prior current Skill instead of creating parallel active truths.",
+              "Prefer a compact durable artifact over copying raw conversation text.",
+              "Bilingual output (required for L2, L3, L4 and project_description): write every distilled artifact natively in both English and Simplified Chinese, so collaborators who read only one language can hand over work. Keep each item paired: a bilingual heading (\"English / 中文\"), then the English text, then the Chinese text with the same facts, dates, numbers, identifiers, paths and commands. Do not translate code, file paths, commands, IDs, slugs, version strings or quoted evidence. Do not let the two languages drift: a fact present in one must be present in the other. When updating an existing Chinese-only artifact, keep its facts unchanged and add the missing language rather than rewriting history."
+            ]
+          }
+        }
+      ],
+      "error": [
+        {
+          "isError": true,
+          "message": "Input validation error: Invalid arguments for tool memhub_distill: data/action must be equal to one of the allowed values"
+        }
+      ]
+    },
+    "memmy_project_list": {
+      "success": [
+        {
+          "projects": [
+            {
+              "project": "alpha",
+              "name": "Alpha",
+              "aliases": [
+                "alph"
+              ],
+              "state": "active",
+              "descriptionSource": "manual",
+              "description": "Surface snapshot fixture project.",
+              "pendingTodoCount": 0
+            }
+          ],
+          "matches": [],
+          "instructions": "Prefer an existing canonical project when name/alias and description describe the same work. If still ambiguous, ask the user. Only create through memmy_project_manage after explicit authorization."
+        }
+      ]
+    },
+    "memhub_todo": {
+      "success": [
+        {
+          "scope": "account",
+          "status": "pending",
+          "projects": [],
+          "total": 0
+        }
+      ],
+      "error": [
+        {
+          "isError": true,
+          "message": "unknown project \"missing-project\". Use memmy_project_list before project-scoped operations. Similar: none"
+        }
+      ]
+    },
+    "memmy_project_manage": {
+      "success": [
+        {
+          "status": "awaiting_user_authorization",
+          "operation": "create",
+          "payload": {
+            "project": "beta",
+            "description": "Surface snapshot project."
+          },
+          "impact": {
+            "createsCanonicalProject": "beta",
+            "similarProjects": [],
+            "requiresDescription": true
+          },
+          "instructions": "Show this plan to the user. Call action=execute with authorization_id only after the user explicitly approves this exact plan."
+        }
+      ],
+      "error": [
+        {
+          "isError": true,
+          "message": "invalid or already-used project authorization"
+        }
+      ]
+    },
+    "memmy_project": {
+      "success": [
+        {
+          "project": "alpha",
+          "resolution_source": "explicit_project",
+          "persisted": false
+        }
+      ],
+      "error": [
+        {
+          "isError": true,
+          "message": "Input validation error: Invalid arguments for tool memmy_project: data/action must be equal to one of the allowed values"
+        }
+      ]
+    },
+    "memhub_result": {
+      "success": [
+        {
+          "mode": "chunked",
+          "offset": 0,
+          "next_offset": 10000,
+          "total_chars": 20016,
+          "chunk_chars": 10000,
+          "complete": false,
+          "expires_in_seconds": 3600,
+          "chunk_sha256": "66689a283488d19ce10fedf1e586b566cc4301fc56ba33b0d22b38a8a6469105"
+        }
+      ],
+      "error": [
+        {
+          "isError": true,
+          "message": "invalid result_id"
+        }
+      ]
+    }
+  },
+  "cross_account": {
+    "memhub_skill_cross_account": {
+      "isError": true,
+      "message": "Skill is outside current account scope"
+    }
+  },
+  "http": {
+    "health": {
+      "status": 200,
+      "ok": true,
+      "service": "memhub",
+      "degraded": [],
+      "coreBuildMatches": false,
+      "cacheControl": "no-store",
+      "contentType": "application/json"
+    },
+    "host_rejected": 403,
+    "origin_rejected": 403,
+    "remote_without_jwt": {
+      "status": 401,
+      "body": {
+        "error": "missing_cloudflare_access_jwt"
+      }
+    },
+    "local_admin_without_token": {
+      "status": 401,
+      "wwwAuthenticate": "Basic realm=\"Memhub local admin\", charset=\"UTF-8\""
+    },
+    "unknown_account_selection": {
+      "status": 404,
+      "body": {
+        "error": "account_not_found"
+      }
+    },
+    "user_admin_action_forbidden": 403
+  }
+}

@@ -20,7 +20,7 @@ cd Memhub
 bash editions/local/linux/install.sh
 ```
 
-安装器默认使用 `MEMHUB_HOME=$HOME/.memhub`。它为 Memory Core 准备配置和本地 SQLite，Memory Core 监听 `127.0.0.1:18960`；Memhub MCP runtime 使用 3001。systemd user units 包括 `memhub-core.service`、`memhub.service` 与 `memhub-stack.target`。
+安装目录默认为 `MEMHUB_HOME=$HOME/.memmy/memhub`（优先级：显式 `--home` > `MEMHUB_HOME` > 已存在的 `~/.memmy/memhub` > 含 `memhub.env` 或 `accounts.json` 的旧目录 `$HOME/.memhub`，旧目录原地沿用并只警告一次，绝不迁移或复制数据）。网关控制根是另一个概念：显式 `--state-root` > `MEMHUB_STATE_ROOT` > 存在 `accounts.json` 的 `<home>/server` > `<home>`。版本安装会同时设置 `MEMHUB_HOME=<home>` 与 `MEMHUB_STATE_ROOT=<home>/server`；两者不是别名，可以合法地不同。它为 Memory Core 准备配置和本地 SQLite，Memory Core 监听 `127.0.0.1:18960`；Memhub MCP runtime 使用 3001。systemd user units 包括 `memhub-core.service`、`memhub.service` 与 `memhub-stack.target`，全部由 `deploy/install-user-service.sh` 生成并显式设置 `MEMHUB_HOME`。
 
 安装完成后依次检查：
 

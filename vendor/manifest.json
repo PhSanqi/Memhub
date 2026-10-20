@@ -1,11 +1,21 @@
 {
   "format": "memhub-vendor-manifest-v1",
-  "createdAt": "2026-10-08T08:04:00.000Z",
+  "createdAt": "2026-10-20T11:12:41.600Z",
+  "upstream": {
+    "repo": "https://github.com/MemTensor/memmy-agent",
+    "tag": "v1.1.4",
+    "commit": "98146714",
+    "memoryServiceVersion": "2.1.2",
+    "reviewedThrough": "4da4f9e0 (v1.2.2)",
+    "absorbed": [
+      "478ae78c"
+    ]
+  },
   "components": {
     "memory": {
       "path": "memory-core/src",
-      "files": 193,
-      "sha256": "d64cfb54bf56a0ffdf6f4977a5969ab32e710533e01010531ad539c48fec60f8"
+      "files": 194,
+      "sha256": "5ade7ca2c92a3eee1bf69d4f8890175ca4edf64c6842d0042ae7fb1e077a561a"
     },
     "agentSource": {
       "path": "agent-source-core",

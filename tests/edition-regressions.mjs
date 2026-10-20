@@ -5,6 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveControlRoot, resolveCoreState, resolveHome } from "../src/state-root.mjs";
 
 const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 const packageLock = JSON.parse(await readFile(new URL("../package-lock.json", import.meta.url), "utf8"));
@@ -80,6 +81,132 @@ assert.match(deployTarget, /Requires=memhub-core\.service memhub\.service/);
 assert.equal(existsSync(resolve(fileURLToPath(new URL("../deploy/memhub-bridge.service.in", import.meta.url)))), false);
 assert.equal(existsSync(resolve(fileURLToPath(new URL("../deploy/install-bridge-user-service.sh", import.meta.url)))), false);
 
+// P4: two shared roots — install home and gateway control root.
+{
+  const sandbox = await mkdtemp(join(tmpdir(), "memhub-state-root-"));
+  try {
+    const home = join(sandbox, "home");
+    await mkdir(home);
+    const defaultRoot = join(home, ".memmy", "memhub");
+
+    // Home: default and existing unified root.
+    assert.equal(resolveHome({ env: {}, homeDir: home }), defaultRoot);
+    await mkdir(defaultRoot, { recursive: true });
+    assert.equal(resolveHome({ env: {}, homeDir: home }), defaultRoot);
+
+    // Home precedence: explicit --home > MEMHUB_HOME. MEMHUB_STATE_ROOT names
+    // the gateway control root and never affects the home.
+    assert.equal(resolveHome({ env: { MEMHUB_HOME: join(sandbox, "home-env") }, homeDir: home }), join(sandbox, "home-env"));
+    assert.equal(
+      resolveHome({ explicit: join(sandbox, "explicit"), env: { MEMHUB_HOME: join(sandbox, "home-env") }, homeDir: home }),
+      join(sandbox, "explicit")
+    );
+    assert.equal(
+      resolveHome({ env: { MEMHUB_STATE_ROOT: join(sandbox, "control-env") }, homeDir: home }),
+      defaultRoot,
+      "MEMHUB_STATE_ROOT is not a home alias"
+    );
+
+    // Control root: explicit --state-root > MEMHUB_STATE_ROOT
+    // > <home>/server when it holds accounts.json > flat <home>.
+    assert.equal(resolveControlRoot({ env: {}, homeDir: home }), defaultRoot,
+      "flat home when server/accounts.json does not exist");
+    const editionRoot = join(sandbox, "edition");
+    await mkdir(join(editionRoot, "server"), { recursive: true });
+    await writeFile(join(editionRoot, "server", "accounts.json"), "[]\n");
+    assert.equal(
+      resolveControlRoot({ env: { MEMHUB_HOME: editionRoot }, homeDir: home }),
+      join(editionRoot, "server"),
+      "an existing <home>/server/accounts.json keeps the edition layout"
+    );
+    // Edition environment: MEMHUB_HOME=<home>, MEMHUB_STATE_ROOT=<home>/server.
+    // The historically different values are legal and must not raise.
+    const editionEnv = { HOME: editionRoot, MEMHUB_HOME: editionRoot, MEMHUB_STATE_ROOT: join(editionRoot, "server") };
+    assert.equal(resolveHome({ env: editionEnv }), editionRoot);
+    assert.equal(resolveControlRoot({ env: editionEnv }), join(editionRoot, "server"));
+    assert.equal(
+      resolveControlRoot({ env: { MEMHUB_STATE_ROOT: join(sandbox, "control-env") }, homeDir: home }),
+      join(sandbox, "control-env")
+    );
+    assert.equal(
+      resolveControlRoot({ explicit: join(sandbox, "control-explicit"), env: editionEnv }),
+      join(sandbox, "control-explicit")
+    );
+
+    // Production flat layout: only --state-root ~/.memmy/memhub; MEMHUB_HOME
+    // unset. Both roots resolve to the same flat directory.
+    assert.equal(resolveControlRoot({ explicit: defaultRoot, env: {} }), defaultRoot);
+    assert.equal(resolveHome({ env: {}, homeDir: home }), defaultRoot);
+    assert.equal(resolveControlRoot({ env: { MEMHUB_HOME: defaultRoot }, homeDir: home }), defaultRoot);
+
+    // Windows uses USERPROFILE for the home and honors MEMHUB_STATE_ROOT for
+    // the control root.
+    assert.equal(
+      resolveHome({ env: { USERPROFILE: "C:\\Users\\owner", HOME: "/wrong" }, platform: "win32" }),
+      "C:\\Users\\owner\\.memmy\\memhub"
+    );
+    assert.equal(
+      resolveControlRoot({ env: { USERPROFILE: "C:\\Users\\owner", MEMHUB_STATE_ROOT: "C:\\Users\\owner\\data" }, platform: "win32" }),
+      "C:\\Users\\owner\\data"
+    );
+
+    // Legacy ~/.memhub is adopted in place for the home only when it holds
+    // real state, and the warning is printed once.
+    const legacyHome = join(sandbox, "legacy-env");
+    await mkdir(legacyHome);
+    const legacyRoot = join(legacyHome, ".memhub");
+    await mkdir(legacyRoot);
+    const warnings = [];
+    assert.equal(resolveHome({ env: {}, homeDir: legacyHome, warn: (message) => warnings.push(message) }), defaultRootOf(legacyHome));
+    assert.equal(resolveHome({ env: {}, homeDir: legacyHome, warn: (message) => warnings.push(message) }), defaultRootOf(legacyHome));
+    assert.equal(warnings.length, 0, "an empty ~/.memhub is not adopted");
+    await writeFile(join(legacyRoot, "memhub.env"), "MEMHUB_MEMORY_TOKEN=test\n");
+    assert.equal(resolveHome({ env: {}, homeDir: legacyHome, warn: (message) => warnings.push(message) }), legacyRoot);
+    assert.equal(resolveHome({ env: {}, homeDir: legacyHome, warn: (message) => warnings.push(message) }), legacyRoot);
+    assert.equal(warnings.length, 1, "legacy adoption warns exactly once");
+    assert.equal(resolveControlRoot({ env: {}, homeDir: legacyHome, warn: () => {} }), legacyRoot,
+      "a flat legacy home is also the control root");
+
+    const accountsHome = join(sandbox, "legacy-accounts");
+    await mkdir(join(accountsHome, ".memhub"), { recursive: true });
+    await writeFile(join(accountsHome, ".memhub", "accounts.json"), "[]\n");
+    assert.equal(resolveHome({ env: {}, homeDir: accountsHome, warn: () => {} }), join(accountsHome, ".memhub"));
+
+    // Core defaults to <home>/core and adopts legacy ~/.memhub/core in place.
+    // It follows the home, never MEMHUB_STATE_ROOT.
+    const coreHome = join(sandbox, "core-home");
+    await mkdir(coreHome);
+    assert.equal(
+      resolveCoreState({ env: {}, homeDir: coreHome }).dbPath,
+      join(coreHome, ".memmy", "memhub", "core", "memory.sqlite")
+    );
+    const editionCore = resolveCoreState({
+      env: { MEMHUB_HOME: editionRoot, MEMHUB_STATE_ROOT: join(editionRoot, "server") },
+      homeDir: home
+    });
+    assert.equal(editionCore.stateRoot, editionRoot);
+    assert.equal(editionCore.dbPath, join(editionRoot, "core", "memory.sqlite"),
+      "core paths follow the home, not MEMHUB_STATE_ROOT");
+    const legacyCore = join(coreHome, ".memhub", "core");
+    await mkdir(legacyCore, { recursive: true });
+    await writeFile(join(legacyCore, "memory.sqlite"), "");
+    assert.equal(resolveCoreState({ env: {}, homeDir: coreHome }).dbPath, join(legacyCore, "memory.sqlite"));
+    await mkdir(join(coreHome, ".memmy", "memhub", "core"), { recursive: true });
+    await writeFile(join(coreHome, ".memmy", "memhub", "core", "memory.sqlite"), "");
+    assert.equal(
+      resolveCoreState({ env: {}, homeDir: coreHome }).dbPath,
+      join(coreHome, ".memmy", "memhub", "core", "memory.sqlite"),
+      "an existing unified core database wins over the legacy one"
+    );
+  } finally {
+    await rm(sandbox, { recursive: true, force: true });
+  }
+}
+
+function defaultRootOf(home) {
+  return join(home, ".memmy", "memhub");
+}
+
 const managedStack = await readFile(new URL("../scripts/run-stack.mjs", import.meta.url), "utf8");
 const windowsTaskOwnership = await readFile(new URL("../scripts/windows-task-ownership.ps1", import.meta.url), "utf8");
 const windowsStackOwner = await readFile(new URL("../scripts/windows-stack-owner.ps1", import.meta.url), "utf8");
@@ -153,6 +280,44 @@ if (process.platform === "linux") {
       assert.equal(existsSync(cleanState), false);
     }
 
+    // P0: production Linux uses the flat layout (gateway control files
+    // directly in ~/.memmy/memhub). Rendering on such a home must keep the
+    // gateway on the flat root and keep the existing Memmy core paths.
+    {
+      const home = join(sandbox, "flat-render-home");
+      const state = join(home, ".memmy", "memhub");
+      const coreHome = join(home, ".memmy");
+      const coreConfig = join(coreHome, "config.yaml");
+      const coreDb = join(coreHome, "memory-service", "memory.sqlite");
+      await mkdir(state, { recursive: true });
+      await mkdir(join(coreHome, "memory-service"), { recursive: true });
+      await writeFile(join(state, "accounts.json"), "[]\n");
+      await writeFile(join(state, "project-registry.json"), "{}\n");
+      await writeFile(coreConfig, "memmyMemory: {}\n");
+      await writeFile(coreDb, "");
+      const renderDir = join(home, "rendered-units");
+      const env = { ...process.env, HOME: home, NODE: process.execPath, PATH: `${bin}:${process.env.PATH ?? ""}` };
+      delete env.MEMHUB_HOME;
+      delete env.MEMHUB_STATE_ROOT;
+      const rendered = spawnSync("bash", [
+        join(repo, "deploy/install-user-service.sh"),
+        "--render-only", renderDir
+      ], { cwd: repo, encoding: "utf8", env });
+      assert.equal(rendered.status, 0, rendered.stdout + rendered.stderr);
+      const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const gateway = await readFile(join(renderDir, "memhub.service"), "utf8");
+      const core = await readFile(join(renderDir, "memhub-core.service"), "utf8");
+      assert.match(gateway, new RegExp(`--state-root ${escape(state)}(?=\\s)`),
+        "flat production root stays flat");
+      assert.doesNotMatch(gateway, new RegExp(`--state-root ${escape(state)}/server`));
+      assert.match(gateway, new RegExp(`Environment="MEMHUB_HOME=${escape(state)}"`));
+      assert.match(core, new RegExp(`--config ${escape(coreConfig)}(?=\\s)`),
+        "existing production core config path is preserved");
+      assert.match(core, new RegExp(`--db ${escape(coreDb)}(?=\\s)`),
+        "existing production core database path is preserved");
+      assert.match(core, new RegExp(`Environment="MEMMY_HOME=${escape(coreHome)}"`));
+    }
+
     for (const edition of ["local", "server"]) {
       const home = join(sandbox, `fresh-${edition}`);
       const state = join(home, "fresh-state");
@@ -167,6 +332,32 @@ if (process.platform === "linux") {
       const beforeConfig = await readFile(config, "utf8");
       const beforeEnv = await readFile(envFile, "utf8");
       assert.ok(JSON.parse(beforeConfig).memmyMemory.storage.token);
+
+      // P4: both installer entrypoints render identical unit text from the
+      // one generator (render into a temp dir; systemd is never touched).
+      const renderDir = join(home, "rendered-units");
+      const rendered = spawnSync("bash", [
+        join(repo, "deploy/install-user-service.sh"),
+        "--render-only", renderDir,
+        "--home", state,
+        "--core-config", config,
+        "--core-db", join(state, "memory", "memory.sqlite"),
+        "--http-path", "/mcp"
+      ], { cwd: repo, encoding: "utf8", env });
+      assert.equal(rendered.status, 0, `${edition} render: ${rendered.stdout}\n${rendered.stderr}`);
+      for (const unit of ["memhub.service", "memhub-core.service", "memhub-stack.target"]) {
+        assert.equal(
+          await readFile(join(home, ".config", "systemd", "user", unit), "utf8"),
+          await readFile(join(renderDir, unit), "utf8"),
+          `${edition}: ${unit} text must be identical via both entrypoints`
+        );
+        const text = await readFile(join(renderDir, unit), "utf8");
+        if (unit === "memhub.service" || unit === "memhub-core.service") {
+          assert.match(text, new RegExp(`Environment="MEMHUB_HOME=${state.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`));
+        }
+      }
+      assert.match(await readFile(join(renderDir, "memhub.service"), "utf8"), /--state-root .*\/server/);
+
       const repeat = spawnSync("bash", [script], { cwd: repo, encoding: "utf8", env });
       assert.equal(repeat.status, 2);
       assert.equal(await readFile(config, "utf8"), beforeConfig);

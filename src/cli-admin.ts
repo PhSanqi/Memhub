@@ -1,5 +1,4 @@
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import {
   addAccount,
   bindCloudflareEmail,
@@ -8,13 +7,14 @@ import {
   listAccounts,
   setAccountRole
 } from "./auth.js";
+import { resolveControlRoot } from "./state-root.mjs";
 
 function defaultStateRoot(): string {
-  return resolve(process.env.MEMHUB_STATE_ROOT ?? join(homedir(), ".memmy", "memhub"));
+  return resolve(resolveControlRoot());
 }
 
 function stateRootFromArgs(argv: string[]): { stateRoot: string; args: string[] } {
-  let stateRoot = defaultStateRoot();
+  let stateRoot: string | undefined;
   const args = [...argv];
   for (let i = 0; i < args.length;) {
     if (args[i] !== "--state-root") { i += 1; continue; }
@@ -23,7 +23,7 @@ function stateRootFromArgs(argv: string[]): { stateRoot: string; args: string[] 
     stateRoot = value;
     args.splice(i, 2);
   }
-  return { stateRoot, args };
+  return { stateRoot: stateRoot ?? defaultStateRoot(), args };
 }
 
 export async function runAdminTokenCommand(argv: string[]): Promise<void> {

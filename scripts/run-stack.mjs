@@ -7,6 +7,7 @@ import { createServer } from "node:net";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ManagedProcessStack } from "../dist/process-stack.js";
+import { resolveHome } from "../dist/state-root.mjs";
 
 const stackEntrypoint = resolve(fileURLToPath(import.meta.url));
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -24,7 +25,8 @@ const port = (flag, fallback) => {
 const corePort = port("--core-port", 18960);
 const gatewayPort = port("--gateway-port", 3001);
 if (corePort === gatewayPort) throw new Error("Memhub stack ports must be distinct");
-const home = resolve(value("--home", process.env.MEMHUB_HOME ?? join(process.env.USERPROFILE ?? process.env.HOME ?? repoRoot, ".memhub")));
+const homeFlag = value("--home", undefined);
+const home = resolve(homeFlag ?? resolveHome());
 const action = value("--action", "serve");
 const lockPath = join(home, ".memhub-stack.lock");
 const stopRequestPath = `${lockPath}.stop`;
@@ -270,7 +272,7 @@ function exactWindowsStackInvocation(commandLine, nodePath, scriptPath, stateHom
     '^\\s*"?' + escape(normalize(nodePath)) +
     '"?\\s+"?' + escape(normalize(scriptPath)) +
     '"?\\s+--home\\s+"?' + escape(normalize(stateHome)) +
-    '"?(?<extra>(?:\\s+--(?:core|gateway)-port\\s+[0-9]{1,5}){0,2})\\s*$'
+    '"?(?:\\s+--action\\s+serve)?(?<extra>(?:\\s+--(?:core|gateway)-port\\s+[0-9]{1,5}){0,2})\\s*$'
   );
   const match = command.match(pattern);
   if (!match) return false;

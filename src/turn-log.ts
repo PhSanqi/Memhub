@@ -1,14 +1,20 @@
 import { createHash } from "node:crypto";
 import {
   captureIsFullyExcludedFromMemory,
+  captureProjectLookup,
+  scheduleCaptureProjectBackfill,
+  readCaptureProjectIndexPage,
+  readIndexedCaptureEvent,
   isCaptureIngested,
-  listCaptureEvents,
   markCaptureIngested,
   normalizeCaptureEvent,
   storeCaptureEvent,
+  withCaptureIngestAttempt,
   type MemhubCaptureEvent,
-  type StoredCaptureEvent
+  type StoredCaptureEvent,
+  TRUSTED_TURN_SOURCE_KINDS
 } from "./capture.js";
+import { resolveCaptureProject } from "./capture-project-resolution.js";
 import { ingestCaptureIntoMemory } from "./capture-ingest.js";
 import type { MemhubRuntime } from "./runtime.js";
 
@@ -44,6 +50,7 @@ export interface L1TurnView {
   previous_event_id?: string;
   timestamp: string;
   project_hint?: string;
+  resolved_project_id?: string | null;
   user_text?: string;
   assistant_text?: string;
   reasoning_summary?: string;
@@ -66,6 +73,10 @@ export async function upsertL1Turn(input: {
 }> {
   const event = normalizeCaptureEvent({
     ...input.turn,
+    provenance: {
+      ...(input.turn.provenance ?? {}),
+      source_kinds: { ...TRUSTED_TURN_SOURCE_KINDS }
+    },
     event_id: input.turn.event_id ?? stableTurnEventId(
       input.runtime.accountId,
       input.turn.continuity_id ?? input.turn.conversation_id,
@@ -74,16 +85,12 @@ export async function upsertL1Turn(input: {
     timestamp: input.turn.timestamp ?? new Date().toISOString()
   });
 
-  const knownProjects = await input.runtime.router.listProjects(input.runtime.accountId);
-  if (event.project_hint && knownProjects.length > 0 && !knownProjects.includes(event.project_hint)) {
-    throw new Error(`unknown project for account: ${event.project_hint}`);
-  }
-
   const stored = await storeCaptureEvent(input.stateRoot, {
     account_id: input.runtime.accountId,
     actor_id: input.actorId
   }, event);
-  const projectId = stored.event.project_hint ?? null;
+  const projectId = (await resolveCaptureProject(stored.event,
+    ref => input.runtime.projects.resolve(input.runtime.accountId, ref), input.stateRoot)).projectId;
 
   let ingestion: unknown;
   if (stored.event.capture_status === "complete" && captureIsFullyExcludedFromMemory(stored.event)) {
@@ -95,23 +102,23 @@ export async function upsertL1Turn(input: {
     stored.event.capture_status === "complete" &&
     !(await isCaptureIngested(input.stateRoot, input.runtime.accountId, stored.event.event_id))
   ) {
-    const result = await ingestCaptureIntoMemory({
-      event: stored.event,
-      actor: {
-        account_id: input.runtime.accountId,
-        actor_id: input.actorId
-      },
-      runtime: input.runtime,
-      projectId
+    const attempt = await withCaptureIngestAttempt({
+      stateRoot: input.stateRoot,
+      accountId: input.runtime.accountId,
+      eventId: stored.event.event_id,
+      expectedEvent: stored.event,
+      ingest: (event) => ingestCaptureIntoMemory({
+        event,
+        actor: { account_id: input.runtime.accountId, actor_id: input.actorId },
+        runtime: input.runtime,
+        projectId
+      })
     });
-    ingestion = result;
-    if (result.ingested) {
-      await markCaptureIngested(input.stateRoot, input.runtime.accountId, stored.event.event_id);
-    }
+    ingestion = attempt.result;
   }
 
   return {
-    turn: turnView(stored.event, Boolean(ingestion) || await isCaptureIngested(
+    turn: turnView(stored.event, await isCaptureIngested(
       input.stateRoot,
       input.runtime.accountId,
       stored.event.event_id
@@ -130,14 +137,38 @@ export async function listL1Turns(input: {
   conversationId?: string;
   projectId?: string;
   limit?: number;
+  offset?: number;
+  resolveProject?: (ref: string) => Promise<string | null>;
 }): Promise<L1TurnView[]> {
-  const items = await listCaptureEvents(input.stateRoot, input.accountId, {
-    ...(input.continuityId ? { continuityId: input.continuityId } : {}),
-    ...(input.conversationId ? { conversationId: input.conversationId } : {}),
-    ...(input.projectId ? { projectId: input.projectId } : {}),
-    limit: Math.max(1, Math.min(500, Math.trunc(input.limit ?? 100)))
-  });
-  return items.map((item) => turnView(item, item.ingested));
+  const page = { projectIds: input.projectId ? [input.projectId] : [], continuityId: input.continuityId,
+    conversationId: input.conversationId, includeAssignments: true,
+    limit: Math.max(1, Math.min(500, Math.trunc(input.limit ?? 100))), offset: input.offset };
+  const registryLookup = input.resolveProject ?? captureProjectLookup(input.stateRoot, input.accountId);
+  const lookups = new Map<string, Promise<string | null>>();
+  const lookup = (ref: string) => {
+    if (!lookups.has(ref)) lookups.set(ref, registryLookup(ref));
+    return lookups.get(ref)!;
+  };
+  // Resolve a bounded pending probe before SQL pagination; cached nonmatches never consume its window.
+  const pendingIds: string[] = [];
+  if (input.projectId) {
+    const pending = await readCaptureProjectIndexPage(input.stateRoot, input.accountId,
+      { ...page, resolution: "pending", offset: 0, limit: 500 });
+    for (const entry of pending) {
+      const result = await resolveCaptureProject(entry, lookup, undefined, undefined, entry.assignment_snapshot);
+      if (result.projectId === input.projectId) pendingIds.push(entry.event_id);
+    }
+  }
+  const entries = await readCaptureProjectIndexPage(input.stateRoot, input.accountId,
+    { ...page, resolution: "cached", resolvedPendingIds: pendingIds });
+  const views: L1TurnView[] = [];
+  for (const entry of entries) {
+    const item = await readIndexedCaptureEvent(input.stateRoot, entry);
+    const resolution = await resolveCaptureProject(item, lookup, undefined, undefined, entry.assignment_snapshot);
+    views.push({ ...turnView(item, entry.ingested), resolved_project_id: resolution.projectId });
+  }
+  scheduleCaptureProjectBackfill(input.stateRoot, input.accountId);
+  return views;
 }
 
 export async function recentL1Continuity(input: {

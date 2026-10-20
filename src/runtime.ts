@@ -1,4 +1,4 @@
-import { homedir } from "node:os";
+import { closeCaptureIndexDb } from "./capture.js";
 import { join, resolve } from "node:path";
 import {
   FileProjectArchitectureSource,
@@ -10,6 +10,7 @@ import { ContextRouter } from "./context-router.js";
 import { LocalMemoryRestClient } from "./local-memory-client.js";
 import { defaultMemoryUserId, MemoryRestContextSource } from "./memory-source.js";
 import { JsonProjectRegistry } from "./project-registry.js";
+import { resolveControlRoot } from "./state-root.mjs";
 
 export interface MemhubRuntimeOptions {
   accountId?: string;
@@ -43,6 +44,7 @@ export interface MemhubRuntime {
   projects: JsonProjectRegistry;
   branches: JsonProjectBranchStore;
   source: MemhubSourceContext;
+  dispose(): void;
 }
 
 export function resolveLocalAccountId(options: Pick<MemhubRuntimeOptions, "accountId" | "ownerAccountId"> = {}): string {
@@ -66,12 +68,11 @@ export function createMemhubRuntime(options: MemhubRuntimeOptions = {}): MemhubR
   const controlRoot = resolve(
     options.controlRoot ??
     process.env.MEMHUB_CONTROL_ROOT ??
-    process.env.MEMHUB_STATE_ROOT ??
-    join(homedir(), ".memmy", "memhub")
+    resolveControlRoot()
   );
 
   const memoryClient = new LocalMemoryRestClient({ endpoint: memoryEndpoint, token: memoryToken });
-  const memory = new MemoryRestContextSource(memoryClient);
+  const memory = new MemoryRestContextSource(memoryClient, controlRoot);
   const architectureDisabled = options.disableArchitecture ||
     process.env.MEMHUB_ARCHITECTURE === "0" ||
     process.env.MEMHUB_NORMIFY === "0";
@@ -99,7 +100,8 @@ export function createMemhubRuntime(options: MemhubRuntimeOptions = {}): MemhubR
   ));
   const router = new ContextRouter(memory, architecture, projects, branches);
   const source = options.source ?? { platform: "local", transport: "local" };
-  return { accountId, userId, memoryClient, router, memory, architecture, projects, branches, source };
+  return { accountId, userId, memoryClient, router, memory, architecture, projects, branches, source,
+    dispose: () => closeCaptureIndexDb(controlRoot) };
 }
 
 function requireNonEmpty(value: string, field: string): string {

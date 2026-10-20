@@ -1,7 +1,13 @@
 import type { ProjectScopeResolution } from "./project-scope.js";
 import type { ContextRecallDiagnostics } from "./memory-source.js";
+import {
+  extractMarkdownHeadings,
+  selectPassages,
+  turnQueryTerms,
+  type TurnKnowledgePassage
+} from "./turn-knowledge-plan.js";
 
-export type ContextAuthority = "remembered" | "authoritative" | "observed";
+export type ContextAuthority = "remembered" | "authoritative" | "observed" | "evidence";
 export type ContextScope = "global" | "project" | "capability";
 
 export interface ContextItem {
@@ -26,6 +32,7 @@ export interface ContextItem {
 export interface ContextCapsuleInput {
   accountId: string;
   conversationId?: string;
+  continuityId?: string;
   resolution: ProjectScopeResolution;
   globalMemory?: readonly ContextItem[];
   projectMemory?: readonly ContextItem[];
@@ -40,6 +47,9 @@ export interface ContextCapsuleInput {
   } | null;
   maxContentBytes?: number;
   maxItemContentBytes?: number;
+  detail?: "brief" | "full";
+  queryTerms?: readonly string[];
+  query?: string;
 }
 
 export interface ContextCapsule {
@@ -71,14 +81,16 @@ export interface ContextCapsule {
 
 export const DEFAULT_CONTEXT_CONTENT_BYTES = 96_000;
 export const DEFAULT_CONTEXT_ITEM_BYTES = 24_000;
+export const BRIEF_CONTEXT_CONTENT_BYTES = 8_000;
+export const BRIEF_CONTEXT_ITEM_BYTES = 3_000;
 
 /**
  * Build the host-facing context envelope after project resolution.
  *
  * This is deliberately defensive: callers may pass broader candidate data,
  * but project-scoped items are only emitted for the one resolved project.
- * Ambiguous/no-project requests therefore cannot accidentally leak context
- * from another project into the model prompt.
+ * Without a resolved project, only unbound fresh evidence matching the
+ * request's explicit continuity may pass through.
  */
 export function buildContextCapsule(input: ContextCapsuleInput): ContextCapsule {
   const accountId = requireNonEmpty(input.accountId, "accountId");
@@ -89,14 +101,33 @@ export function buildContextCapsule(input: ContextCapsuleInput): ContextCapsule 
     item.scope === "capability" && item.authority === "remembered");
 
   const allowProject = input.resolution.recallScope === "global_and_project" && resolvedProjectId !== null;
-  const projectMemory = allowProject
-    ? filterItems(input.projectMemory, (item) =>
-        item.scope === "project" && item.projectId === resolvedProjectId && item.authority === "remembered")
-    : [];
+  const continuityId = normalizeOptional(input.continuityId);
+  const projectMemory = filterItems(input.projectMemory, (item) => {
+    if (item.scope !== "project") return false;
+    const freshEvidence = item.authority === "evidence" &&
+      item.provenance?.memoryLayer === "L1" && item.provenance.freshness === "undistilled";
+    if (allowProject) {
+      return item.projectId === resolvedProjectId && (item.authority === "remembered" || freshEvidence);
+    }
+    return resolvedProjectId === null && Boolean(continuityId) && item.projectId === undefined &&
+      freshEvidence && item.provenance?.continuityId === continuityId;
+  });
   const projectArchitecture = allowProject
     ? filterItems(input.projectArchitecture, (item) =>
         item.scope === "project" && item.projectId === resolvedProjectId && item.authority === "authoritative")
     : [];
+
+  const isBrief = input.detail === "brief";
+  const defaultTotalBytes = isBrief ? BRIEF_CONTEXT_CONTENT_BYTES : DEFAULT_CONTEXT_CONTENT_BYTES;
+  const defaultItemBytes = isBrief ? BRIEF_CONTEXT_ITEM_BYTES : DEFAULT_CONTEXT_ITEM_BYTES;
+  const maxContentBytes = normalizeBudget(input.maxContentBytes, defaultTotalBytes, 2_000, 512_000);
+  const maxItemContentBytes = normalizeBudget(input.maxItemContentBytes, defaultItemBytes, 1_000, 128_000);
+
+  const queryTerms = input.queryTerms ?? (
+    input.query ? turnQueryTerms(input.query, {
+      retrievalDiagnostics: input.retrievalDiagnostics
+    } as ContextCapsule) : []
+  );
 
   const budgeted = applyContextBudget({
     globalMemory,
@@ -104,8 +135,10 @@ export function buildContextCapsule(input: ContextCapsuleInput): ContextCapsule 
     reusableSkills,
     projectArchitecture
   }, {
-    maxContentBytes: normalizeBudget(input.maxContentBytes, DEFAULT_CONTEXT_CONTENT_BYTES, 16_000, 512_000),
-    maxItemContentBytes: normalizeBudget(input.maxItemContentBytes, DEFAULT_CONTEXT_ITEM_BYTES, 4_000, 128_000)
+    maxContentBytes,
+    maxItemContentBytes,
+    isBrief,
+    queryTerms
   });
 
   return {
@@ -132,7 +165,12 @@ type ContextCollections = Pick<ContextCapsule,
 
 function applyContextBudget(
   input: ContextCollections,
-  options: { maxContentBytes: number; maxItemContentBytes: number }
+  options: {
+    maxContentBytes: number;
+    maxItemContentBytes: number;
+    isBrief: boolean;
+    queryTerms: readonly string[];
+  }
 ): { items: ContextCollections; budget: ContextCapsule["contextBudget"] } {
   const keys = ["globalMemory", "projectMemory", "reusableSkills", "projectArchitecture"] as const;
   const output: ContextCollections = {
@@ -161,7 +199,10 @@ function applyContextBudget(
         cursor.set(key, input[key].length);
         continue;
       }
-      const bounded = boundContextItem(item, allowance);
+      const bounded = boundContextItem(item, allowance, {
+        isBrief: options.isBrief,
+        queryTerms: options.queryTerms
+      });
       output[key].push(bounded.item);
       emittedContentBytes += bounded.emittedBytes;
       remaining -= bounded.emittedBytes;
@@ -188,9 +229,66 @@ function applyContextBudget(
   };
 }
 
-function boundContextItem(item: ContextItem, maxBytes: number): { item: ContextItem; emittedBytes: number; truncated: boolean } {
+function boundContextItem(
+  item: ContextItem,
+  maxBytes: number,
+  options: { isBrief: boolean; queryTerms: readonly string[] }
+): { item: ContextItem; emittedBytes: number; truncated: boolean } {
   const originalBytes = Buffer.byteLength(item.content, "utf8");
   if (originalBytes <= maxBytes) return { item: { ...item }, emittedBytes: originalBytes, truncated: false };
+
+  if (options.isBrief) {
+    const itemMatched = matchedTerms(item);
+    const headings = extractMarkdownHeadings(item.content, 12);
+    const passages = selectPassages(item.content, options.queryTerms, itemMatched, "none");
+    const briefContent = passages.length > 0
+      ? buildExtractiveBrief(headings, passages, maxBytes)
+      : "";
+
+    if (briefContent) {
+      const emittedBytes = Buffer.byteLength(briefContent, "utf8");
+      return {
+        item: {
+          ...item,
+          content: briefContent,
+          provenance: {
+            ...(item.provenance ?? {}),
+            contextTruncated: true,
+            originalContentBytes: originalBytes,
+            emittedContentBytes: emittedBytes,
+            brief: {
+              originalBytes,
+              method: "extractive-passages"
+            }
+          }
+        },
+        emittedBytes,
+        truncated: true
+      };
+    }
+
+    const content = truncateUtf8HeadTail(item.content, maxBytes);
+    const emittedBytes = Buffer.byteLength(content, "utf8");
+    return {
+      item: {
+        ...item,
+        content,
+        provenance: {
+          ...(item.provenance ?? {}),
+          contextTruncated: true,
+          originalContentBytes: originalBytes,
+          emittedContentBytes: emittedBytes,
+          brief: {
+            originalBytes,
+            method: "head-tail"
+          }
+        }
+      },
+      emittedBytes,
+      truncated: true
+    };
+  }
+
   const content = truncateUtf8HeadTail(item.content, maxBytes);
   const emittedBytes = Buffer.byteLength(content, "utf8");
   return {
@@ -209,7 +307,59 @@ function boundContextItem(item: ContextItem, maxBytes: number): { item: ContextI
   };
 }
 
-function truncateUtf8HeadTail(value: string, maxBytes: number): string {
+function buildExtractiveBrief(
+  headings: readonly string[],
+  passages: readonly TurnKnowledgePassage[],
+  maxBytes: number
+): string {
+  const outlineLines = headings.length > 0
+    ? ["## Outline", ...headings.map((h) => `- ${h}`)]
+    : [];
+  const outlineText = outlineLines.length > 0 ? outlineLines.join("\n") + "\n\n" : "";
+  const outlineBytes = Buffer.byteLength(outlineText, "utf8");
+  if (outlineBytes >= maxBytes - 32) return "";
+
+  let currentText = outlineText;
+  let addedPassageCount = 0;
+
+  for (const passage of passages) {
+    const passageText = passage.heading
+      ? `### ${passage.heading}\n${passage.text}`
+      : passage.text;
+    const separator = addedPassageCount > 0 ? "\n\n" : "";
+    const candidate = `${currentText}${separator}${passageText}`;
+    if (Buffer.byteLength(candidate, "utf8") <= maxBytes) {
+      currentText = candidate;
+      addedPassageCount += 1;
+    } else {
+      if (addedPassageCount === 0) {
+        const remainingBytes = maxBytes - Buffer.byteLength(currentText + separator, "utf8");
+        if (remainingBytes >= 64) {
+          const truncated = utf8Prefix(passageText, remainingBytes);
+          currentText = `${currentText}${separator}${truncated}`;
+          addedPassageCount += 1;
+        }
+      }
+      break;
+    }
+  }
+
+  return addedPassageCount > 0 ? currentText.trim() : "";
+}
+
+function matchedTerms(item: ContextItem): string[] {
+  const retrieval = objectRecord(item.provenance?.retrievalV1);
+  const value = retrieval?.matchedTerms;
+  return Array.isArray(value) ? value.filter((term): term is string => typeof term === "string") : [];
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+export function truncateUtf8HeadTail(value: string, maxBytes: number): string {
   const marker = "\n… [truncated by Memhub context budget] …\n";
   const markerBytes = Buffer.byteLength(marker, "utf8");
   if (maxBytes <= markerBytes + 2) return utf8Prefix(value, maxBytes);
@@ -219,7 +369,7 @@ function truncateUtf8HeadTail(value: string, maxBytes: number): string {
   return utf8Prefix(value, headBytes) + marker + utf8Suffix(value, tailBytes);
 }
 
-function utf8Prefix(value: string, maxBytes: number): string {
+export function utf8Prefix(value: string, maxBytes: number): string {
   let low = 0;
   let high = value.length;
   while (low < high) {

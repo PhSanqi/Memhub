@@ -77,6 +77,18 @@ export interface DistillationPipelineAudit {
       reason: "missing_claim" | "multiple_claims" | "scope_mismatch" | "evidence_mismatch";
     } | null;
   };
+  content_health: {
+    mode: "read_only";
+    mutation: "none";
+    status: "healthy" | "attention";
+    checks: Array<{
+      code: string;
+      severity: "info" | "warning" | "error";
+      count: number;
+      summary: string;
+      suggested_action?: string;
+    }>;
+  };
   warnings: string[];
 }
 
@@ -295,6 +307,54 @@ export async function auditDistillationPipeline(input: {
     warnings.push("the current latest-per-project L3 evidence set has conflicting L4 queue provenance; manual repair is required and reconcile_l4 must fail closed");
   }
 
+  const contentHealthChecks: DistillationPipelineAudit["content_health"]["checks"] = [];
+  const addHealthCheck = (
+    code: string, severity: "info" | "warning" | "error", count: number, summary: string, suggestedAction?: string
+  ) => {
+    if (count <= 0) return;
+    contentHealthChecks.push({
+      code, severity, count, summary,
+      ...(suggestedAction ? { suggested_action: suggestedAction } : {})
+    });
+  };
+  addHealthCheck(
+    "DERIVATION_GAP_L2_L3", "warning", missingDerivedL3.length,
+    "Completed canonical L2 revisions are missing their derived L3 queue claim.",
+    "Use reconcile_derived after exact provenance review; never replay the completed L2 Core write."
+  );
+  addHealthCheck(
+    "DERIVATION_CONFLICT_L2_L3", "error", conflictingDerivedL3.length,
+    "Completed L2 revisions have conflicting L3 derivation provenance.",
+    "Keep automatic repair fail-closed and review the conflicting evidence manually."
+  );
+  addHealthCheck(
+    "DERIVATION_GAP_L3_L4", "warning", currentL3SetMissingL4,
+    "The current latest-per-project L3 evidence set lacks an L4 queue claim.",
+    "Inspect reconcile_l4 in dry-run mode before any mutation."
+  );
+  addHealthCheck(
+    "DERIVATION_CONFLICT_L3_L4", "error", currentL3SetConflictingL4,
+    "The current L3 evidence set has conflicting L4 derivation provenance.",
+    "Require manual review; do not replay completed L3 writes."
+  );
+  addHealthCheck(
+    "UNRESOLVED_PROJECT_EVIDENCE", "warning", unresolvedProject,
+    "Ingested L1 evidence cannot be assigned to one canonical project.",
+    "Repair project evidence explicitly instead of guessing a project."
+  );
+  addHealthCheck(
+    "COMPLETE_UNINGESTED", "warning", reviewableCompleteUningested.length,
+    "Complete L1 captures still require Core outcome/provenance review.",
+    "Use the explicit per-event recovery path only when frozen intent matches."
+  );
+  addHealthCheck(
+    "ACTIONABLE_FAILED_JOB", "error", jobs.filter((job) =>
+      job.status === "failed" && effectiveDistillationFailureKind(job) !== "invalid_legacy_evidence"
+    ).length,
+    "Current distillation jobs have actionable failures.",
+    "Inspect the failed job metadata and repair the existing pipeline; do not create a parallel worker."
+  );
+
   return {
     source: "read_only_durable_state",
     account_scoped: true,
@@ -351,6 +411,12 @@ export async function auditDistillationPipeline(input: {
         job_id: source.job_id, project_id: source.project_id!, reason
       })),
       current_l3_set_l4: currentL3SetL4Sample
+    },
+    content_health: {
+      mode: "read_only",
+      mutation: "none",
+      status: contentHealthChecks.some((check) => check.severity !== "info") ? "attention" : "healthy",
+      checks: contentHealthChecks.slice(0, 20)
     },
     warnings
   };

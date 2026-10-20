@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ManagedProcessStack } from "./process-stack.js";
 import { probeService } from "./service-readiness.js";
+import { resolveCoreState } from "./state-root.mjs";
 
 export interface EmbeddedMemoryCoreOptions {
   stateRoot?: string;
@@ -23,20 +23,14 @@ export class EmbeddedMemoryCore {
   private starting?: Promise<string>;
 
   constructor(options: EmbeddedMemoryCoreOptions = {}) {
-    const stateRoot = resolve(options.stateRoot ?? process.env.MEMHUB_STATE_ROOT ?? join(homedir(), ".memhub"));
+    // Clean installs use <state-root>/core; existing Memmy or legacy ~/.memhub
+    // files are adopted in place and never moved or copied.
+    const core = resolveCoreState({ explicit: options.stateRoot });
     const host = options.host ?? "127.0.0.1";
     const port = options.port ?? 18960;
     this.endpoint = `http://${host}:${port}`;
-    // Compatibility-first migration: an existing Memmy config/database can be
-    // adopted in place, while clean installs use ~/.memhub/core.
-    this.configPath = resolve(options.configPath ?? process.env.MEMHUB_CORE_CONFIG ?? legacyOr(
-      join(homedir(), ".memmy", "config.yaml"),
-      join(stateRoot, "core", "config.yaml")
-    ));
-    this.dbPath = resolve(options.dbPath ?? process.env.MEMHUB_CORE_DB ?? legacyOr(
-      join(homedir(), ".memmy", "memory-service", "memory.sqlite"),
-      join(stateRoot, "core", "memory.sqlite")
-    ));
+    this.configPath = resolve(options.configPath ?? process.env.MEMHUB_CORE_CONFIG ?? core.configPath);
+    this.dbPath = resolve(options.dbPath ?? process.env.MEMHUB_CORE_DB ?? core.dbPath);
     this.entrypoint = resolve(options.entrypoint ?? process.env.MEMHUB_MEMORY_CORE_ENTRY ?? defaultEntrypoint());
   }
 
@@ -86,8 +80,4 @@ export class EmbeddedMemoryCore {
 function defaultEntrypoint(): string {
   const here = dirname(fileURLToPath(import.meta.url));
   return resolve(here, "..", "vendor", "memory-core", "src", "server", "index.js");
-}
-
-function legacyOr(legacy: string, clean: string): string {
-  return existsSync(legacy) ? legacy : clean;
 }

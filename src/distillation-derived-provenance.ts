@@ -3,6 +3,7 @@ import {
   type DistillationEvidenceItem,
   type DistillationJob
 } from "./distillation-jobs.js";
+import { canonicalDistillationBody, distillationRevisionBody } from "./distillation-contract.js";
 
 export type DerivedL3ConflictReason =
   | "project_mismatch"
@@ -27,7 +28,8 @@ export function exactCompletedL2Evidence(
     item.kind === "artifact" &&
     item.layer === "L2" &&
     item.project_id === source.project_id &&
-    item.content === source.result_content &&
+    typeof item.content === "string" && typeof source.result_content === "string" &&
+    (source.result_core_content_hash ? item.content : canonicalDistillationBody(item.content)) === distillationRevisionBody(source) &&
     item.timestamp === distillationResultTimestamp(source);
 }
 

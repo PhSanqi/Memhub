@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
-import { homedir, hostname, platform } from "node:os";
+import { hostname, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectCoreDatabase } from "./stability-state.mjs";
+import { resolveControlRoot } from "../dist/state-root.mjs";
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
@@ -14,7 +15,7 @@ const npmRunner = npmExecPath
   : { command: npmCommand, prefixArgs: [] };
 const runId = new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
 const explicitDir = readOption("--report-dir");
-const stateRoot = resolve(process.env.MEMHUB_STATE_ROOT ?? join(homedir(), ".memmy", "memhub"));
+const stateRoot = resolve(resolveControlRoot());
 const reportDir = resolve(explicitDir ?? join(stateRoot, "diagnostics", "stability", runId));
 
 const steps = [

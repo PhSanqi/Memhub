@@ -1,8 +1,9 @@
+import { createTestRoot, isolateTestEnvironment } from "./test-isolation.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { hostname, tmpdir } from "node:os";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -17,13 +18,15 @@ import { ContextRouter } from "../dist/context-router.js";
 import { assertLoopbackMemoryEndpoint, LocalMemoryRestClient, MemoryCoreHttpError } from "../dist/local-memory-client.js";
 import { MemoryRestContextSource } from "../dist/memory-source.js";
 import { resolveProjectScope } from "../dist/project-scope.js";
+import { buildTurnKnowledgePlan } from "../dist/turn-knowledge-plan.js";
 import { countCaptureEvents, listCaptureEvents, normalizeCaptureEvent } from "../dist/capture.js";
 import { completeDistillationJob, enqueueDerivedDistillationJob, failDistillationJob, leaseDistillationJob, listDistillationJobs, renewDistillationJobLease } from "../dist/distillation-jobs.js";
 import { EmbeddedMemoryCore } from "../dist/embedded-memory-core.js";
 import { JsonProjectRegistry, projectSimilarity } from "../dist/project-registry.js";
 import { JsonResultTransport } from "../dist/result-transport.js";
 
-const root = await mkdtemp(join(tmpdir(), "memhub-core-"));
+const root = await createTestRoot("memhub-core-");
+isolateTestEnvironment(join(root, "state"), root);
 const state = join(root, "state");
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
@@ -476,10 +479,15 @@ try {
   assert.equal((await listDistillationJobs(tokenRoot, "acct"))[0].lease_token, undefined);
 
   const projectRegistry = new JsonProjectRegistry(join(state, "project-registry.json"));
-  const reconciled = await projectRegistry.reconcile("acct", [
-    "alpha-memory", "Alpha Memory", "Memhub", "memhub", "delta-project"
-  ]);
-  assert.deepEqual(reconciled.map((item) => item.projectId), ["alpha-memory", "delta-project", "memhub"]);
+  await mkdir(state, { recursive: true });
+  // Preserve legacy storage aliases to exercise their read/merge compatibility.
+  await writeFile(join(state, "project-registry.json"), JSON.stringify({ version: 1, projects: [
+    ["alpha-memory", ["Alpha Memory"]], ["memhub", ["Memhub"]], ["delta-project", []]
+  ].map(([projectId, aliases]) => ({
+    accountId: "acct", projectId, name: projectId, description: "", aliases, state: "active",
+    createdAt: "2026-10-10T00:00:00.000Z", updatedAt: "2026-10-10T00:00:00.000Z"
+  })) }));
+  assert.deepEqual((await projectRegistry.list("acct")).map((item) => item.projectId), ["alpha-memory", "delta-project", "memhub"]);
   assert.equal(await projectRegistry.resolve("acct", "Alpha Memory"), "alpha-memory");
   assert.equal(await projectRegistry.resolve("acct", "MEMHUB"), "memhub");
   assert.equal(projectSimilarity("Alpha Memory", "alpha-memory"), 1);
@@ -496,6 +504,68 @@ try {
   await projectRegistry.merge("acct", "alpha-memory-next", "alpha-memory");
   assert.equal(await projectRegistry.resolve("acct", "alpha-memory-next"), "alpha-memory");
   assert.ok((await projectRegistry.storageIds("acct", "alpha-memory")).includes("alpha-memory-next"));
+  const mergedTruthClient = {
+    async search(request) {
+      const layers = request.layers ?? [];
+      const project = request.namespace?.projectId;
+      const hit = (id, layer, score, snippet, tags) => ({
+        id,
+        kind: layer === "L2" ? "timeline" : "project_profile",
+        memoryLayer: layer,
+        status: "activated",
+        title: "",
+        snippet,
+        score,
+        tags,
+        source: "search",
+        retrievalRoutes: ["agent_memory"]
+      });
+      if (layers.includes("L4") || layers.includes("Skill")) return { debug: { hits: [] } };
+      if (project === "alpha-memory" && layers.includes("L3")) {
+        return { debug: { hits: [
+          hit("alpha-canonical-l3", "L3", 0.2, "Canonical active project rules.", ["artifact:l3", "project:alpha-memory"]),
+          hit("alpha-canonical-l2", "L2", 0.1, "Canonical project chronology.", ["artifact:l2", "project:alpha-memory"])
+        ] } };
+      }
+      if (project === "alpha-memory-next" && layers.includes("L2") && !layers.includes("L3")) {
+        return { debug: { hits: [
+          hit("alpha-historical-l2", "L2", 0.8, "Historical merged project chronology.", ["artifact:l2", "project:alpha-memory-next"])
+        ] } };
+      }
+      if (project === "alpha-memory-next" && layers.includes("L3")) {
+        return { debug: { hits: [
+          hit("alpha-obsolete-l3", "L3", 9.9, "Obsolete merged project rules.", ["artifact:l3", "project:alpha-memory-next"])
+        ] } };
+      }
+      return { debug: { hits: [] } };
+    }
+  };
+  const mergedTruthRouter = new ContextRouter(
+    new MemoryRestContextSource(mergedTruthClient),
+    undefined,
+    projectRegistry
+  );
+  const mergedTruthCapsule = await mergedTruthRouter.context({
+    accountId: "acct",
+    userId: "user",
+    query: "alpha-memory current truth",
+    projectId: "alpha-memory",
+    workspaceProjectId: "alpha-memory",
+    limit: 6
+  });
+  assert.equal(mergedTruthCapsule.resolvedProjectId, "alpha-memory");
+  assert.ok(mergedTruthCapsule.projectMemory.some((item) => item.id === "alpha-canonical-l3"));
+  assert.ok(mergedTruthCapsule.projectMemory.some((item) => item.id === "alpha-historical-l2"));
+  assert.ok(mergedTruthCapsule.projectMemory.every((item) => item.id !== "alpha-obsolete-l3"));
+  const mergedTruthPlan = await buildTurnKnowledgePlan({
+    query: "alpha-memory current truth",
+    capsule: mergedTruthCapsule
+  });
+  const requiredL3 = mergedTruthPlan.required.filter((entry) =>
+    entry.kind === "L3" && entry.reason === "project_current_truth"
+  );
+  assert.equal(requiredL3.length, 1);
+  assert.equal(requiredL3[0]?.id, "alpha-canonical-l3");
   await projectRegistry.create("acct", { projectId: "throwaway", description: "Disposable test project." });
   await projectRegistry.delete("acct", "throwaway");
   assert.equal(await projectRegistry.resolve("acct", "throwaway"), null);

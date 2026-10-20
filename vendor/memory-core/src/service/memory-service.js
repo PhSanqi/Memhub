@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { assertJsonValue, canonicalJson, sha256Hex } from "../contracts/index.js";
 import { skillMetaFromMemory, traceMetaFromMemory } from "../algorithm/plugin-algorithms.js";
 import { PROJECT_VERSION } from "../cli/project-version.js";
@@ -9,6 +12,7 @@ import { createLlmClient } from "../model/llm.js";
 import { MemoryModelTaskRouter } from "../model/task-routing.js";
 import { sqliteBackendCapabilities } from "../storage/backend.js";
 import { Repositories, jobToRef, kindFromMemory } from "../storage/repositories.js";
+import { buildBundlePlan, bundleTableNames, openBundleSnapshot, streamBundleNdjson } from "./bundle-ndjson.js";
 import { MemoryServiceError } from "../utils/error.js";
 import { newId, stableHash, stableStringify } from "../utils/id.js";
 import { isRecord, stringifyForMemory } from "../utils/json.js";
@@ -34,6 +38,27 @@ import { buildSearchQuery, sanitizeMemoryAddRequest, turnStartContextHints } fro
 import { createWorkerJobHandlers } from "./worker/job-handlers.js";
 import { WorkerRunner } from "./worker/worker-runner.js";
 const serviceLogger = createMemoryLogger("memory-service");
+// Build identity is read once at start. Health reports it so Memhub can detect
+// a stale Core left running after a gateway/vendor upgrade.
+const BUILD_IDENTITY = readBuildIdentity();
+function readBuildIdentity() {
+    const moduleDir = dirname(fileURLToPath(import.meta.url));
+    const readJson = (path) => {
+        try {
+            return JSON.parse(readFileSync(path, "utf8"));
+        }
+        catch {
+            return undefined;
+        }
+    };
+    const manifest = readJson(resolve(moduleDir, "../../../manifest.json"));
+    const packageJson = readJson(resolve(moduleDir, "../../../../package.json"));
+    const vendorSha256 = manifest?.components?.memory?.sha256;
+    return {
+        vendorSha256: typeof vendorSha256 === "string" ? vendorSha256 : null,
+        memhubVersion: typeof packageJson?.version === "string" ? packageJson.version : null
+    };
+}
 function createConfiguredMemoryLlm(config, modelRole) {
     return createLlmClient(modelRole === "memory_summary" ? config.summary : resolveEvolutionConfig(config), { modelRole });
 }
@@ -409,8 +434,25 @@ export class MemoryService {
     health(routes = []) {
         const schema = this.schemaVersion();
         const backend = this.storageCapabilities();
+        const summaryModel = this.llm.status();
+        const evolutionModel = this.skillLlm.status();
+        const embeddingModel = this.embedder.status();
+        // Honest readiness: schema and the always-on local embedder decide
+        // `ok`. Optional summary/evolution models only participate when they
+        // are actually configured, so a model-free install stays healthy.
+        const degraded = [];
+        if (!(schema.version > 0))
+            degraded.push("schema");
+        if (embeddingModel.lastError)
+            degraded.push("embedding");
+        if (summaryModel.configured && summaryModel.lastError)
+            degraded.push("summary");
+        if (evolutionModel.configured && evolutionModel.lastError)
+            degraded.push("evolution");
         return {
-            ok: true,
+            ok: degraded.length === 0,
+            degraded,
+            build: { ...BUILD_IDENTITY },
             serviceVersion: PROJECT_VERSION,
             protocolVersion: MEMORY_PROTOCOL_VERSION,
             viewerVersion: MEMORY_VIEWER_VERSION,
@@ -422,7 +464,11 @@ export class MemoryService {
                 ...backend,
                 schemaVersion: String(schema.version),
                 ready: schema.version > 0,
-                lastMigrationId: schema.lastMigrationId
+                lastMigrationId: schema.lastMigrationId,
+                ftsRepair: {
+                    pendingIds: [...(this.repos.memories.pendingFtsRepairs ?? [])],
+                    fullReindexRequired: this.repos.memories.ftsRepairOverflow ?? false
+                }
             },
             models: {
                 summary: {
@@ -692,6 +738,130 @@ export class MemoryService {
             tables,
             serverTime: nowIso()
         };
+    }
+    /**
+     * Streams a bounded NDJSON bundle from one read-only snapshot. The legacy
+     * JSON export path above is deliberately untouched.
+     */
+    async streamBundleExport(request = {}, write, options = {}) {
+        this.assertMemorySearchEnabled();
+        if (typeof write !== "function") {
+            throw new MemoryServiceError("invalid_argument", "streamBundleExport requires a write sink");
+        }
+        const context = this.resolveContext(request);
+        const includeRawText = request.includeRawText === true;
+        const includeAudit = request.includeAudit !== false;
+        const exportId = newId("export");
+        const snapshotAt = nowIso();
+        const schemaVersion = this.schemaVersion().version;
+        const snapshotPath = this.bundleDatabasePath();
+        const startedAt = Date.now();
+        let snapshotDb;
+        let ownsSnapshot = false;
+        let planned = false;
+        try {
+            if (snapshotPath) {
+                snapshotDb = openBundleSnapshot(snapshotPath);
+                ownsSnapshot = true;
+            }
+            else {
+                // A :memory: database cannot be reopened, and holding a read
+                // transaction on the shared service connection across awaits
+                // would pull concurrent requests into it (and ROLLBACK would
+                // discard their writes), so streamed export needs a file.
+                throw new MemoryServiceError("conflict", "NDJSON export requires a file-backed database");
+            }
+            if (snapshotDb.inTransaction) {
+                throw new Error("bundle export cannot start inside an open transaction");
+            }
+            snapshotDb.exec("BEGIN");
+            const plan = buildBundlePlan(snapshotDb, includeAudit);
+            planned = true;
+            options.beforeWrite?.();
+            const summary = await streamBundleNdjson({
+                db: snapshotDb,
+                plan,
+                exportId,
+                snapshotAt,
+                schemaVersion,
+                includeRawText,
+                includeAudit,
+                write,
+                ...(options.yieldEvery === undefined ? {} : { yieldEvery: options.yieldEvery })
+            });
+            serviceLogger.info("bundle.export.ndjson.completed", {
+                exportId,
+                snapshot: ownsSnapshot ? "file" : "live",
+                tables: summary.tables.map((table) => table.table),
+                rows: summary.rows,
+                bytes: summary.bytes,
+                durationMs: Date.now() - startedAt
+            });
+            return summary;
+        }
+        catch (error) {
+            serviceLogger.warn("bundle.export.ndjson.failed", {
+                exportId,
+                planned,
+                errorCode: typeof error?.code === "string" ? error.code : "export_failed",
+                durationMs: Date.now() - startedAt
+            });
+            throw error;
+        }
+        finally {
+            if (snapshotDb?.inTransaction) {
+                try {
+                    snapshotDb.exec("ROLLBACK");
+                }
+                catch {
+                    // The connection is being discarded anyway.
+                }
+            }
+            if (ownsSnapshot) {
+                try {
+                    snapshotDb.close();
+                }
+                catch {
+                    // Preserve the original export error.
+                }
+            }
+            if (planned) {
+                this.recordBundleExportAudit(context, request.namespace, includeRawText, includeAudit);
+            }
+        }
+    }
+    bundleDatabasePath() {
+        const owner = this.options.db ?? this.options.backend?.db;
+        const path = owner?.path;
+        if (typeof path !== "string" || !path || path === ":memory:" || path.includes("mode=memory")) {
+            return undefined;
+        }
+        return path;
+    }
+    recordBundleExportAudit(context, namespace, includeRawText, includeAudit) {
+        if (!this.memoryAddEnabled()) {
+            return;
+        }
+        try {
+            this.repos.runtime.insertAudit({
+                userId: context.userId,
+                actor: namespace ? { ...namespace } : {},
+                action: "export",
+                targetKind: "bundle",
+                targetId: `export_${stableHash(nowIso()).slice(0, 16)}`,
+                meta: {
+                    includeRawText,
+                    includeAudit,
+                    tables: bundleTableNames(includeAudit)
+                },
+                createdAt: nowIso()
+            });
+        }
+        catch (error) {
+            serviceLogger.warn("bundle.export.ndjson.audit_failed", {
+                errorCode: typeof error?.code === "string" ? error.code : "audit_failed"
+            });
+        }
     }
     clearAllData() {
         this.assertMemoryAddEnabled();

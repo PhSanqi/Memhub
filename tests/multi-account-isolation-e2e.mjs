@@ -1,6 +1,6 @@
+import { createTestRoot, isolateTestEnvironment } from "./test-isolation.mjs";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { addAccount, listAccounts, resolveCloudflareAccount, setAccountRole } from "../dist/auth.js";
 import { JsonProjectRegistry } from "../dist/project-registry.js";
@@ -8,7 +8,8 @@ import { listCaptureEvents, storeCaptureEvent } from "../dist/capture.js";
 import { recordSkillExecutionEvent, recordSkillLoad, skillTelemetrySummary } from "../dist/skill-telemetry.js";
 import { listDistillationJobs, recordCompletedDistillationRevision } from "../dist/distillation-jobs.js";
 
-const root = await mkdtemp(join(tmpdir(), "memhub-multi-account-"));
+const root = await createTestRoot("memhub-multi-account-");
+isolateTestEnvironment(root, root);
 try {
   const first = await addAccount(root, "alpha-user", "alpha@example.org");
   const second = await addAccount(root, "beta-user", "beta@example.org");

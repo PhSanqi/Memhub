@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { mutateMemoryConfig } from "../config/writer.js";
-import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readdirSync, rmdirSync, statSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createStorageBackend } from "../storage/backend.js";
@@ -8,6 +9,7 @@ import { loadMemmyConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { MemoryService } from "../service/memory-service.js";
 import { closeMemoryHttpServer, listenMemoryHttpServer } from "./http.js";
+import { assertLoopbackBindHost } from "./bind-host.js";
 import { loadCloudServiceEnv } from "../cli/load-env.js";
 import { requestMemoryServiceRestart } from "./service-restart.js";
 import { MEMORY_PROTOCOL_VERSION, MEMORY_SERVICE_VERSION } from "../version.js";
@@ -103,7 +105,9 @@ async function runMemoryService(argv, lifecycle) {
                 ? { localServiceToken: config.storage.token }
                 : { allowAnonymous: true },
             configPath,
-            startAgentSourceAutomation: true
+            // Off by default: Memhub ingests turns through MCP, so third-party
+            // agent transcript scans are only wanted when explicitly enabled.
+            startAgentSourceAutomation: agentSourceAutomationEnabled()
         });
         server = listening.server;
         const { url } = listening;
@@ -165,53 +169,142 @@ export function acquireSqliteServerLock(input) {
     });
 }
 function acquireLockFile(lockPath, payload) {
+    const releaseGuard = acquireLockGuard(lockPath);
+    payload = { ...payload, token: randomUUID() };
+    try {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            try {
+                const temporaryPath = `${lockPath}.${process.pid}.${randomUUID()}.tmp`;
+                writeFileSync(temporaryPath, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+                try {
+                    linkSync(temporaryPath, lockPath);
+                }
+                finally {
+                    unlinkSync(temporaryPath);
+                }
+                let released = false;
+                const release = () => {
+                    if (released)
+                        return;
+                    released = true;
+                    process.off("exit", release);
+                    try {
+                        const owner = readServerLock(readFileSync(lockPath, "utf8"));
+                        if (owner?.pid === payload.pid && owner?.token === payload.token)
+                            unlinkSync(lockPath);
+                    }
+                    catch {
+                        // Stale lock cleanup is handled on the next startup.
+                    }
+                };
+                process.once("exit", release);
+                return { path: lockPath, release };
+            }
+            catch (error) {
+                // Node/libuv maps Windows ERROR_ALREADY_EXISTS to EEXIST.
+                if (!isNodeError(error) || (error.code !== "EEXIST" &&
+                    !(error.code === "EPERM" && existsSync(lockPath)))) {
+                    throw error;
+                }
+                let before, contents;
+                try {
+                    before = statSync(lockPath);
+                    contents = readFileSync(lockPath, "utf8");
+                }
+                catch (readError) {
+                    if (readError.code === "ENOENT") continue;
+                    throw readError;
+                }
+                const existing = readServerLock(contents);
+                if (!existing) {
+                    if (Date.now() - before.mtimeMs < 30_000)
+                        throw new Error(`Memory service is starting. Lock: ${lockPath}`);
+                }
+                if (!existing || !isProcessAlive(existing.pid)) {
+                    const claimed = `${lockPath}.stale-${randomUUID()}`;
+                    try {
+                        renameSync(lockPath, claimed);
+                    }
+                    catch (claimError) {
+                        if (claimError.code === "ENOENT") continue;
+                        throw claimError;
+                    }
+                    const moved = statSync(claimed);
+                    if (moved.dev !== before.dev || moved.ino !== before.ino ||
+                        moved.mtimeMs !== before.mtimeMs || readFileSync(claimed, "utf8") !== contents) {
+                        try {
+                            linkSync(claimed, lockPath);
+                            unlinkSync(claimed);
+                        }
+                        catch (restoreError) {
+                            if (restoreError.code !== "EEXIST" &&
+                                !(restoreError.code === "EPERM" && existsSync(lockPath))) throw restoreError;
+                        }
+                        throw new Error(`Memory service lock changed during stale recovery. Lock: ${lockPath}`);
+                    }
+                    unlinkSync(claimed);
+                    continue;
+                }
+                throw new Error(`Memory service is already served by pid ${existing.pid}` +
+                    `${existing.host && existing.port ? ` at ${existing.host}:${existing.port}` : ""}. ` +
+                    `Stop that process before starting another Memory server. Lock: ${lockPath}`);
+            }
+        }
+        throw new Error(`failed to acquire Memory sqlite server lock: ${lockPath}`);
+    }
+    finally {
+        releaseGuard();
+    }
+}
+function acquireLockGuard(lockPath) {
+    const path = `${lockPath}.guard`;
+    const marker = join(path, `${process.pid}.${randomUUID()}`);
+    const busy = () => new Error(`Memory service lock update in progress. Lock: ${lockPath}`);
+    const release = () => {
+        try { unlinkSync(marker); }
+        catch (error) { if (error.code !== "ENOENT") throw error; }
+        try { rmdirSync(path); }
+        catch (error) { if (error.code !== "ENOENT" && error.code !== "ENOTEMPTY" && error.code !== "EEXIST") throw error; }
+    };
     for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
-            const fd = openSync(lockPath, "wx");
-            try {
-                writeFileSync(fd, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-            }
-            finally {
-                closeSync(fd);
-            }
-            let released = false;
-            const release = () => {
-                if (released)
-                    return;
-                released = true;
-                process.off("exit", release);
-                try {
-                    unlinkSync(lockPath);
-                }
-                catch {
-                    // Stale lock cleanup is handled on the next startup.
-                }
-            };
-            process.once("exit", release);
-            return { path: lockPath, release };
+            mkdirSync(path, { mode: 0o700 });
         }
         catch (error) {
-            if (!isNodeError(error) || error.code !== "EEXIST") {
-                throw error;
-            }
-            const existing = readServerLock(lockPath);
-            if (!existing || !isProcessAlive(existing.pid)) {
-                try {
-                    unlinkSync(lockPath);
+            if (error.code !== "EEXIST") throw error;
+            try {
+                const age = Math.abs(Date.now() - statSync(path).mtimeMs);
+                if (age < 5_000) throw busy();
+                // Unique marker names plus rmdir prevent a stale reclaimer
+                // from unlinking a replacement guard's owner (including ABA).
+                for (const entry of readdirSync(path)) {
+                    const ownerPath = join(path, entry);
+                    const pid = Number(entry.split(".")[0]);
+                    if (age <= 60_000 && (!Number.isInteger(pid) || pid <= 0 || isProcessAlive(pid))) throw busy();
+                    try { unlinkSync(ownerPath); }
+                    catch (removeError) { if (removeError.code !== "ENOENT") throw removeError; }
                 }
-                catch (unlinkError) {
-                    if (!isNodeError(unlinkError) || unlinkError.code !== "ENOENT") {
-                        throw unlinkError;
-                    }
+                try { rmdirSync(path); }
+                catch (removeError) {
+                    if (removeError.code === "ENOTEMPTY" || removeError.code === "EEXIST") throw busy();
+                    if (removeError.code !== "ENOENT") throw removeError;
                 }
-                continue;
             }
-            throw new Error(`Memory service is already served by pid ${existing.pid}` +
-                `${existing.host && existing.port ? ` at ${existing.host}:${existing.port}` : ""}. ` +
-                `Stop that process before starting another Memory server. Lock: ${lockPath}`);
+            catch (recoveryError) { if (recoveryError.code !== "ENOENT") throw recoveryError; }
+            continue;
+        }
+        try {
+            writeFileSync(marker, "", { flag: "wx", mode: 0o600 });
+            // A paused creator may have lost its empty directory to recovery.
+            if (readdirSync(path).some((entry) => join(path, entry) !== marker)) throw busy();
+            return release;
+        }
+        catch (error) {
+            release();
+            throw error;
         }
     }
-    throw new Error(`failed to acquire Memory sqlite server lock: ${lockPath}`);
+    throw busy();
 }
 function writeRuntimeState(serviceHome, state) {
     mkdirSync(serviceHome, { recursive: true });
@@ -233,9 +326,10 @@ function removeRuntimeState(serviceHome) {
         }
     }
 }
-function readServerLock(lockPath) {
+function readServerLock(contents) {
     try {
-        return JSON.parse(readFileSync(lockPath, "utf8"));
+        const value = JSON.parse(contents);
+        return value && Number.isInteger(value.pid) && value.pid > 0 ? value : undefined;
     }
     catch {
         return undefined;
@@ -313,10 +407,9 @@ function numberEnv(name) {
         return undefined;
     return parsePort(value);
 }
-export function assertLoopbackBindHost(host) {
-    if (host !== "127.0.0.1" && host !== "::1" && host !== "localhost") {
-        throw new Error(`Memory service must listen on a loopback address, received: ${host}`);
-    }
+export { assertLoopbackBindHost };
+export function agentSourceAutomationEnabled(env = process.env) {
+    return env?.MEMHUB_CORE_AGENT_SOURCE_AUTOMATION === "1";
 }
 export async function writeCurrentEndpoint(configPath, endpoint) {
     try {

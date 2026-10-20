@@ -2,6 +2,8 @@ import { stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { getDistillationConfig, listDistillationJobs, type DistillationJob } from "./distillation-jobs.js";
 import { captureIndexStats } from "./capture.js";
+import { captureCoreRawTurnId } from "./capture-ingest.js";
+import { redactSecrets } from "./secret-redaction.js";
 import { listL1Turns } from "./turn-log.js";
 import type { MemhubRuntime } from "./runtime.js";
 import { normalizeProjectKey, type ProjectDescriptor } from "./project-registry.js";
@@ -25,6 +27,8 @@ export interface MemoryControlRequest {
   projects: ProjectDescriptor[];
   projectId?: string;
   includeOverviewItems?: boolean;
+  /** L1 list only: show read-side `abandoned` (stale open/partial) turns. */
+  includeIncomplete?: boolean;
 }
 
 type ControlPlaneJob = Omit<DistillationJob, "evidence" | "result_content"> & {
@@ -253,11 +257,13 @@ async function unifiedL1Payload(input: MemoryControlRequest, limit: number): Pro
           stateRoot: input.stateRoot,
           accountId: input.runtime.accountId,
           projectId,
+          resolveProject: ref => storageIds.includes(ref) ? Promise.resolve(input.projectId!) : input.runtime.projects.resolve(input.runtime.accountId, ref),
           limit: 500
         })))
       : Promise.all([listL1Turns({
           stateRoot: input.stateRoot,
           accountId: input.runtime.accountId,
+          resolveProject: ref => input.runtime.projects.resolve(input.runtime.accountId, ref),
           limit: 500
         })]),
     input.projectId
@@ -294,14 +300,6 @@ async function unifiedL1Payload(input: MemoryControlRequest, limit: number): Pro
       projectRef,
       input.projectId ?? await input.runtime.projects.resolve(input.runtime.accountId, projectRef) ?? projectRef
     );
-  }));
-  const captures = captureItems.map((item) => ({
-    ...item,
-    id: item.event_id,
-    source_kind: "capture",
-    memory_layer: "L1",
-    project_id: item.project_hint ? canonicalCaptureProjects.get(item.project_hint) ?? item.project_hint : null,
-    updated_at: item.timestamp
   }));
   const rawProjectRefs = [...new Set(rawTurnItems
     .map((item) => stringValue(item.projectId))
@@ -345,20 +343,68 @@ async function unifiedL1Payload(input: MemoryControlRequest, limit: number): Pro
     };
   });
 
+  // Pair a capture with its Core raw turn by deterministic turn identity.
+  // Core derives the raw turn id as `raw_<stableHash(sessionId:turnId)>`, so
+  // the request turn id (`mhcap_turn_...`) is never present in rawTurns. Ingest
+  // also trims/redacts the text and stores the capture *session* id as the raw
+  // turn conversationId, so exact text/conversation matching would duplicate
+  // every complete capture. Trimmed+redacted text stays as a last-resort
+  // fallback for legacy Core rows that predate the identity.
   const consumedRawTurnIds = new Set<string>();
-  for (const capture of captureItems.filter((item) => item.user_text?.trim())) {
-    const captureProject = capture.project_hint ? canonicalCaptureProjects.get(capture.project_hint) ?? capture.project_hint : null;
-    const match = rawTurns.find((item) => {
-      if (item.sessionSource !== "memhub-capture") return false;
-      const rawTurnId = String(item.rawTurnId ?? "");
-      if (!rawTurnId || consumedRawTurnIds.has(rawTurnId)) return false;
-      if (item.conversationId !== capture.conversation_id) return false;
-      if (item.userText !== capture.user_text) return false;
-      if (capture.assistant_text?.trim() && item.assistantText !== capture.assistant_text) return false;
-      return (item.project_id ?? null) === captureProject;
+  const pairedCaptureIds = new Set<string>();
+  const rawTurnsById = new Map<string, typeof rawTurns[number]>();
+  const rawTurnFallbacks: Array<{
+    rawTurnId: string;
+    projectId: string | null;
+    userText: string;
+    assistantText: string;
+  }> = [];
+  for (const rawTurn of rawTurns) {
+    const rawTurnId = String(rawTurn.rawTurnId ?? "");
+    if (!rawTurnId) continue;
+    if (!rawTurnsById.has(rawTurnId)) rawTurnsById.set(rawTurnId, rawTurn);
+    if (rawTurn.sessionSource !== "memhub-capture") continue;
+    rawTurnFallbacks.push({
+      rawTurnId,
+      projectId: rawTurn.project_id ?? null,
+      userText: pairedText(rawTurn.userText),
+      assistantText: pairedText(rawTurn.assistantText)
     });
-    if (match?.rawTurnId) consumedRawTurnIds.add(String(match.rawTurnId));
   }
+  for (const capture of captureItems) {
+    const captureProject = capture.project_hint ? canonicalCaptureProjects.get(capture.project_hint) ?? capture.project_hint : null;
+    const expectedTurnId = captureCoreRawTurnId(input.runtime.accountId, capture.host, capture.event_id);
+    const identified = rawTurnsById.get(expectedTurnId);
+    let matchedRawTurnId: string | undefined;
+    if (identified && identified.sessionSource === "memhub-capture" && !consumedRawTurnIds.has(expectedTurnId)) {
+      matchedRawTurnId = expectedTurnId;
+    } else if (capture.user_text?.trim()) {
+      const captureUserText = pairedText(capture.user_text);
+      const captureAssistantText = pairedText(capture.assistant_text);
+      const fallback = rawTurnFallbacks.find((item) =>
+        !consumedRawTurnIds.has(item.rawTurnId) &&
+        item.projectId === captureProject &&
+        item.userText === captureUserText &&
+        (!capture.assistant_text?.trim() || item.assistantText === captureAssistantText));
+      matchedRawTurnId = fallback?.rawTurnId;
+    }
+    if (matchedRawTurnId) {
+      consumedRawTurnIds.add(matchedRawTurnId);
+      pairedCaptureIds.add(capture.event_id);
+    }
+  }
+
+  const abandonedCaptureIds = staleAbandonedCaptures(captureItems);
+  const captures = captureItems.map((item) => ({
+    ...item,
+    id: item.event_id,
+    source_kind: "capture",
+    memory_layer: "L1",
+    core_ingested: item.ingested || pairedCaptureIds.has(item.event_id),
+    ...(abandonedCaptureIds.has(item.event_id) ? { status: "abandoned" as const, abandoned: true } : {}),
+    project_id: item.resolved_project_id ?? null,
+    updated_at: item.timestamp
+  }));
 
   // Completed/ingested captures already have a Memory Core L1 representation.
   // Prefer the original capture row in the Control Plane because it contains
@@ -403,6 +449,7 @@ async function unifiedL1Payload(input: MemoryControlRequest, limit: number): Pro
   const completeRawTurns = visibleRawTurns.length - incompleteRawTurns;
   const items = [...captures, ...visibleRawTurns, ...legacyCoreItems]
     .sort((left, right) => timestampOf(right).localeCompare(timestampOf(left)))
+    .filter((item) => input.includeIncomplete === true || !("abandoned" in item && item.abandoned === true))
     .slice(0, limit);
   const visibleStats = input.projectId ? null : await l1OverviewStats(input);
   return {
@@ -444,6 +491,49 @@ function dedupeRawTurns(items: Record<string, unknown>[]): Record<string, unknow
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function pairedText(value: unknown): string {
+  return redactSecrets(typeof value === "string" ? value : "").text.trim();
+}
+
+const STALE_LATER_TURN_MS = 30 * 60 * 1000;
+const STALE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Read-side only classification: an open/partial capture is abandoned when it
+ * is older than six hours, or older than thirty minutes and its continuity has
+ * a later turn. Stored capture events are never mutated.
+ */
+function staleAbandonedCaptures(items: Array<{
+  event_id: string;
+  timestamp: string;
+  status: string;
+  continuity_id?: string;
+}>): Set<string> {
+  const now = Date.now();
+  const latestByContinuity = new Map<string, number>();
+  for (const item of items) {
+    if (!item.continuity_id) continue;
+    const timestamp = Date.parse(item.timestamp);
+    if (!Number.isFinite(timestamp)) continue;
+    latestByContinuity.set(item.continuity_id, Math.max(latestByContinuity.get(item.continuity_id) ?? timestamp, timestamp));
+  }
+  const abandoned = new Set<string>();
+  for (const item of items) {
+    if (item.status !== "open" && item.status !== "partial") continue;
+    const timestamp = Date.parse(item.timestamp);
+    if (!Number.isFinite(timestamp)) continue;
+    const age = now - timestamp;
+    if (age > STALE_MAX_AGE_MS) {
+      abandoned.add(item.event_id);
+      continue;
+    }
+    if (!item.continuity_id || age <= STALE_LATER_TURN_MS) continue;
+    const latest = latestByContinuity.get(item.continuity_id);
+    if (latest !== undefined && latest > timestamp) abandoned.add(item.event_id);
+  }
+  return abandoned;
 }
 
 async function coreL1Payload(

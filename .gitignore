@@ -18,3 +18,5 @@ sessions/
 .env
 .env.*
 !.env.example
+recovery/
+.tmp-tests/

@@ -19,6 +19,8 @@ jobs:
         run: npm ci
       - name: Build source tree
         run: npm run build
+      - name: Verify P3 Core and web regressions
+        run: node --test tests/p3-core-web.mjs
       - name: Verify legacy source lineage
         run: npm run qa:windows:legacy-source-lineage
       - name: Verify installer lifecycle

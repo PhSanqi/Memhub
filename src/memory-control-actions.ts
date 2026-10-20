@@ -1,8 +1,9 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { setAccountRole, type listAccounts } from "./auth.js";
-import { setDistillationConfig, retryDistillationJob, type DistillationJob } from "./distillation-jobs.js";
+import { setDistillationConfig, retryDistillationJob, retireDistillationMemory, listDistillationJobs, type DistillationJob } from "./distillation-jobs.js";
 import { readJsonBody } from "./http-json.js";
 import type { MemhubRuntime } from "./runtime.js";
+import { assignCaptureProjects } from "./capture-project-assignments.js";
 
 type Account = Awaited<ReturnType<typeof listAccounts>>[number];
 
@@ -10,10 +11,13 @@ type Account = Awaited<ReturnType<typeof listAccounts>>[number];
 export async function handleMemoryControlAction(input: {
   request: IncomingMessage; response: ServerResponse; stateRoot: string;
   runtime: MemhubRuntime; accounts: Account[]; selectedAccount: Account; adminView: boolean;
+  callerAccountId?: string;
   unfinishedDistillationJobsForProject: (stateRoot: string, runtime: MemhubRuntime, projectId: string) => Promise<DistillationJob[]>;
   assertManagedMemory: (runtime: MemhubRuntime, memoryId: string) => Promise<void>;
 }): Promise<void> {
   const { request, response, stateRoot, runtime, accounts, selectedAccount, adminView, unfinishedDistillationJobsForProject, assertManagedMemory } = input;
+          response.setHeader("x-content-type-options", "nosniff");
+          response.setHeader("cache-control", "no-store");
           if (!isJsonRequest(request)) {
             response.writeHead(415, { "content-type": "application/json", "cache-control": "no-store" })
               .end(JSON.stringify({ error: "application_json_required" }));
@@ -23,6 +27,24 @@ export async function handleMemoryControlAction(input: {
           const action = optionalString(body.action);
           const id = optionalString(body.id);
           if (!action) { response.writeHead(400).end(); return; }
+          if (action === "assign-captures") {
+            if (!adminView || !input.callerAccountId || input.callerAccountId !== runtime.accountId ||
+                selectedAccount.account_id !== runtime.accountId ||
+                (body.account_id !== undefined && body.account_id !== input.callerAccountId)) {
+              response.writeHead(403).end(); return;
+            }
+            try {
+              const result = await assignCaptureProjects({ stateRoot, accountId: input.callerAccountId,
+                projects: runtime.projects, assignedBy: "admin", project: body.project,
+                keepGlobal: body.keep_global, continuityId: body.continuity_id, eventIds: body.event_ids });
+              response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, ...result }));
+            } catch (error) {
+              if (!(error instanceof TypeError)) throw error;
+              response.writeHead(error.message === "capture not found for account/continuity" ? 404 : 400,
+                { "content-type": "application/json" }).end(JSON.stringify({ error: error.message }));
+            }
+            return;
+          }
           if (action === "set-distillation-config") {
             if (!adminView) { response.writeHead(403).end(); return; }
             const config = await setDistillationConfig(stateRoot, {
@@ -40,11 +62,13 @@ export async function handleMemoryControlAction(input: {
             if (!accountRef || (role !== "admin" && role !== "user")) { response.writeHead(400).end(); return; }
             const target = accounts.find((item) => item.account_id === accountRef || item.username === accountRef || item.cloudflare_email === accountRef.toLowerCase());
             if (!target) { response.writeHead(404).end(); return; }
-            if (target.role === "admin" && role === "user" && accounts.filter((item) => item.role === "admin").length <= 1) {
+            try {
+              await setAccountRole(stateRoot, accountRef, role);
+            } catch (error) {
+              if (!(error instanceof Error) || error.message !== "cannot_demote_last_admin") throw error;
               response.writeHead(409, { "content-type": "application/json" }).end(JSON.stringify({ error: "cannot_demote_last_admin" }));
               return;
             }
-            await setAccountRole(stateRoot, accountRef, role);
             response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, account_id: target.account_id, role }));
             return;
           }
@@ -92,9 +116,11 @@ export async function handleMemoryControlAction(input: {
             return;
           }
           if (action === "add-project-todo" || action === "set-project-todo-status") {
-            if (!adminView) { response.writeHead(403).end(); return; }
             const projectRef = optionalString(body.project);
             if (!projectRef) { response.writeHead(400).end(); return; }
+            if (!await runtime.projects.resolve(runtime.accountId, projectRef)) {
+              response.writeHead(404).end(); return;
+            }
             const result = action === "add-project-todo"
               ? await runtime.projects.addTodo(runtime.accountId, projectRef, requiredString(body.text, "text"))
               : await runtime.projects.setTodoStatus(
@@ -126,14 +152,22 @@ export async function handleMemoryControlAction(input: {
             return;
           }
           if (action === "delete-memory" || action === "archive-memory" || action === "archive-skill") {
-            await assertManagedMemory(runtime, id);
-            if (action === "delete-memory") {
-              await runtime.memoryClient.viewerDelete(`/api/v1/memory/${encodeURIComponent(id)}`);
-            } else if (action === "archive-skill") {
-              await runtime.memoryClient.viewerPost("/api/v1/skills/archive", { skillId: id });
-            } else {
-              await runtime.memoryClient.viewerPost(`/api/v1/memory/${encodeURIComponent(id)}/archive`);
-            }
+            const operation = action === "delete-memory" ? "deleted" : "archived";
+            const revisions = (await listDistillationJobs(stateRoot, runtime.accountId, true)).filter((job) =>
+              job.status === "completed" && job.result_id === id);
+            const pending = revisions.some((job) => job.result_retirement === "pending" &&
+              (!job.result_retirement_operation || job.result_retirement_operation === operation));
+            const retired = revisions.length > 0 && revisions.every((job) => job.result_retirement === operation);
+            if (!pending && !retired) await assertManagedMemory(runtime, id);
+            await retireDistillationMemory({
+              stateRoot, accountId: runtime.accountId, memoryId: id,
+              operation,
+              mutateCore: () => action === "delete-memory"
+                ? runtime.memoryClient.viewerDelete(`/api/v1/memory/${encodeURIComponent(id)}`)
+                : action === "archive-skill"
+                  ? runtime.memoryClient.viewerPost("/api/v1/skills/archive", { skillId: id })
+                  : runtime.memoryClient.viewerPost(`/api/v1/memory/${encodeURIComponent(id)}/archive`)
+            });
             response.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
             return;
           }

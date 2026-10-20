@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
+import { resolveCoreState } from "../dist/state-root.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const memhubDir = resolve(here, "..");
@@ -22,13 +23,14 @@ const argv = process.argv.slice(2);
 const command = argv.shift() ?? "preflight";
 const args = parseArgs(argv);
 
+const core = resolveCoreState();
 const legacyDb = join(homedir(), ".memmy", "memory-service", "memory.sqlite");
 const legacyConfig = join(homedir(), ".memmy", "config.yaml");
-const cleanDb = join(homedir(), ".memhub", "core", "memory.sqlite");
-const cleanConfig = join(homedir(), ".memhub", "core", "config.yaml");
+const cleanDb = join(core.coreDir, "memory.sqlite");
+const cleanConfig = join(core.coreDir, "config.yaml");
 const dbPath = resolve(args.db ?? (existsSync(legacyDb) ? legacyDb : cleanDb));
 const configPath = resolve(args.config ?? (existsSync(legacyConfig) ? legacyConfig : cleanConfig));
-const migrationRoot = resolve(args["state-root"] ?? join(homedir(), ".memmy", "memhub", "core-migrations"));
+const migrationRoot = resolve(args["state-root"] ?? join(core.stateRoot, "core-migrations"));
 const memoryVendor = resolve(args["memory-vendor"] ?? join(memhubDir, "vendor", "memory-core", "src"));
 const agentSourceVendor = resolve(args["agent-source-vendor"] ?? join(memhubDir, "vendor", "agent-source-core"));
 const vendorManifestPath = resolve(args["vendor-manifest"] ?? join(memhubDir, "vendor", "manifest.json"));

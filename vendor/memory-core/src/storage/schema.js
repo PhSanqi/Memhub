@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { memoryCaptureQaHash, normalizeMemoryCaptureSource } from "../utils/memory-capture-claim.js";
-export const SCHEMA_VERSION = 8;
-export const SCHEMA_MIGRATION_ID = "008_memory_layers_v2";
+export const SCHEMA_VERSION = 9;
+export const SCHEMA_MIGRATION_ID = "009_fts_repair_state";
 const API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION = 2;
 const PROCESSING_TAGS = new Set([
     "摘要排队中",
@@ -573,23 +574,54 @@ const statements = [
     created_at TEXT NOT NULL
   )`,
     `CREATE INDEX IF NOT EXISTS idx_audit_logs_user_created
-    ON audit_logs (user_id, created_at DESC)`
+    ON audit_logs (user_id, created_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS fts_repair_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    dirty INTEGER NOT NULL DEFAULT 0 CHECK (dirty IN (0, 1)),
+    reason TEXT,
+    updated_at TEXT NOT NULL
+  )`
 ];
+export function migrationChecksum() {
+    return `sha256:${createHash("sha256").update(statements.join("\n")).digest("hex")}`;
+}
+export function legacyMigrationChecksum() {
+    return String(statements.join("\n").length);
+}
 export function migrate(db) {
     const now = new Date().toISOString();
-    const checksum = String(statements.join("\n").length);
+    const checksum = migrationChecksum();
+    const legacyChecksum = legacyMigrationChecksum();
+    // PRAGMA foreign_keys is a no-op inside a transaction, so read and clear it first.
     const foreignKeys = Number(db.pragma("foreign_keys", { simple: true }) ?? 0);
-    const hasMemories = tableExists(db, "memories");
-    const version = currentSchemaVersion(db);
-    if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7) {
-        throw new Error(`Unsupported memory database schema version ${version}; the database was left unchanged`);
-    }
-    if (version > SCHEMA_VERSION) {
-        throw new Error(`Memory database schema version ${version} is newer than supported version ${SCHEMA_VERSION}`);
-    }
     db.pragma("foreign_keys = OFF");
     try {
+        // BEGIN IMMEDIATE takes the write lock before any read, so busy_timeout
+        // applies and a concurrent opener cannot interleave check-then-migrate.
+        // Every decision value below is read inside this transaction.
         db.transaction(() => {
+            const hasMemories = tableExists(db, "memories");
+            const version = currentSchemaVersion(db);
+            if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7 && version !== 8) {
+                throw new Error(`Unsupported memory database schema version ${version}; the database was left unchanged`);
+            }
+            if (version > SCHEMA_VERSION) {
+                throw new Error(`Memory database schema version ${version} is newer than supported version ${SCHEMA_VERSION}`);
+            }
+            // The checksum guards already-applied DDL against silent tampering. A pre-upgrade
+            // database has a different statement set, so only the current version is compared;
+            // the legacy length checksum is honoured once during the transition and rewritten
+            // to the versioned SHA-256 form inside the migration transaction.
+            const storedMigration = tableExists(db, "schema_migrations")
+                ? db.prepare(`SELECT id, version, checksum
+       FROM schema_migrations
+       ORDER BY version DESC
+       LIMIT 1`).get()
+                : undefined;
+            if (storedMigration && Number(storedMigration.version) === SCHEMA_VERSION &&
+                storedMigration.checksum !== checksum && storedMigration.checksum !== legacyChecksum) {
+                throw new Error(`Memory database migration checksum mismatch for ${storedMigration.id}: stored ${storedMigration.checksum}, expected ${checksum}; the database was left unchanged`);
+            }
             if (version === API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION &&
                 !columnExists(db, "api_logs", "source_agent")) {
                 db.prepare(`ALTER TABLE api_logs ADD COLUMN source_agent TEXT`).run();
@@ -609,6 +641,11 @@ export function migrate(db) {
             for (const statement of statements) {
                 db.prepare(statement).run();
             }
+            // Existing databases may already carry untracked FTS damage, so the new
+            // migration starts dirty and lets the first startup rebuild clear it.
+            const ftsRepairInitialDirty = version < SCHEMA_VERSION && (version > 0 || hasMemories) ? 1 : 0;
+            db.prepare(`INSERT OR IGNORE INTO fts_repair_state (id, dirty, reason, updated_at)
+         VALUES (1, ?, ?, ?)`).run(ftsRepairInitialDirty, ftsRepairInitialDirty ? "schema-migration" : null, now);
             if (version > 0 && version < 5) {
                 addColumnIfMissing(db, "recall_events", "query_id", "TEXT");
                 addColumnIfMissing(db, "recall_events", "user_memory_candidate_ids_json", "TEXT NOT NULL DEFAULT '[]'");
@@ -636,7 +673,7 @@ export function migrate(db) {
            version = excluded.version,
            applied_at = excluded.applied_at,
            checksum = excluded.checksum`).run(SCHEMA_MIGRATION_ID, SCHEMA_VERSION, now, checksum);
-        })();
+        }).immediate();
     }
     finally {
         db.pragma(`foreign_keys = ${foreignKeys ? "ON" : "OFF"}`);

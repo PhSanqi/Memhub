@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, rename, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { withFileMutationLock } from "./file-mutation-lock.js";
 
@@ -47,66 +47,10 @@ export interface ProjectSuggestion extends ProjectDescriptor {
 }
 
 export class JsonProjectRegistry {
+  private cache?: { key: string; file: ProjectRegistryFile };
+  private filling?: { key: string; promise: Promise<ProjectRegistryFile> };
+
   constructor(private readonly path: string) {}
-
-  async reconcile(accountId: string, discoveredIds: readonly string[]): Promise<ProjectDescriptor[]> {
-    const account = requireNonEmpty(accountId, "accountId");
-    await this.serialize(async () => {
-      const file = await this.read();
-      const now = new Date().toISOString();
-      const discovered = unique(discoveredIds.map((value) => value.trim()).filter(Boolean));
-      const groups = new Map<string, string[]>();
-      for (const id of discovered) {
-        const key = normalizeProjectKey(id);
-        if (!key) continue;
-        const group = groups.get(key) ?? [];
-        group.push(id);
-        groups.set(key, group);
-      }
-
-      let changed = false;
-      for (const [key, ids] of groups) {
-        const sameKey = file.projects.filter((project) =>
-          project.accountId === account &&
-          [project.projectId, project.name, ...project.aliases].some((value) => normalizeProjectKey(value) === key)
-        );
-        const active = sameKey.find((project) => project.state === "active");
-        if (active) {
-          const aliases = unique([...active.aliases, ...ids].filter((value) => value !== active.projectId));
-          if (!sameStringArray(aliases, active.aliases)) {
-            active.aliases = aliases;
-            active.updatedAt = now;
-            changed = true;
-          }
-          for (const duplicate of sameKey.filter((project) => project !== active && project.state === "active")) {
-            duplicate.state = "merged";
-            duplicate.mergedInto = active.projectId;
-            duplicate.updatedAt = now;
-            active.aliases = unique([...active.aliases, duplicate.projectId, duplicate.name, ...duplicate.aliases]
-              .filter((value) => value !== active.projectId));
-            changed = true;
-          }
-          continue;
-        }
-        if (sameKey.length > 0) continue;
-        const projectId = preferredCanonical(ids);
-        file.projects.push({
-          accountId: account,
-          projectId,
-          name: projectId,
-          description: "",
-          descriptionSource: "empty",
-          aliases: unique(ids.filter((value) => value !== projectId)),
-          state: "active",
-          createdAt: now,
-          updatedAt: now
-        });
-        changed = true;
-      }
-      if (changed) await this.write(file);
-    });
-    return this.list(account);
-  }
 
   async list(accountId: string, options: { includeInactive?: boolean; includeArchived?: boolean } = {}): Promise<ProjectDescriptor[]> {
     const account = requireNonEmpty(accountId, "accountId");
@@ -200,13 +144,13 @@ export class JsonProjectRegistry {
     aliases?: string[];
   }): Promise<ProjectDescriptor> {
     const account = requireNonEmpty(accountId, "accountId");
-    const projectId = requireNonEmpty(input.projectId, "projectId");
+    const projectId = validateProjectId(input.projectId);
     const description = requireNonEmpty(input.description, "description");
     const name = input.name?.trim() || projectId;
     const aliases = unique((input.aliases ?? []).map((value) => value.trim()).filter(Boolean))
       .filter((value) => normalizeProjectKey(value) !== normalizeProjectKey(projectId));
     return this.serialize(async () => {
-      const file = await this.read();
+      const file = await this.read(true);
       const key = normalizeProjectKey(projectId);
       const conflict = file.projects.find((project) =>
         project.accountId === account &&
@@ -243,7 +187,7 @@ export class JsonProjectRegistry {
     const projectId = await this.resolve(account, projectRef);
     if (!projectId) throw new Error(`unknown or inactive project: ${projectRef}`);
     return this.serialize(async () => {
-      const file = await this.read();
+      const file = await this.read(true);
       const project = requireActive(file, account, projectId);
       if (patch.name !== undefined) project.name = requireNonEmpty(patch.name, "name");
       if (patch.description !== undefined) {
@@ -291,7 +235,7 @@ export class JsonProjectRegistry {
     if (!projectId) throw new Error(`unknown or inactive project: ${projectRef}`);
     const description = requireNonEmpty(descriptionRaw, "description");
     return this.serialize(async () => {
-      const file = await this.read();
+      const file = await this.read(true);
       const project = requireActive(file, account, projectId);
       const now = new Date().toISOString();
       project.distilledDescription = description;
@@ -317,7 +261,7 @@ export class JsonProjectRegistry {
     const text = requireNonEmpty(textRaw, "todo text");
     if (text.length > 2000) throw new TypeError("todo text must not exceed 2000 characters");
     return this.serialize(async () => {
-      const file = await this.read();
+      const file = await this.read(true);
       const project = requireActive(file, account, projectId);
       const now = new Date().toISOString();
       const todo: ProjectTodo = {
@@ -346,7 +290,7 @@ export class JsonProjectRegistry {
     const todoId = requireNonEmpty(todoIdRaw, "todoId");
     if (status !== "pending" && status !== "done") throw new TypeError("todo status must be pending or done");
     return this.serialize(async () => {
-      const file = await this.read();
+      const file = await this.read(true);
       const project = requireActive(file, account, projectId);
       const todo = (project.todos ?? []).find((item) => item.id === todoId);
       if (!todo) throw new Error(`project todo not found: ${todoId}`);
@@ -374,7 +318,7 @@ export class JsonProjectRegistry {
     if (!targetId) throw new Error(`unknown target project: ${targetRef}`);
     if (sourceId === targetId) throw new Error("source and target already resolve to the same canonical project");
     return this.serialize(async () => {
-      const file = await this.read();
+      const file = await this.read(true);
       const source = requireActive(file, account, sourceId);
       const target = requireActive(file, account, targetId);
       target.aliases = unique([
@@ -412,7 +356,7 @@ export class JsonProjectRegistry {
     const projectId = await this.resolve(account, projectRef);
     if (!projectId) throw new Error(`unknown or inactive project: ${projectRef}`);
     return this.serialize(async () => {
-      const file = await this.read();
+      const file = await this.read(true);
       const project = requireActive(file, account, projectId);
       project.state = "deleted";
       project.updatedAt = new Date().toISOString();
@@ -426,7 +370,7 @@ export class JsonProjectRegistry {
     const projectId = await this.resolve(account, projectRef);
     if (!projectId) throw new Error(`unknown or inactive project: ${projectRef}`);
     return this.serialize(async () => {
-      const file = await this.read();
+      const file = await this.read(true);
       const project = requireActive(file, account, projectId);
       project.state = "archived";
       project.updatedAt = new Date().toISOString();
@@ -440,7 +384,7 @@ export class JsonProjectRegistry {
     const projectId = await this.resolve(account, projectRef, { includeArchived: true });
     if (!projectId) throw new Error(`unknown project: ${projectRef}`);
     return this.serialize(async () => {
-      const file = await this.read();
+      const file = await this.read(true);
       const project = requireArchived(file, account, projectId);
       project.state = "active";
       project.updatedAt = new Date().toISOString();
@@ -453,23 +397,72 @@ export class JsonProjectRegistry {
     return withFileMutationLock(this.path, operation);
   }
 
-  private async read(): Promise<ProjectRegistryFile> {
+  private async read(mutable = false): Promise<ProjectRegistryFile> {
     try {
-      const parsed = JSON.parse(await readFile(this.path, "utf8")) as unknown;
-      if (!isProjectRegistryFile(parsed)) throw new Error(`invalid project registry: ${this.path}`);
-      return parsed;
+      // Mutations call this only while holding the file mutation lock.
+      if (mutable) return await this.readDisk();
+      const info = await stat(this.path);
+      const key = `${info.mtimeMs}:${info.ctimeMs}:${info.size}:${info.ino}`;
+      if (this.cache?.key === key) return this.cache.file;
+      if (this.filling?.key !== key) {
+        const fill = { key, promise: this.fillCache(key) };
+        this.filling = fill;
+        void fill.promise.finally(() => {
+          if (this.filling === fill) this.filling = undefined;
+        }).catch(() => undefined);
+      }
+      return await this.filling!.promise;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { version: 1, projects: [] };
-      throw error;
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+      this.cache = undefined;
+      return { version: 1, projects: [] };
     }
   }
 
+  private async readDisk(expectedKey?: string): Promise<ProjectRegistryFile> {
+    const handle = await open(this.path, "r");
+    try {
+      const info = await handle.stat();
+      const openedKey = `${info.mtimeMs}:${info.ctimeMs}:${info.size}:${info.ino}`;
+      if (expectedKey !== undefined && expectedKey !== openedKey) return this.read();
+      const parsed = JSON.parse(await handle.readFile("utf8")) as unknown;
+      if (!isProjectRegistryFile(parsed)) throw new Error(`invalid project registry: ${this.path}`);
+      for (const project of parsed.projects) {
+        validateProjectId(project.projectId);
+        if (project.mergedInto !== undefined) validateProjectId(project.mergedInto);
+      }
+      return parsed;
+    } finally { await handle.close(); }
+  }
+
+  private async fillCache(key: string): Promise<ProjectRegistryFile> {
+    const file = await this.readDisk(key);
+    const info = await stat(this.path);
+    const currentKey = `${info.mtimeMs}:${info.ctimeMs}:${info.size}:${info.ino}`;
+    if (key !== currentKey) return this.read();
+    freezeRegistry(file);
+    this.cache = { key, file };
+    return file;
+  }
+
   private async write(file: ProjectRegistryFile): Promise<void> {
+    this.cache = undefined;
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
     const temporary = `${this.path}.tmp-${process.pid}-${randomUUID()}`;
     await writeFile(temporary, JSON.stringify(file, null, 2) + "\n", { mode: 0o600 });
     await rename(temporary, this.path);
+    this.cache = undefined;
   }
+}
+
+export function validateProjectId(value: string): string {
+  const projectId = requireNonEmpty(value, "projectId");
+  if (projectId === "." || projectId === ".." ||
+      /[<>:"/\\|?*\p{Cc}]/u.test(value) || /[.\s]$/u.test(value) ||
+      /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(projectId)) {
+    throw new TypeError("projectId is not a safe path segment");
+  }
+  return projectId;
 }
 
 export function normalizeProjectKey(value: string): string {
@@ -484,11 +477,6 @@ export function projectSimilarity(left: string, right: string): number {
   if (a.includes(b) || b.includes(a)) return Math.min(a.length, b.length) / Math.max(a.length, b.length) * 0.92;
   const distance = levenshtein(a, b);
   return Math.max(0, 1 - distance / Math.max(a.length, b.length));
-}
-
-function preferredCanonical(ids: string[]): string {
-  const lowercase = ids.filter((value) => value === value.toLocaleLowerCase());
-  return [...(lowercase.length ? lowercase : ids)].sort((left, right) => left.localeCompare(right))[0]!;
 }
 
 function levenshtein(left: string, right: string): number {
@@ -552,10 +540,6 @@ function requireNonEmpty(value: string, field: string): string {
   return normalized;
 }
 
-function sameStringArray(left: string[], right: string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
 function mergeTodos(target: readonly ProjectTodo[], source: readonly ProjectTodo[]): ProjectTodo[] {
   const merged = new Map<string, ProjectTodo>();
   for (const todo of [...target, ...source]) merged.set(todo.id, structuredClone(todo));
@@ -599,4 +583,11 @@ function isProjectRegistryFile(value: unknown): value is ProjectRegistryFile {
       (project.descriptionUpdatedAt === undefined || typeof project.descriptionUpdatedAt === "string") &&
       (project.todos === undefined || (Array.isArray(project.todos) && project.todos.every(isProjectTodo)));
   });
+}
+
+function freezeRegistry(value: object): void {
+  for (const child of Object.values(value)) {
+    if (child && typeof child === "object") freezeRegistry(child);
+  }
+  Object.freeze(value);
 }

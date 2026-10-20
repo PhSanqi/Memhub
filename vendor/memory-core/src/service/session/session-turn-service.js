@@ -1620,10 +1620,7 @@ export class SessionTurnService {
         }, input.limit * 4);
         const highValueMemories = [];
         const lowValueMemories = [];
-        for (const hit of l1Hits) {
-            const memory = this.deps.repos.memories.get(hit.id);
-            if (!memory)
-                continue;
+        for (const memory of this.deps.repos.memories.getMany(l1Hits.map((hit) => hit.id))) {
             const trace = this.deps.traceMeta(memory);
             if (!trace)
                 continue;
@@ -2156,7 +2153,7 @@ export class SessionTurnService {
                 `[Latest user message]: ${lastUser.slice(0, 700)}`
             ].join("\n\n")
             : (lastUser || firstUser).slice(0, 1000);
-        const tags = uniq(episode.l1MemoryIds.flatMap((id) => this.deps.repos.memories.get(id)?.tags ?? []));
+        const tags = uniq(this.deps.repos.memories.getMany(episode.l1MemoryIds).flatMap((memory) => memory.tags));
         const lastTurnAtMs = rawTurns.length > 0
             ? Date.parse(rawTurns[rawTurns.length - 1].createdAt)
             : undefined;

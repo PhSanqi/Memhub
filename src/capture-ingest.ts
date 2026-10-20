@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { CaptureActor, StoredCaptureEvent } from "./capture.js";
 import type { MemhubRuntime } from "./runtime.js";
+import { redactSecrets } from "./secret-redaction.js";
 
 export interface CaptureIngestResult {
   ingested: boolean;
@@ -24,8 +25,13 @@ export async function ingestCaptureIntoMemory(input: {
   projectId: string | null;
 }): Promise<CaptureIngestResult> {
   const { event, actor, runtime, projectId } = input;
-  const userText = event.user_text?.trim();
-  const assistantText = event.assistant_text?.trim();
+  // New captures are already redacted before persistence. Legacy stored raw
+  // events (and anything written before this policy) are redacted here so the
+  // Core copy never receives an inline secret. redactSecrets is idempotent, so
+  // the already-redacted path is a no-op.
+  const userText = redactSecrets(event.user_text ?? "").text.trim();
+  const assistantText = redactSecrets(event.assistant_text ?? "").text.trim();
+  const reasoningSummary = redactSecrets(event.reasoning_summary ?? event.tool_summary ?? "").text.trim();
   if (!userText || !assistantText || event.capture_status !== "complete") {
     return {
       ingested: false,
@@ -38,10 +44,7 @@ export async function ingestCaptureIntoMemory(input: {
   // conversation/session identity as durable routing state. Give each L1
   // event its own deterministic Core session so replay remains idempotent.
   const sessionId = captureSessionId(runtime.accountId, event.event_id);
-  const turnId = deterministicId(
-    "mhcap_turn",
-    `${runtime.accountId}\0${event.host}\0${event.event_id}`
-  );
+  const turnId = captureTurnId(runtime.accountId, event.host, event.event_id);
   const namespace = {
     source: "memhub-capture",
     profileId: "default",
@@ -89,9 +92,7 @@ export async function ingestCaptureIntoMemory(input: {
     sessionId,
     query: userText,
     answer: assistantText,
-    ...((event.reasoning_summary ?? event.tool_summary)
-      ? { reasoningSummary: event.reasoning_summary ?? event.tool_summary }
-      : {}),
+    ...(reasoningSummary ? { reasoningSummary } : {}),
     tags: unique([
       "memhub-capture",
       `host:${event.host}`,
@@ -128,6 +129,49 @@ function deterministicId(prefix: string, source: string): string {
 
 export function captureSessionId(accountId: string, eventId: string): string {
   return deterministicId("mhcap_session", `${accountId}\0${eventId}`);
+}
+
+/**
+ * The deterministic Core turn id for an ingested capture. Shared with the
+ * Control Plane so a capture and its Core raw turn can be paired by identity
+ * instead of by re-matching trimmed text.
+ */
+export function captureTurnId(accountId: string, host: string, eventId: string): string {
+  return deterministicId("mhcap_turn", `${accountId}\0${host}\0${eventId}`);
+}
+
+/**
+ * The raw-turn id Memory Core derives for an ingested capture. Core does not
+ * store the request turn id as `rawTurnId`; it uses
+ * `raw_${stableHash(`${sessionId}:${turnId}`).slice(0, 20)}`, with the session
+ * id Memhub passes in openSession and the turn id passed in completeTurn
+ * (`vendor/memory-core/src/service/turn/turn-normalization.js:30`,
+ * `session-turn-service.js:924`).
+ *
+ * The vendored Core module lives outside this package's `src` rootDir, so
+ * `stableHash`'s string path is mirrored here. `tests/p6-l1-dedupe.mjs` pins
+ * this helper against the vendored `rawTurnIdForSessionTurn`/`stableHash`.
+ */
+export function captureCoreRawTurnId(accountId: string, host: string, eventId: string): string {
+  return rawTurnIdForSessionTurn(
+    captureSessionId(accountId, eventId),
+    captureTurnId(accountId, host, eventId)
+  );
+}
+
+const STABLE_STRINGIFY_MAX_STRING_LENGTH = 20_000;
+
+function rawTurnIdForSessionTurn(sessionId: string, turnId: string): string {
+  return `raw_${stableHash(`${sessionId}:${turnId}`).slice(0, 20)}`;
+}
+
+/** Mirrors `stableHash` from `vendor/memory-core/src/utils/id.js` for strings. */
+function stableHash(value: string): string {
+  // Core's stableStringify calls limitStableString before JSON.stringify.
+  const limited = value.length <= STABLE_STRINGIFY_MAX_STRING_LENGTH
+    ? value
+    : `${value.slice(0, STABLE_STRINGIFY_MAX_STRING_LENGTH)}[stable-stringify:string-truncated:${value.length - STABLE_STRINGIFY_MAX_STRING_LENGTH}]`;
+  return createHash("sha256").update(JSON.stringify(limited), "utf8").digest("hex");
 }
 
 function unique(values: readonly string[]): string[] {

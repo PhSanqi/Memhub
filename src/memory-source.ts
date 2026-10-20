@@ -1,13 +1,17 @@
 import { createHash } from "node:crypto";
 import type { ContextItem } from "./context-capsule.js";
+import { listFreshCaptureEvidence } from "./capture.js";
+import { captureCoreRawTurnId, captureTurnId } from "./capture-ingest.js";
 import type { LocalMemoryRestClient, RecallHit, RuntimeNamespace } from "./local-memory-client.js";
-import { rankRecallHits, type RankedRecallHit, type RetrievalRankDiagnostics } from "./retrieval-ranker.js";
+import { rankRecallHits, tokenizeRetrievalText, type RankedRecallHit, type RetrievalRankDiagnostics } from "./retrieval-ranker.js";
 import { compactSkillContextItem } from "./skill-router.js";
 
 interface SearchResponseLike {
   hits?: RecallHit[];
+  status?: string[];
   debug?: {
     hits?: RecallHit[];
+    status?: string[];
   };
 }
 
@@ -19,6 +23,7 @@ export interface ContextMemorySource {
     projectId: string | null;
     projectStorageIds?: readonly string[];
     conversationId?: string;
+    continuityId?: string;
     limit: number;
     reusableSkillProjectIds?: readonly string[];
   }): Promise<{
@@ -34,6 +39,7 @@ export interface ContextRecallDiagnostics {
   requestedLimit: number;
   finalLimit: number;
   candidateLimit: number;
+  coreStatus?: string[];
   lanes: {
     global: RetrievalRankDiagnostics;
     project: RetrievalRankDiagnostics;
@@ -43,8 +49,11 @@ export interface ContextRecallDiagnostics {
 
 export type DistilledArtifactKind = "l2" | "l3" | "l4" | "skill";
 
+export const FRESH_L1_MAX = 4;
+const FRESH_L1_CHARS = 600;
+
 export class MemoryRestContextSource implements ContextMemorySource {
-  constructor(private readonly client: LocalMemoryRestClient) {}
+  constructor(private readonly client: LocalMemoryRestClient, private readonly stateRoot?: string) {}
 
   async recall(input: {
     accountId: string;
@@ -53,6 +62,7 @@ export class MemoryRestContextSource implements ContextMemorySource {
     projectId: string | null;
     projectStorageIds?: readonly string[];
     conversationId?: string;
+    continuityId?: string;
     limit: number;
     reusableSkillProjectIds?: readonly string[];
   }): Promise<{
@@ -64,7 +74,19 @@ export class MemoryRestContextSource implements ContextMemorySource {
     const requestedLimit = Math.max(1, Math.min(50, input.limit));
     const finalLimit = Math.min(12, requestedLimit);
     const candidateLimit = Math.min(50, Math.max(12, finalLimit * 4));
-    const globalResponse = await this.search(input, null, { layers: ["L4"], limit: candidateLimit });
+    const coreStatus: string[] = [];
+    const search = async (projectId: string | null, filters: {
+      layers?: string[];
+      tags?: string[];
+      limit?: number;
+      accountWide?: boolean;
+      projectIds?: readonly string[];
+    } = {}) => {
+      const response = await this.search(input, projectId, filters);
+      coreStatus.push(...statusFromResponse(response));
+      return response;
+    };
+    const globalResponse = await search(null, { layers: ["L4"], limit: candidateLimit });
     const globalHits = hitsFromResponse(globalResponse)
       .filter((hit) => hit.tags.includes("global"));
     const rankedGlobal = rankRecallHits(globalHits, input.query, finalLimit);
@@ -75,24 +97,100 @@ export class MemoryRestContextSource implements ContextMemorySource {
       : unique(input.projectStorageIds?.length ? input.projectStorageIds : [input.projectId]);
     let projectHits: RecallHit[] = [];
     if (input.projectId !== null) {
-      projectHits = dedupeHits((await Promise.all(projectStorageIds.map(async (storageProjectId) =>
-        hitsFromResponse(await this.search(input, storageProjectId, { layers: ["L3", "L2"], limit: candidateLimit }))
-          .filter((hit) => hit.tags.includes(`project:${storageProjectId}`))
-      ))).flat());
-      // A freshly migrated/bootstrap project may not have a v2 L2/L3 artifact
-      // yet. Keep continuity by falling back to relevant L1 evidence only while
-      // the higher layers are absent. Once L2/L3 exists, raw L1 stays out of the
-      // normal context capsule and remains an evidence layer for distillation.
+      const canonicalProjectId = input.projectId;
+      const historicalStorageIds = projectStorageIds.filter((projectId) => projectId !== canonicalProjectId);
+      const [canonicalHits, historicalL2Hits] = await Promise.all([
+        search(canonicalProjectId, { layers: ["L3", "L2"], limit: candidateLimit })
+          .then((response) => hitsFromResponse(response)
+            .filter((hit) => hit.tags.includes(`project:${canonicalProjectId}`))),
+        Promise.all(historicalStorageIds.map(async (storageProjectId) =>
+          hitsFromResponse(await search(storageProjectId, { layers: ["L2"], limit: candidateLimit }))
+            .filter((hit) => hit.tags.includes(`project:${storageProjectId}`))
+        )).then((hits) => hits.flat())
+      ]);
+      // storageIds intentionally includes merged project ids and historical
+      // aliases so chronology/provenance stays discoverable after a merge.
+      // L3 is different: it is Current Truth for the active canonical project.
+      // A merged project's historical L3 must therefore remain durable/auditable
+      // in its original namespace, but must not re-enter normal Current Truth
+      // ranking merely because that namespace is now an alias of the canonical
+      // project. Only canonical L3 participates in project recall; historical
+      // namespaces contribute L2 chronology.
+      projectHits = dedupeHits([...canonicalHits, ...historicalL2Hits]);
+      // Preserve Core's L1-only fallback for bootstrap projects.
       if (projectHits.length === 0) {
         projectHits = dedupeHits((await Promise.all(projectStorageIds.map(async (storageProjectId) =>
-          hitsFromResponse(await this.search(input, storageProjectId, { layers: ["L1"], limit: candidateLimit }))
+          hitsFromResponse(await search(storageProjectId, { layers: ["L1"], limit: candidateLimit }))
             .filter((hit) => hit.tags.includes(`project:${storageProjectId}`))
         ))).flat());
       }
     }
     const rankedProject = rankRecallHits(projectHits.filter((hit) => !globalIds.has(hit.id)), input.query, finalLimit);
-    const projectMemory = rankedProject.hits
+    let projectMemory = rankedProject.hits
       .map((ranked) => contextItemFromRankedHit(ranked, "project", input.projectId ?? undefined, rankedProject.diagnostics));
+
+    if (this.stateRoot && (input.projectId !== null || input.continuityId?.trim())) {
+      const watermark = projectHits
+        .filter((hit) => hit.memoryLayer === "L2")
+        .map((hit) => Date.parse(hit.updatedAt ?? ""))
+        .filter(Number.isFinite)
+        .reduce((latest, timestamp) => Math.max(latest, timestamp), Number.NEGATIVE_INFINITY);
+      const captures = await listFreshCaptureEvidence(this.stateRoot, input.accountId, {
+        ...(input.projectId !== null ? { projectIds: projectStorageIds } : { continuityId: input.continuityId }),
+        ...(Number.isFinite(watermark) ? { afterTimestamp: new Date(watermark).toISOString() } : {}),
+        limit: input.projectId !== null ? FRESH_L1_MAX : 2
+      });
+      const queryTerms = tokenizeRetrievalText(input.query).slice(0, 32);
+      const freshItems = captures.map((event): ContextItem => {
+        const user = event.user_text?.trim() ?? "";
+        const assistant = event.assistant_text?.trim() ?? "";
+        const userLimit = Math.min(user.length, 290);
+        const assistantLimit = FRESH_L1_CHARS - "User: \nAssistant: ".length - userLimit;
+        const content = `User: ${clipFreshText(user, userLimit)}\nAssistant: ${clipFreshText(assistant, assistantLimit)}`;
+        const tokens = new Set(tokenizeRetrievalText(content));
+        const matchedTerms = queryTerms.filter((term) => tokens.has(term));
+        return {
+          id: event.event_id,
+          evidenceRef: `l1:${event.event_id}`,
+          content,
+          authority: "evidence",
+          scope: "project",
+          source: "memhub-capture",
+          ...(input.projectId !== null ? { projectId: input.projectId } : {}),
+          createdAt: event.timestamp,
+          updatedAt: event.timestamp,
+          provenance: {
+            memoryLayer: "L1",
+            freshness: "undistilled",
+            continuityId: event.continuity_id,
+            captureProjectId: event.project_hint,
+            retrievalV1: { matchedTerms }
+          }
+        };
+      });
+      if (freshItems.length > 0) {
+        const relevant = (item: ContextItem) => {
+          const matched = (item.provenance!.retrievalV1 as { matchedTerms: string[] }).matchedTerms;
+          return queryTerms.length === 0 || matched.length / queryTerms.length >= 0.1;
+        };
+        const freshIds = new Set(captures.flatMap((event) => [
+          event.event_id,
+          captureTurnId(input.accountId, event.host, event.event_id),
+          captureCoreRawTurnId(input.accountId, event.host, event.event_id)
+        ]));
+        const older = projectMemory.filter((item) => item.provenance?.memoryLayer !== "L1" || !freshIds.has(item.id));
+        const replacedCount = projectMemory.length - older.length;
+        projectMemory = [
+          ...older.filter((item) => item.provenance?.memoryLayer === "L3"),
+          ...freshItems.filter(relevant),
+          ...older.filter((item) => item.provenance?.memoryLayer !== "L3"),
+          ...freshItems.filter((item) => !relevant(item))
+        ].slice(0, finalLimit);
+        rankedProject.diagnostics.candidateCount += freshItems.length;
+        rankedProject.diagnostics.dedupedCount += freshItems.length - replacedCount;
+        rankedProject.diagnostics.emittedCount = projectMemory.length;
+      }
+    }
 
     const reusableSkillProjectIds = unique([
       ...(input.projectId ? [input.projectId] : []),
@@ -100,16 +198,26 @@ export class MemoryRestContextSource implements ContextMemorySource {
     ])
       .slice(0, 32);
     const perProjectSkillLimit = candidateLimit;
-    const reusableHits = (await Promise.all(reusableSkillProjectIds.map(async (projectId) => {
-      const response = await this.search(input, projectId, {
+    const singleSkillProject = (reusableSkillProjectIds.length === 1 ? reusableSkillProjectIds[0] : null) ?? null;
+    let rawReusableHits: Array<{ hit: RecallHit; projectId: string }> = [];
+    if (reusableSkillProjectIds.length > 0) {
+      const response = await search(singleSkillProject, {
         layers: ["Skill"],
         tags: ["artifact:skill"],
-        limit: perProjectSkillLimit
+        limit: perProjectSkillLimit,
+        accountWide: true,
+        projectIds: reusableSkillProjectIds
       });
-      return hitsFromResponse(response)
-        .filter((hit) => isReusableSkillHit(hit, projectId))
-        .map((hit) => ({ hit, projectId }));
-    }))).flat()
+      const hits = hitsFromResponse(response);
+      for (const projectId of reusableSkillProjectIds) {
+        for (const hit of hits) {
+          if (isReusableSkillHit(hit, projectId)) {
+            rawReusableHits.push({ hit, projectId });
+          }
+        }
+      }
+    }
+    const reusableHits = rawReusableHits
       .filter(({ hit }) => !globalIds.has(hit.id))
       .sort((left, right) => right.hit.score - left.hit.score);
     const skillProjectById = new Map<string, string>();
@@ -135,6 +243,7 @@ export class MemoryRestContextSource implements ContextMemorySource {
         requestedLimit,
         finalLimit,
         candidateLimit,
+        coreStatus: unique(coreStatus),
         lanes: {
           global: rankedGlobal.diagnostics,
           project: rankedProject.diagnostics,
@@ -229,6 +338,8 @@ export class MemoryRestContextSource implements ContextMemorySource {
     layers?: string[];
     tags?: string[];
     limit?: number;
+    accountWide?: boolean;
+    projectIds?: readonly string[];
   } = {}): Promise<unknown> {
     const namespace = namespaceFor(input, projectId);
     const request = {
@@ -238,6 +349,8 @@ export class MemoryRestContextSource implements ContextMemorySource {
       limit: filters.limit ?? input.limit,
       ...(filters.layers?.length ? { layers: filters.layers } : {}),
       ...(filters.tags?.length ? { tags: filters.tags } : {}),
+      ...(filters.accountWide ? { accountWide: true } : {}),
+      ...(filters.projectIds?.length ? { projectIds: filters.projectIds } : {}),
       includeInjectedContext: false,
       // Memory Core's public HTTP contract only exposes structured recall
       // hits under debug.hits when verbose=true. The injected markdown alone
@@ -247,6 +360,14 @@ export class MemoryRestContextSource implements ContextMemorySource {
     };
     return this.client.search(request);
   }
+}
+
+export function clipFreshText(value: string, limit: number): string {
+  if (limit <= 0) return "";
+  if (value.length <= limit) return value;
+  let end = Math.max(0, limit - 1);
+  if (end > 0 && /[\uD800-\uDBFF]/.test(value[end - 1]!)) end -= 1;
+  return `${value.slice(0, end)}…`;
 }
 
 function isReusableSkillHit(hit: RecallHit, projectId: string): boolean {
@@ -286,6 +407,13 @@ function namespaceFor(
     ...(projectId ? { projectId } : {}),
     ...(input.conversationId?.trim() ? { sessionKey: input.conversationId.trim() } : {})
   };
+}
+
+function statusFromResponse(value: unknown): string[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const response = value as SearchResponseLike;
+  const status = Array.isArray(response.debug?.status) ? response.debug.status : response.status;
+  return Array.isArray(status) ? unique(status.filter((item): item is string => typeof item === "string")) : [];
 }
 
 function hitsFromResponse(value: unknown): RecallHit[] {

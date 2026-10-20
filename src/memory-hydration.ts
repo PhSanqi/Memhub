@@ -2,7 +2,19 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { listCaptureEvents } from "./capture.js";
-import { distillationResultTimestamp, listDistillationJobs } from "./distillation-jobs.js";
+import {
+  attachExactDistillationEvidenceRefs,
+  distillationRevisionBody
+} from "./distillation-contract.js";
+import type { ContextItem } from "./context-capsule.js";
+import type { MemhubRuntime } from "./runtime.js";
+import {
+  distillationResultTimestamp,
+  listDistillationJobs,
+  type DistillationEvidenceItem,
+  type DistillationJob
+} from "./distillation-jobs.js";
+import { tokenizeRetrievalText } from "./retrieval-ranker.js";
 
 export interface HydratedMemoryEvidence {
   evidence_ref: string;
@@ -23,6 +35,16 @@ export interface MemoryHydrationTelemetrySummary {
   hydrations: number;
   total_estimated_tokens: number;
   last_hydrated_at: string | null;
+}
+
+export interface MemoryWhyEvidenceItem {
+  evidence_ref: string;
+  layer: string | null;
+  timestamp: string;
+  project_id: string | null;
+  title: string | null;
+  content_preview: string;
+  matched_terms: string[];
 }
 
 interface MemoryHydrationEvent {
@@ -71,7 +93,7 @@ export async function hydrateMemoryEvidence(input: {
   const prefix = versioned[1]! as "l2" | "l3" | "l4";
   const memoryId = versioned[2]!;
   const revisionId = versioned[3]!;
-  const jobs = await listDistillationJobs(input.stateRoot, input.accountId);
+  const jobs = await listDistillationJobs(input.stateRoot, input.accountId, true);
   const job = jobs.find((candidate) =>
     candidate.job_id === revisionId &&
     candidate.status === "completed" &&
@@ -81,7 +103,7 @@ export async function hydrateMemoryEvidence(input: {
     Boolean(candidate.result_content?.trim())
   );
   if (!job?.result_content) throw new Error(`exact Memory revision not found: ${ref}`);
-  const content = job.result_content.trim();
+  const content = distillationRevisionBody(job);
   return {
     evidence_ref: ref,
     layer: prefix.toUpperCase() as "L2" | "L3" | "L4",
@@ -94,6 +116,73 @@ export async function hydrateMemoryEvidence(input: {
     ...(job.conversation_id ? { source_conversation_id: job.conversation_id } : {}),
     source_evidence_refs: job.evidence_refs.slice(),
     estimated_tokens: estimateTokens(content)
+  };
+}
+
+/**
+ * Build a small, read-only evidence pack for causal/WHY review.
+ *
+ * This deliberately does not infer causality and does not persist a second
+ * WHY graph. It reuses the immutable distillation evidence already stored in
+ * the revision ledger, selects a few query-relevant sources, and leaves the
+ * semantic judgement to the connected Harness.
+ */
+export async function explainMemoryWhy(input: {
+  stateRoot: string;
+  accountId: string;
+  evidenceRef: string;
+  query: string;
+  maxSources?: number;
+}): Promise<Record<string, unknown>> {
+  const query = input.query.trim();
+  if (!query) throw new TypeError("query is required for WHY review");
+  const maxSources = Math.max(1, Math.min(8, Math.trunc(input.maxSources ?? 4)));
+  const queryTerms = tokenizeRetrievalText(query).slice(0, 16);
+  const root = await hydrateMemoryEvidence({
+    stateRoot: input.stateRoot,
+    accountId: input.accountId,
+    evidenceRef: input.evidenceRef
+  });
+  const jobs = await listDistillationJobs(input.stateRoot, input.accountId, true);
+  const rootJob = revisionJobFromRef(jobs, root.evidence_ref);
+  const direct = rankWhyEvidence(rootJob?.evidence ?? [], queryTerms).slice(0, maxSources);
+  const supporting: Array<{ item: DistillationEvidenceItem; matched: string[] }> = [];
+  const seen = new Set(direct.map(({ item }) => item.ref));
+  for (const { item } of direct) {
+    const sourceJob = revisionJobFromRef(jobs, item.ref);
+    if (!sourceJob) continue;
+    for (const candidate of rankWhyEvidence(sourceJob.evidence, queryTerms).slice(0, 2)) {
+      if (seen.has(candidate.item.ref)) continue;
+      seen.add(candidate.item.ref);
+      supporting.push(candidate);
+      if (supporting.length >= maxSources) break;
+    }
+    if (supporting.length >= maxSources) break;
+  }
+
+  return {
+    evidence_ref: root.evidence_ref,
+    query,
+    root: {
+      layer: root.layer,
+      project_id: root.project_id,
+      title: root.title,
+      committed_at: root.committed_at,
+      content_preview: whySnippet(root.content, queryTerms, 2400),
+      source_evidence_count: root.source_evidence_refs.length
+    },
+    direct_evidence: direct.map(({ item, matched }) => whyEvidenceItem(item, matched, queryTerms, 900)),
+    supporting_evidence: supporting.map(({ item, matched }) => whyEvidenceItem(item, matched, queryTerms, 700)),
+    causal_review_contract: {
+      classifications: ["direct_reason", "context_supported_candidate", "unknown"],
+      direct_reason: "Use only when the source itself explicitly states the reason/cause.",
+      context_supported_candidate: "Use when chronology, constraints, or tradeoffs support a causal reading but the source does not explicitly state it; keep it provisional.",
+      unknown: "Use when evidence is insufficient, conflicting, or only temporally adjacent.",
+      temporal_adjacency_is_not_causality: true,
+      preferred_sequence: ["prior_state_or_plan", "trigger", "constraint", "tradeoff", "decision", "execution_or_reversal"]
+    },
+    persistence: "none",
+    note: "This is a bounded evidence view. Memhub does not store the Harness causal judgement as a new memory layer."
   };
 }
 
@@ -136,6 +225,73 @@ function titleFromContent(content: string, fallback: string): string {
   return heading?.replace(/^#{1,3}\s+/, "").trim() || fallback;
 }
 
+function revisionJobFromRef(jobs: readonly DistillationJob[], ref: string): DistillationJob | undefined {
+  const match = /^(l2|l3|l4):([^:]+):([^:]+)$/.exec(ref.trim());
+  if (!match) return undefined;
+  const target = match[1]!;
+  const resultId = match[2]!;
+  const revisionId = match[3]!;
+  return jobs.find((job) =>
+    job.job_id === revisionId &&
+    job.status === "completed" &&
+    job.target === target &&
+    job.result_kind === target &&
+    job.result_id === resultId
+  );
+}
+
+function rankWhyEvidence(
+  evidence: readonly DistillationEvidenceItem[],
+  queryTerms: readonly string[]
+): Array<{ item: DistillationEvidenceItem; matched: string[] }> {
+  return evidence.map((item) => {
+    const text = evidenceText(item).normalize("NFKC").toLocaleLowerCase();
+    const matched = queryTerms.filter((term) => text.includes(term));
+    return { item, matched };
+  }).sort((left, right) =>
+    right.matched.length - left.matched.length ||
+    right.item.timestamp.localeCompare(left.item.timestamp) ||
+    left.item.ref.localeCompare(right.item.ref)
+  );
+}
+
+function whyEvidenceItem(
+  item: DistillationEvidenceItem,
+  matched: string[],
+  queryTerms: readonly string[],
+  maxChars: number
+): MemoryWhyEvidenceItem {
+  return {
+    evidence_ref: item.ref,
+    layer: item.layer ?? null,
+    timestamp: item.timestamp,
+    project_id: item.project_id ?? null,
+    title: item.title ?? null,
+    content_preview: whySnippet(evidenceText(item), queryTerms, maxChars),
+    matched_terms: matched
+  };
+}
+
+function evidenceText(item: DistillationEvidenceItem): string {
+  return [item.content, item.user_text, item.assistant_text, item.reasoning_summary]
+    .filter((value): value is string => Boolean(value?.trim()))
+    .join("\n")
+    .trim();
+}
+
+function whySnippet(value: string, queryTerms: readonly string[], maxChars: number): string {
+  const text = value.trim();
+  if (text.length <= maxChars) return text;
+  const lower = text.normalize("NFKC").toLocaleLowerCase();
+  const positions = queryTerms
+    .map((term) => lower.indexOf(term))
+    .filter((position) => position >= 0);
+  const anchor = positions.length > 0 ? Math.min(...positions) : 0;
+  const start = Math.max(0, Math.min(text.length - maxChars, anchor - Math.floor(maxChars / 3)));
+  const end = Math.min(text.length, start + maxChars);
+  return `${start > 0 ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
+}
+
 function estimateTokens(value: string): number {
   return Math.max(1, Math.ceil(Buffer.byteLength(value, "utf8") / 4));
 }
@@ -143,6 +299,18 @@ function estimateTokens(value: string): number {
 function telemetryPath(stateRoot: string, accountId: string): string {
   const hash = createHash("sha256").update(accountId, "utf8").digest("hex").slice(0, 24);
   return join(resolve(stateRoot), "telemetry", `memory-hydration-${hash}.jsonl`);
+}
+
+export async function attachExactEvidenceRefsToContext(
+  stateRoot: string,
+  runtime: MemhubRuntime,
+  capsule: { globalMemory: ContextItem[]; projectMemory: ContextItem[] }
+): Promise<void> {
+  await attachExactDistillationEvidenceRefs({
+    stateRoot, accountId: runtime.accountId,
+    items: [...capsule.globalMemory, ...capsule.projectMemory],
+    readMemory: (id) => runtime.memoryClient.viewerGet(`/api/v1/memory/${encodeURIComponent(id)}`)
+  });
 }
 
 async function readTelemetry(path: string): Promise<MemoryHydrationEvent[]> {

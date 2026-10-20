@@ -8,9 +8,10 @@ StartLimitBurst=6
 [Service]
 Type=simple
 WorkingDirectory=@MEMHUB_DIR@
-Environment="MEMMY_HOME=%h/.memmy"
-Environment="MEMMY_CONFIG=%h/.memmy/config.yaml"
-ExecStart=@NODE@ @MEMHUB_DIR@/vendor/memory-core/src/server/index.js --config %h/.memmy/config.yaml --host 127.0.0.1 --port 18960 --db %h/.memmy/memory-service/memory.sqlite
+Environment="MEMHUB_HOME=@STATE_ROOT@"
+Environment="MEMMY_HOME=@CORE_HOME@"
+Environment="MEMMY_CONFIG=@CORE_CONFIG@"
+ExecStart=@NODE@ @MEMHUB_DIR@/vendor/memory-core/src/server/index.js --config @CORE_CONFIG@ --host 127.0.0.1 --port 18960 --db @CORE_DB@
 ExecStartPost=@NODE@ @MEMHUB_DIR@/scripts/wait-for-service.mjs --url http://127.0.0.1:18960/health --kind core --timeout-ms 20000
 Restart=on-failure
 RestartSec=3s

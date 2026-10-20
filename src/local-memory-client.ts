@@ -55,24 +55,36 @@ export class LocalMemoryRestClient {
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
+  /** Unauthenticated loopback health document; used for build/degraded checks. */
+  health(timeoutMs = 1_500): Promise<unknown> {
+    return this.requestRaw("/health", "GET", undefined, timeoutMs);
+  }
+
   search(request: Record<string, unknown>): Promise<unknown> {
     return this.request("/api/v1/memory/search", request);
   }
 
-  addMemory(request: Record<string, unknown>): Promise<unknown> {
+  async addMemory(request: Record<string, unknown>): Promise<unknown> {
+    if (reconcileMemoryAdd.getStore()) {
+      const outcome = await this.request("/api/v1/memory/add/reconcile", request) as { outcome: string; result?: unknown };
+      if (outcome.outcome !== "committed") {
+        throw new Error("frozen Core commit outcome is unknown; use memhub_distill reconcile_commit to inspect or explicitly abandon it; no write was resent");
+      }
+      return outcome.result;
+    }
     return this.request("/api/v1/memory/add", request);
   }
 
   viewerGet(path: string, timeoutMs = 5_000): Promise<unknown> {
-    return this.requestRaw(path, "GET", undefined, timeoutMs);
+    return this.requestRaw(path, "GET", undefined, timeoutMs, true);
   }
 
   viewerPost(path: string, body: Record<string, unknown> = {}, timeoutMs = 10_000): Promise<unknown> {
-    return this.requestRaw(path, "POST", body, timeoutMs);
+    return this.requestRaw(path, "POST", body, timeoutMs, true);
   }
 
   viewerDelete(path: string, timeoutMs = 10_000): Promise<unknown> {
-    return this.requestRaw(path, "DELETE", undefined, timeoutMs);
+    return this.requestRaw(path, "DELETE", undefined, timeoutMs, true);
   }
 
   openSession(request: Record<string, unknown>): Promise<unknown> {
@@ -99,18 +111,29 @@ export class LocalMemoryRestClient {
     path: string,
     method: "GET" | "POST" | "DELETE",
     body?: Record<string, unknown>,
-    timeoutMs = 15_000
+    timeoutMs = 15_000,
+    viewer = false
   ): Promise<unknown> {
-    const response = await this.fetchImpl(`${this.endpoint}${path}`, {
-      method,
-      headers: {
-        "content-type": "application/json",
-        "x-memmy-viewer": "1",
-        ...(this.token ? { authorization: `Bearer ${this.token}` } : {})
-      },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-      signal: AbortSignal.timeout(timeoutMs)
-    });
+    let response: Response;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        response = await this.fetchImpl(`${this.endpoint}${path}`, {
+          method,
+          headers: {
+            "content-type": "application/json",
+            ...(viewer ? { "x-memmy-viewer": "1" } : {}),
+            ...(this.token ? { authorization: `Bearer ${this.token}` } : {})
+          },
+          ...(body ? { body: JSON.stringify(body) } : {}),
+          signal: AbortSignal.timeout(timeoutMs)
+        });
+        if (method !== "GET" || attempt > 0 || ![502, 503, 504].includes(response.status)) break;
+        await response.body?.cancel();
+      } catch (error) {
+        if (method !== "GET" || attempt > 0 || !(error instanceof TypeError)) throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50 + Math.random() * 50));
+    }
     const text = await response.text();
     const payload = text ? safeJson(text) : undefined;
     if (!response.ok) {
@@ -161,4 +184,12 @@ function safeErrorPayload(payload: unknown, raw: string): string {
 
 function clip(value: string, max: number): string {
   return value.length <= max ? value : `${value.slice(0, max)}…`;
+}
+import { AsyncLocalStorage } from "node:async_hooks";
+
+const reconcileMemoryAdd = new AsyncLocalStorage<boolean>();
+
+/** Reconcile a frozen write without allowing an absent replay record to execute it. */
+export function withCoreMemoryReconciliation<T>(run: () => Promise<T>): Promise<T> {
+  return reconcileMemoryAdd.run(true, run);
 }

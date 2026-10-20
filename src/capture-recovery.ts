@@ -1,12 +1,16 @@
 import {
   isCaptureIngested,
+  recoverCaptureIndex,
   listCaptureEvents,
   readCaptureIngestIntentStatus,
   withCaptureIngestAttempt
 } from "./capture.js";
 import { ingestCaptureIntoMemory } from "./capture-ingest.js";
 import { discoverDistillationJobs } from "./distillation-discovery.js";
+import { MemoryCoreHttpError } from "./local-memory-client.js";
 import type { MemhubRuntime } from "./runtime.js";
+
+type CaptureRecoveryErrorKind = "core_http_error" | "invalid_capture" | "ingest_error" | "ingest_not_completed";
 
 /**
  * Explicit single-event redrive. This is deliberately not a global sweeper:
@@ -21,6 +25,7 @@ export async function recoverCaptureIngest(input: {
   dryRun: boolean;
 }) {
   const { stateRoot, runtime, eventId, projectId } = input;
+  await recoverCaptureIndex(stateRoot);
   const event = (await listCaptureEvents(stateRoot, runtime.accountId, { eventId }))[0];
   if (!event) throw new Error("capture event not found for account");
   if (event.capture_status !== "complete" || !event.user_text?.trim() || !event.assistant_text?.trim()) {
@@ -82,6 +87,7 @@ export async function reconcileFrozenCaptureIngests(input: {
   recovered: number;
   skipped: number;
   failed: number;
+  errors: Array<{ event_id: string; kind: CaptureRecoveryErrorKind }>;
 }> {
   const { stateRoot, runtime } = input;
   const captures = await listCaptureEvents(stateRoot, runtime.accountId, {
@@ -92,16 +98,21 @@ export async function reconcileFrozenCaptureIngests(input: {
   let recovered = 0;
   let skipped = 0;
   let failed = 0;
+  const errors: Array<{ event_id: string; kind: CaptureRecoveryErrorKind }> = [];
+  const recordFailure = (eventId: string, kind: CaptureRecoveryErrorKind) => {
+    failed += 1;
+    if (errors.length < 20) errors.push({ event_id: eventId.replace(/[\p{Cc}]/gu, "").slice(0, 128), kind });
+  };
   for (const event of captures) {
-    const intent = await readCaptureIngestIntentStatus(
-      stateRoot, runtime.accountId, event.event_id
-    );
-    if (intent !== "matching") {
-      skipped += 1;
-      continue;
-    }
-    frozen += 1;
     try {
+      const intent = await readCaptureIngestIntentStatus(
+        stateRoot, runtime.accountId, event.event_id
+      );
+      if (intent !== "matching") {
+        skipped += 1;
+        continue;
+      }
+      frozen += 1;
       if (!event.project_hint) {
         skipped += 1;
         continue;
@@ -122,11 +133,12 @@ export async function reconcileFrozenCaptureIngests(input: {
         })
       });
       if (attempt.alreadyIngested || attempt.result?.ingested) recovered += 1;
-      else failed += 1;
-    } catch {
+      else recordFailure(event.event_id, "ingest_not_completed");
+    } catch (error) {
       // Keep the frozen intent and raw capture intact for the next retry or
       // explicit operator review. Never mutate/delete evidence on failure.
-      failed += 1;
+      recordFailure(event.event_id, error instanceof MemoryCoreHttpError ? "core_http_error" :
+        error instanceof TypeError ? "invalid_capture" : "ingest_error");
     }
   }
   return {
@@ -134,6 +146,7 @@ export async function reconcileFrozenCaptureIngests(input: {
     frozen,
     recovered,
     skipped,
-    failed
+    failed,
+    errors
   };
 }

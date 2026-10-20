@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 export const DEFAULT_RESULT_INLINE_CHARS = 120_000;
@@ -23,6 +23,37 @@ export interface ResultTransportEnvelope {
   instructions: string;
 }
 
+// Shared by transports for the same account: HTTP can recreate the MCP server
+// between continuation requests. Read-only Skill/evidence loads retain the full
+// JSON in memory, preserving memhub_result without filesystem writes. Results
+// expire on restart or TTL; callers can rerun the original read in either case.
+const inlineResults = new Map<string, Map<string, { text: string; createdAt: number; bytes: number }>>();
+const MAX_INLINE_RESULT_BYTES = 256 * 1024 * 1024;
+
+function pruneInlineResults(): void {
+  const now = Date.now();
+  let bytes = 0;
+  const retained = [];
+  for (const [account, results] of inlineResults) {
+    for (const [id, result] of results) {
+      if (now - result.createdAt > RESULT_TTL_MS) results.delete(id);
+      else { bytes += result.bytes; retained.push({ account, id, ...result }); }
+    }
+    if (results.size === 0) inlineResults.delete(account);
+  }
+  if (bytes <= MAX_INLINE_RESULT_BYTES) return;
+  retained.sort((a, b) => a.createdAt - b.createdAt);
+  for (const result of retained) {
+    const results = inlineResults.get(result.account)!;
+    results.delete(result.id);
+    bytes -= result.bytes;
+    if (results.size === 0) inlineResults.delete(result.account);
+    if (bytes <= MAX_INLINE_RESULT_BYTES) break;
+  }
+}
+
+setInterval(pruneInlineResults, 60_000).unref();
+
 export class JsonResultTransport {
   private readonly dir: string;
 
@@ -35,22 +66,80 @@ export class JsonResultTransport {
     this.dir = join(resolve(stateRoot), "result-spool", accountHash);
   }
 
-  wrap(value: unknown): unknown {
+  wrap(value: unknown, options: { readOnly?: boolean } = {}): unknown {
+    pruneInlineResults();
     const text = JSON.stringify(value, null, 2) ?? "null";
     if (text.length <= this.inlineChars) return value;
     const resultId = randomUUID();
+    if (options.readOnly) {
+      const bytes = Buffer.byteLength(text, "utf8");
+      if (bytes > MAX_INLINE_RESULT_BYTES) throw new Error("result exceeds in-memory transport byte cap");
+      let results = inlineResults.get(this.dir);
+      if (!results) { results = new Map(); inlineResults.set(this.dir, results); }
+      let chars = 0;
+      for (const result of results.values()) chars += result.text.length;
+      for (const [id, result] of results) {
+        if (results.size < 128 && chars + text.length <= 64_000_000) break;
+        results.delete(id); chars -= result.text.length;
+      }
+      results.set(resultId, { text, createdAt: Date.now(), bytes });
+      pruneInlineResults();
+      return this.chunk(resultId, 0, DEFAULT_RESULT_CHUNK_CHARS);
+    }
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+    this.pruneSpool();
     writeFileSync(this.path(resultId), text, { encoding: "utf8", mode: 0o600 });
     return this.chunk(resultId, 0, DEFAULT_RESULT_CHUNK_CHARS);
   }
 
   read(resultId: string, offset = 0, chunkChars = DEFAULT_RESULT_CHUNK_CHARS): ResultTransportEnvelope {
+    pruneInlineResults();
     const id = validateResultId(resultId);
+    const cached = inlineResults.get(this.dir)?.get(id);
+    if (cached) return this.chunkText(id, cached.text, offset, normalizeChunkChars(chunkChars));
     const path = this.path(id);
-    const info = statSync(path);
+    let info;
+    try {
+      info = statSync(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new Error("result spool expired; rerun the original Memhub tool");
+      }
+      throw error;
+    }
     if (Date.now() - info.mtimeMs > RESULT_TTL_MS) throw new Error("result spool expired; rerun the original Memhub tool");
-    const text = readFileSync(path, "utf8");
+    let text: string;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new Error("result spool expired; rerun the original Memhub tool");
+      }
+      throw error;
+    }
     return this.chunkText(id, text, offset, normalizeChunkChars(chunkChars));
+  }
+
+  private pruneSpool(): void {
+    let entries: string[];
+    try {
+      entries = readdirSync(this.dir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    // At most 64 directory entries per write. Only transport UUID files.
+    let scanned = 0;
+    for (const name of entries) {
+      if (!/^[0-9a-f-]{36}\.json$/i.test(name)) continue;
+      scanned += 1;
+      if (scanned > 64) break;
+      const path = join(this.dir, name);
+      try {
+        const info = lstatSync(path);
+        if (info.isFile() && Date.now() - info.mtimeMs > RESULT_TTL_MS) unlinkSync(path);
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
   }
 
   private chunk(resultId: string, offset: number, chunkChars: number): ResultTransportEnvelope {

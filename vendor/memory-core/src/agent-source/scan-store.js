@@ -34,7 +34,7 @@ export async function openMemoryAgentSourceScanStore(path, job) {
             throw new Error(`scan record exceeds 64 MiB limit (${bytes} bytes)`); return Number(insert.run(job.jobId, message.sourceId, message.conversationId, message.messageId, message.role, message.content, message.createdAt, message.workspacePath, message.gitRoot, JSON.stringify(message.rawMeta), ordinal++).changes) > 0; },
         stageBatch(messages) { const tx = db.transaction(() => { let count = 0; for (const message of messages)
             if (store.stage(message))
-                count += 1; return count; }); return tx(); },
+                count += 1; return count; }); return tx.immediate(); },
         messages(sourceId, cursor, limit = 500) { limit = Math.min(500, Math.max(1, limit)); const params = [job.jobId, sourceId]; let where = "job_id=? AND source_id=?"; if (cursor) {
             where += " AND ((conversation_id > ?) OR (conversation_id = ? AND (created_at > ? OR (created_at = ? AND (message_id > ? OR (message_id = ? AND ordinal > ?))))))";
             params.push(cursor.conversationId, cursor.conversationId, cursor.createdAt, cursor.createdAt, cursor.messageId, cursor.messageId, cursor.ordinal);
@@ -67,7 +67,7 @@ export async function openMemoryAgentSourceScanStore(path, job) {
                 db.prepare(`UPDATE turn_meta SET selected=1 WHERE rowid IN (SELECT rowid FROM turn_meta WHERE source_id IN (${placeholders}) ORDER BY first_created_at DESC,source_id,conversation_id,first_message_id,turn_id LIMIT ?)`).run(...sourceIds, globalLimit);
                 db.prepare(`WITH ranked AS (SELECT source_id,turn_id,ROW_NUMBER() OVER (PARTITION BY source_id ORDER BY first_created_at DESC,conversation_id,first_message_id,turn_id) AS rank FROM turn_meta WHERE source_id IN (${placeholders})), absent AS (SELECT source_id FROM turn_meta WHERE source_id IN (${placeholders}) GROUP BY source_id HAVING MAX(selected)=0) UPDATE turn_meta SET selected=1 WHERE rowid IN (SELECT t.rowid FROM turn_meta t JOIN ranked r ON r.source_id=t.source_id AND r.turn_id=t.turn_id JOIN absent a ON a.source_id=t.source_id WHERE r.rank <= ?)`).run(...sourceIds, ...sourceIds, absentSourceLimit);
             });
-            transaction();
+            transaction.immediate();
         },
         saveResult(r) { db.prepare("INSERT INTO scan_results(source_id,conversation_id,memory_id,error) SELECT ?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM scan_results WHERE source_id=? AND conversation_id=? AND memory_id IS ? AND error IS ?)").run(r.sourceId, r.conversationId, r.memoryId ?? null, r.error ?? null, r.sourceId, r.conversationId, r.memoryId ?? null, r.error ?? null); }, resultCount(s) { const row = db.prepare(`SELECT COUNT(*) AS count FROM scan_results${s ? " WHERE source_id=?" : ""}`).get(...(s ? [s] : [])); return Number(row.count); },
         results(sourceId, cursor, limit = 100) { const safeLimit = Math.min(500, Math.max(1, Math.floor(limit))); const numericCursor = Number(cursor); const safeCursor = Number.isFinite(numericCursor) && numericCursor >= 0 ? Math.floor(numericCursor) : 0; const rows = db.prepare("SELECT id,source_id AS sourceId,conversation_id AS conversationId,memory_id AS memoryId,error FROM scan_results WHERE source_id LIKE ? AND id>? ORDER BY id LIMIT ?").iterate(sourceId ?? "%", safeCursor, safeLimit); return (function* () { for (const row of rows) {

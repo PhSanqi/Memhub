@@ -12,7 +12,7 @@ export class SqliteVecStore {
             for (const vector of vectors) {
                 this.upsert(memoryId, vector, updatedAt);
             }
-        })();
+        }).immediate();
     }
     upsert(memoryId, value, updatedAt) {
         assertVector(value.vector);
@@ -175,7 +175,7 @@ export class SqliteVecStore {
                     embeddingProvider: row.embedding_provider
                 }, row.updated_at);
             }
-        })();
+        }).immediate();
     }
     ensureVectorTable(dimension) {
         const table = vectorTableName(dimension);

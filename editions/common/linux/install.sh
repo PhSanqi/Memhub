@@ -3,15 +3,19 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-STATE_ROOT="${MEMHUB_HOME:-$HOME/.memhub}"
+BUNDLED_NODE="$REPO_ROOT/runtime/node"
+NODE="${NODE:-$([[ -x "$BUNDLED_NODE" ]] && printf '%s' "$BUNDLED_NODE" || command -v node || true)}"
+NPM="${NPM:-$(command -v npm || true)}"
+# Shared resolver: install home = explicit --home > MEMHUB_HOME > existing
+# ~/.memmy/memhub > legacy ~/.memhub > default. MEMHUB_STATE_ROOT names the
+# gateway control root (written below as <home>/server) and never affects it.
+[[ -n "$NODE" ]] || { echo "Node.js 20+ is required" >&2; exit 2; }
+STATE_ROOT="$("$NODE" "$REPO_ROOT/src/state-root.mjs" --home)"
 CONTROL_ROOT="$STATE_ROOT/server"
 MEMORY_DIR="$STATE_ROOT/memory"
 CONFIG_PATH="$STATE_ROOT/memory-config.yaml"
 ENV_PATH="$STATE_ROOT/memhub.env"
 UNIT_DIR="$HOME/.config/systemd/user"
-BUNDLED_NODE="$REPO_ROOT/runtime/node"
-NODE="${NODE:-$([[ -x "$BUNDLED_NODE" ]] && printf '%s' "$BUNDLED_NODE" || command -v node || true)}"
-NPM="${NPM:-$(command -v npm || true)}"
 USERNAME="${MEMHUB_USERNAME:-owner}"
 EMAIL="${MEMHUB_EMAIL:-}"
 PUBLIC_HOST="${MEMHUB_PUBLIC_HOST:-}"
@@ -99,67 +103,13 @@ EOF_ENV
 if [[ -n "$PUBLIC_HOST" ]]; then printf 'MEMHUB_PUBLIC_HOST=%s\n' "$PUBLIC_HOST" >> "$ENV_PATH"; fi
 chmod 600 "$ENV_PATH"
 
-cat > "$UNIT_DIR/memhub-core.service" <<EOF_UNIT
-[Unit]
-Description=Memhub Memory Core
-After=network.target
-PartOf=memhub-stack.target
-StartLimitIntervalSec=120
-StartLimitBurst=6
-
-[Service]
-Type=simple
-WorkingDirectory=$REPO_ROOT
-ExecStart=$NODE $REPO_ROOT/vendor/memory-core/src/server/index.js --config $CONFIG_PATH --host 127.0.0.1 --port 18960 --db $MEMORY_DIR/memory.sqlite
-ExecStartPost=$NODE $REPO_ROOT/scripts/wait-for-service.mjs --url http://127.0.0.1:18960/health --kind core --timeout-ms 20000
-Restart=on-failure
-RestartSec=3s
-TimeoutStartSec=35s
-TimeoutStopSec=15s
-KillMode=control-group
-UMask=0077
-
-[Install]
-WantedBy=default.target
-EOF_UNIT
-
-cat > "$UNIT_DIR/memhub.service" <<EOF_UNIT
-[Unit]
-Description=Memhub MCP Runtime
-After=memhub-core.service network-online.target
-Requires=memhub-core.service
-Wants=network-online.target
-PartOf=memhub-core.service memhub-stack.target
-StartLimitIntervalSec=120
-StartLimitBurst=6
-
-[Service]
-Type=simple
-WorkingDirectory=$REPO_ROOT
-EnvironmentFile=$ENV_PATH
-ExecStartPre=$NODE $REPO_ROOT/scripts/wait-for-service.mjs --url http://127.0.0.1:18960/health --kind core --timeout-ms 20000
-ExecStart=$NODE $REPO_ROOT/dist/mcp.js --http 3001 --http-path /mcp --state-root $CONTROL_ROOT --memory-url http://127.0.0.1:18960
-ExecStartPost=$NODE $REPO_ROOT/scripts/wait-for-service.mjs --url http://127.0.0.1:3001/memhub/health --kind gateway --timeout-ms 20000
-Restart=on-failure
-RestartSec=3s
-TimeoutStartSec=50s
-TimeoutStopSec=15s
-KillMode=control-group
-UMask=0077
-
-[Install]
-WantedBy=default.target
-EOF_UNIT
-
-cat > "$UNIT_DIR/memhub-stack.target" <<EOF_UNIT
-[Unit]
-Description=Memhub Stack (Memory Core + MCP Runtime)
-Requires=memhub-core.service memhub.service
-After=memhub-core.service memhub.service
-
-[Install]
-WantedBy=default.target
-EOF_UNIT
+# One generator for both installer entrypoints: no inline unit heredocs here.
+NODE="$NODE" bash "$REPO_ROOT/deploy/install-user-service.sh" \
+  --render-only "$UNIT_DIR" \
+  --home "$STATE_ROOT" \
+  --core-config "$CONFIG_PATH" \
+  --core-db "$MEMORY_DIR/memory.sqlite" \
+  --http-path /mcp
 
 systemctl --user daemon-reload
 systemctl --user disable memhub-core.service memhub.service >/dev/null 2>&1 || true

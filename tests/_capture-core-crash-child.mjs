@@ -1,3 +1,4 @@
+import { assertTestPaths, isolateTestEnvironment } from "./test-isolation.mjs";
 // Isolated real-Core crash fixture. Exit after Core commit but before the marker.
 import { createMemhubRuntime } from "../dist/runtime.js";
 import { recoverCaptureIngest } from "../dist/capture-recovery.js";
@@ -8,6 +9,8 @@ const [stateRoot, accountId, eventId, coreEndpoint, token, projectRegistryPath, 
 if (![stateRoot, accountId, eventId, coreEndpoint, token, projectRegistryPath].every(Boolean)) {
   throw new Error("isolated Core crash fixture requires six positional arguments");
 }
+assertTestPaths({ stateRoot, registry: projectRegistryPath });
+isolateTestEnvironment(stateRoot, stateRoot);
 const runtime = createMemhubRuntime({
   accountId, ownerAccountId: accountId, ownerUserId: "local-user",
   memoryEndpoint: coreEndpoint, memoryToken: token, projectRegistryPath, controlRoot: stateRoot

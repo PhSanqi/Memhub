@@ -2,11 +2,11 @@
 
 import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { resolveControlRoot } from "../dist/state-root.mjs";
 
 const args = parseArgs(process.argv.slice(2));
-const stateRoot = resolve(args["state-root"] ?? join(homedir(), ".memmy", "memhub"));
+const stateRoot = resolve(resolveControlRoot({ explicit: args["state-root"] }));
 const apply = Boolean(args.apply);
 const keepMigrations = integerArg(args["keep-migrations"], 3);
 const keepRepairs = integerArg(args["keep-repairs"], 1);

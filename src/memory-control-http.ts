@@ -5,6 +5,7 @@ import {
   type MemoryControlKind
 } from "./memory-control-plane.js";
 import type { MemhubRuntime } from "./runtime.js";
+import { countUnassignedCaptures, listUnassignedCaptures } from "./capture-project-assignments.js";
 
 type Account = Awaited<ReturnType<typeof listAccounts>>[number];
 
@@ -18,9 +19,22 @@ export async function handleMemoryControlRead(input: {
   accounts: Account[];
   selectedAccount: Account;
   adminView: boolean;
+  callerAccountId?: string;
 }): Promise<void> {
+  input.response.setHeader("x-content-type-options", "nosniff");
+  input.response.setHeader("cache-control", "no-store");
   const { response, url, stateRoot, runtime, accounts, selectedAccount, adminView } = input;
   const kindRaw = url.searchParams.get("kind") ?? "overview";
+  if (kindRaw === "unassigned") {
+    if (!adminView || !input.callerAccountId || input.callerAccountId !== runtime.accountId || selectedAccount.account_id !== runtime.accountId) {
+      response.writeHead(403).end(); return;
+    }
+    const payload = await listUnassignedCaptures({ stateRoot, accountId: runtime.accountId, projects: runtime.projects,
+      offset: Number(url.searchParams.get("offset") ?? 0), limit: Number(url.searchParams.get("limit") ?? 20) });
+    response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ...payload,
+      projects: await runtime.projects.list(runtime.accountId) }));
+    return;
+  }
   if (kindRaw === "accounts") {
     if (!adminView) { response.writeHead(403).end(); return; }
     response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" })
@@ -60,11 +74,14 @@ export async function handleMemoryControlRead(input: {
     kind: kindRaw as MemoryControlKind,
     projects,
     includeOverviewItems: !adminView,
+    includeIncomplete: url.searchParams.get("include_incomplete") === "1",
     ...(projectId ? { projectId } : {})
   });
   response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" })
     .end(JSON.stringify({
       ...objectRecord(payload),
+      ...(kindRaw === "overview" && adminView && input.callerAccountId === runtime.accountId
+        ? { unresolved_count: await countUnassignedCaptures(stateRoot, runtime.accountId) } : {}),
       ...(kindRaw === "overview" && adminView ? { account_count: accounts.length } : {}),
       account: {
         account_id: selectedAccount.account_id,

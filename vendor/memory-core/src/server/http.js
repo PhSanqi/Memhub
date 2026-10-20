@@ -1,13 +1,18 @@
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
+import { canonicalJson, sha256Hex } from "../contracts/index.js";
+import { memoryAddKey } from "../service/import/memory-import-pipeline.js";
+import { sanitizeMemoryAddRequest } from "../service/turn/turn-normalization.js";
 import { createAgentSourceExecutor } from "../agent-source/runtime.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { isMemoryViewerPath, memoryViewerAsset } from "../viewer/static.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { MemoryService } from "../service/memory-service.js";
+import { NDJSON_CONTENT_TYPE } from "../service/bundle-ndjson.js";
 import { MemoryServiceError, statusForCode } from "../utils/error.js";
 import { resolveTimeZone } from "../utils/time.js";
 import { createPluginRuntimeAnalytics, hitCountFromGetResponse, hitCountFromSearchResponse, storedCountFromAddResponse, trackExternalHookCapture, trackExternalHookRecall, trackExternalToolCall, } from "./plugin-runtime-analytics.js";
+import { assertLoopbackBindHost } from "./bind-host.js";
 import { VIEWER_API_ROUTES, assertLocalViewerRequest, isViewerApiRequest, routeViewerRequest, streamViewerEvents } from "./viewer-api.js";
 const logger = createMemoryLogger("http");
 const workerLogger = createMemoryLogger("worker");
@@ -25,6 +30,7 @@ export const API_ROUTES = [
     "POST /api/v1/memory/search",
     "GET /api/v1/memory/recalls/:queryId",
     "POST /api/v1/memory/add",
+    "POST /api/v1/memory/add/reconcile",
     "POST /api/v1/memory/processing/status",
     "POST /api/v1/memory/:id/processing/retry",
     "GET /api/v1/memory/:id",
@@ -72,6 +78,13 @@ export function createMemoryHttpServer(options) {
             if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/api/v1/health")) {
                 response.once("finish", () => autoWorker.afterHealthCheck());
             }
+            // NDJSON export is negotiated on the existing export routes. It is
+            // authenticated as an administrative read (viewer headers and
+            // loopback are never sufficient) and streamed past writeJson().
+            if (request.method === "GET" && isNdjsonExportPath(url.pathname) && acceptsNdjson(request)) {
+                await handleNdjsonExport({ request, response, service: options.service, options, requestId, startedAt });
+                return;
+            }
             if (request.method === "GET" && isMemoryViewerPath(url.pathname)) {
                 assertLocalViewerRequest(request, url);
                 const asset = memoryViewerAsset(url.pathname);
@@ -94,8 +107,14 @@ export function createMemoryHttpServer(options) {
                 }, request, response, url);
                 return;
             }
-            const principal = {
-                ...(viewerRequest ? viewerPrincipal() : authenticate(request, url, options)),
+            if (viewerRequest && request.method !== "GET" &&
+                (options.auth?.localServiceToken ?? options.apiKey) &&
+                !/^Bearer\s+\S+$/i.test(headerString(request, "authorization") ?? "")) {
+                throw new MemoryServiceError("unauthorized", "Viewer writes require a valid bearer token", 401);
+            }
+            let principal = {
+                ...(viewerRequest && request.method === "GET"
+                    ? viewerPrincipal() : authenticate(request, url, options)),
                 timeZone: requestTimeZone(request, options.timeZone)
             };
             const body = await readJson(request);
@@ -125,6 +144,9 @@ export function createMemoryHttpServer(options) {
                     return;
                 }
             }
+            // A viewer principal never falls through into the general API.
+            if (viewerRequest)
+                principal = { ...authenticate(request, url, options), timeZone: principal.timeZone };
             const result = await routeRequest(options.service, autoWorker, request.method, url, body, principal, Boolean(options.onShutdownRequested), pluginRuntimeAnalytics, requestId);
             if (request.method === "POST" && url.pathname === "/api/v1/admin/shutdown") {
                 response.once("finish", () => options.onShutdownRequested?.());
@@ -191,8 +213,11 @@ export async function closeMemoryHttpServer(server) {
     ]);
 }
 export async function listenMemoryHttpServer(options) {
-    const server = createMemoryHttpServer(options);
     const host = options.host ?? "127.0.0.1";
+    // The library entry point must enforce the same loopback-only policy as the
+    // CLI; reject before creating a server so a bad host leaves nothing behind.
+    assertLoopbackBindHost(host);
+    const server = createMemoryHttpServer(options);
     const port = options.port ?? 18960;
     await new Promise((resolve, reject) => {
         server.once("error", reject);
@@ -499,6 +524,8 @@ async function routeRequest(service, autoWorker, method, url, body, principal, c
                 ? Math.max(0, Math.trunc(request.contextBudget))
                 : undefined,
             includeInjectedContext: typeof request.includeInjectedContext === "boolean" ? request.includeInjectedContext : undefined,
+            accountWide: request.accountWide === true,
+            projectIds: Array.isArray(request.projectIds) ? request.projectIds.filter((p) => typeof p === "string") : undefined,
             verbose: request.verbose === true
         };
         return publicSearchResponse(await trackExternalToolCall(pluginRuntimeAnalytics, { ...request, toolName: "memmy_memory_search" }, () => service.idempotent("memory.search", publicRequest, { path, request: publicRequest }, () => service.search(publicRequest)), (result) => ({ hit_count: hitCountFromSearchResponse(result) })));
@@ -510,7 +537,7 @@ async function routeRequest(service, autoWorker, method, url, body, principal, c
         const request = envelopeWithPrincipal({}, principal);
         return service.recallEvidence(queryId, request);
     }
-    if (method === "POST" && path === "/api/v1/memory/add") {
+    if (method === "POST" && (path === "/api/v1/memory/add" || path === "/api/v1/memory/add/reconcile")) {
         requireMemoryWrite(principal);
         const request = requestWithPrincipal(body, "memory.add", principal);
         requireStringField(request, "content", "memory.add");
@@ -535,7 +562,8 @@ async function routeRequest(service, autoWorker, method, url, body, principal, c
             sourceContentHash: typeof request.sourceContentHash === "string" ? request.sourceContentHash : undefined,
             sourceArtifactId: typeof request.sourceArtifactId === "string" ? request.sourceArtifactId : undefined
         };
-        const result = await trackExternalToolCall(pluginRuntimeAnalytics, { ...request, toolName: "memmy_memory_add" }, () => service.idempotent("memory.add", publicRequest, { path, request: publicRequest }, () => service.addMemory(publicRequest)), (addResult) => ({
+        if (path.endsWith("/reconcile")) return reconcileMemoryAdd(service, publicRequest);
+        const result = await trackExternalToolCall(pluginRuntimeAnalytics, { ...request, toolName: "memmy_memory_add" }, () => commitMemoryAdd(service, publicRequest), (addResult) => ({
             stored_count: storedCountFromAddResponse(addResult),
             ...(publicRequest.layer ? { layer: publicRequest.layer } : {}),
         }));
@@ -661,6 +689,49 @@ async function routeRequest(service, autoWorker, method, url, body, principal, c
         return publicDeleteMemoryResponse(await service.idempotent("memory.delete", request, { id, request }, () => service.deleteMemory(id, request)));
     }
     throw new MemoryServiceError("not_found", `${method} ${path} is not registered`);
+}
+// addMemory is synchronous: the outer transaction includes its nested writes,
+// change log, queued work and replay result. Never await inside this transaction.
+function commitMemoryAdd(service, request) {
+    if (!request.requestId) return service.addMemory(request);
+    const key = `memory.add:${canonicalJson([request.namespace?.tenantId ?? "", request.namespace?.userId ?? "", request.adapterId ?? "", request.requestId])}`;
+    const requestHash = sha256Hex(canonicalJson(JSON.parse(JSON.stringify(request))));
+    return service.repos.transaction(() => {
+        const prior = service.repos.runtime.getIdempotency(key);
+        if (prior) {
+            if (prior.requestHash !== requestHash) {
+                throw new MemoryServiceError("conflict", "requestId reused with different request body");
+            }
+            return prior.response;
+        }
+        const added = service.addMemory(request);
+        if (added && typeof added.then === "function") throw new Error("memory.add must be synchronous for transactional replay");
+        const stored = service.repos.memories.getIncludingDeleted(added.id);
+        const result = { ...added, body: stored.memoryValue };
+        service.repos.runtime.saveIdempotency(key, requestHash, result);
+        return result;
+    });
+}
+function reconcileMemoryAdd(service, request) {
+    const key = `memory.add:${canonicalJson([request.namespace?.tenantId ?? "", request.namespace?.userId ?? "", request.adapterId ?? "", request.requestId])}`;
+    const requestHash = sha256Hex(canonicalJson(JSON.parse(JSON.stringify(request))));
+    return service.repos.transaction(() => {
+        const prior = service.repos.runtime.getIdempotency(key);
+        if (prior) {
+            if (prior.requestHash !== requestHash) throw new MemoryServiceError("conflict", "requestId reused with different request body");
+            return { outcome: "committed", result: prior.response };
+        }
+        const marker = request.tags?.find(tag => /^commit-operation:[0-9a-f-]{36}$/.test(tag));
+        if (!marker || !request.sourceArtifactId || !request.layer) return { outcome: "unknown" };
+        const memory = service.repos.memories.getByKeyIncludingDeleted(request.layer,
+            memoryAddKey(request, request.layer, request.title));
+        if (!memory?.tags.includes(marker) || memory.status === "deleted" || memory.status === "archived" ||
+            memory.memoryValue !== sanitizeMemoryAddRequest(request).content) return { outcome: "unknown" };
+        const item = service.repos.memories.toListItem(memory);
+        return { outcome: "committed", result: { id: memory.id, kind: item.kind, memoryLayer: memory.memoryLayer,
+            status: memory.status, title: item.title, summary: item.summary, tags: item.tags,
+            body: memory.memoryValue, createdAt: memory.createdAt, serverTime: memory.updatedAt } };
+    });
 }
 function publicOpenSessionResponse(result) {
     const record = responseRecord(result);
@@ -872,6 +943,123 @@ function writeError(response, error, requestId) {
         }
     });
 }
+function isNdjsonExportPath(path) {
+    return path === "/api/v1/export" || path === "/api/v1/admin/export";
+}
+function acceptsNdjson(request) {
+    const accept = request.headers.accept;
+    const value = Array.isArray(accept) ? accept.join(",") : accept;
+    if (!value) {
+        return false;
+    }
+    return value
+        .split(",")
+        .some((part) => part.trim().split(";")[0].trim().toLowerCase() === "application/x-ndjson");
+}
+class NdjsonClientClosedError extends Error {
+    constructor() {
+        super("ndjson export client closed the connection");
+        this.name = "NdjsonClientClosedError";
+        this.code = "client_closed";
+    }
+}
+function writeNdjsonHead(response) {
+    response.writeHead(200, {
+        "content-type": NDJSON_CONTENT_TYPE,
+        "cache-control": "no-store",
+        "content-disposition": `attachment; filename="memmy-memory-${new Date().toISOString().slice(0, 10)}.ndjson"`,
+        "x-content-type-options": "nosniff"
+    });
+}
+function writeNdjsonChunk(response, chunk) {
+    return new Promise((resolve, reject) => {
+        if (response.destroyed || response.writableEnded) {
+            reject(new NdjsonClientClosedError());
+            return;
+        }
+        let settled = false;
+        const cleanup = () => {
+            response.off("close", onClose);
+            response.off("error", onError);
+            response.off("drain", onDrain);
+        };
+        const finish = (settle, value) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            cleanup();
+            settle(value);
+        };
+        const onClose = () => finish(reject, new NdjsonClientClosedError());
+        const onError = (error) => finish(reject, error);
+        const onDrain = () => finish(resolve);
+        response.once("close", onClose);
+        response.once("error", onError);
+        let flushed;
+        try {
+            flushed = response.write(chunk);
+        }
+        catch (error) {
+            finish(reject, error);
+            return;
+        }
+        if (flushed) {
+            finish(resolve);
+        }
+        else if (!settled) {
+            response.once("drain", onDrain);
+        }
+    });
+}
+async function handleNdjsonExport(context) {
+    const { request, response, service, options, requestId, startedAt } = context;
+    const url = new URL(request.url, "http://127.0.0.1");
+    // Viewer headers or loopback alone do not authorize a whole-instance export.
+    const principal = authenticate(request, url, options);
+    requireAdminRead(principal);
+    const includeRawText = url.searchParams.get("includeRawText") === "true";
+    const includeAudit = url.searchParams.get("includeAudit") !== "false";
+    if (includeRawText) {
+        requireAdminWrite(principal);
+    }
+    try {
+        const summary = await service.streamBundleExport({
+            namespace: principal.namespace,
+            timeZone: principal.timeZone,
+            includeRawText,
+            includeAudit
+        }, (chunk) => writeNdjsonChunk(response, chunk), {
+            beforeWrite: () => writeNdjsonHead(response)
+        });
+        if (!response.writableEnded && !response.destroyed) {
+            response.end();
+        }
+        logger.info("export.ndjson.succeeded", {
+            requestId,
+            exportId: summary.exportId,
+            tables: summary.tables.map((table) => table.table),
+            rows: summary.rows,
+            bytes: summary.bytes,
+            durationMs: Date.now() - startedAt
+        });
+    }
+    catch (error) {
+        const aborted = error instanceof NdjsonClientClosedError || response.destroyed;
+        logger.warn(aborted ? "export.ndjson.aborted" : "export.ndjson.failed", {
+            requestId,
+            errorCode: typeof error?.code === "string" ? error.code : "export_failed",
+            durationMs: Date.now() - startedAt
+        });
+        // Errors raised before the first byte keep the normal JSON error path.
+        if (!response.headersSent && !response.destroyed) {
+            throw error;
+        }
+        if (!response.destroyed) {
+            response.destroy();
+        }
+    }
+}
 function requestIdFromHeaders(request) {
     return headerString(request, "x-request-id") ?? headerString(request, "x-correlation-id");
 }
@@ -978,6 +1166,9 @@ function requireMemoryWrite(principal) {
 }
 function requirePanelRead(principal) {
     requireAnyScope(principal, ["panel:read", "panel:write", "memory:read", "memory:write", "admin:read", "admin:write"]);
+}
+function requireAdminRead(principal) {
+    requireAnyScope(principal, ["admin:read", "admin:write"]);
 }
 function requireAdminWrite(principal) {
     requireAnyScope(principal, ["admin:write"]);

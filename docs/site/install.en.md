@@ -18,7 +18,7 @@ cd Memhub
 bash editions/local/linux/install.sh
 ```
 
-The installer creates systemd user units for Memory Core and the local MCP runtime. Verify:
+The install home is `MEMHUB_HOME=$HOME/.memmy/memhub` (explicit `--home` > `MEMHUB_HOME` > existing `~/.memmy/memhub` > legacy `$HOME/.memhub` containing `memhub.env` or `accounts.json`, used in place with one warning; data is never moved or copied). The gateway control root is separate: explicit `--state-root` > `MEMHUB_STATE_ROOT` > `<home>/server` when it holds `accounts.json` > `<home>`. Edition installs set `MEMHUB_HOME=<home>` and `MEMHUB_STATE_ROOT=<home>/server` together; the two values are not aliases and may legitimately differ. The installer creates systemd user units for Memory Core and the local MCP runtime; both entrypoints render them through `deploy/install-user-service.sh`, which sets `MEMHUB_HOME` explicitly. Verify:
 
 ```bash
 systemctl --user status memhub-core.service

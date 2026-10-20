@@ -1,14 +1,15 @@
+import { createTestRoot, isolateTestEnvironment } from "./test-isolation.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { cp, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { waitForService } from "../dist/service-readiness.js";
 
 const repo = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const root = await mkdtemp(join(tmpdir(), "memhub-real-stack-"));
+const root = await createTestRoot("memhub-real-stack-");
+isolateTestEnvironment(join(root, "server"), root);
 const serverState = join(root, "server");
 const memoryDir = join(root, "memory");
 const entry = join(repo, "scripts", "run-stack.mjs");

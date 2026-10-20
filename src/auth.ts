@@ -58,6 +58,10 @@ export async function setAccountRole(
       username === accountRef || record.account_id === accountRef || record.cloudflare?.email === accountRef.toLowerCase()
     );
     if (!entry) throw new Error(`账号不存在：${accountRef}`);
+    if (entry[1].role === "admin" && role === "user" &&
+        Object.values(data.accounts).filter((record) => record.role === "admin").length <= 1) {
+      throw new Error("cannot_demote_last_admin");
+    }
     entry[1].role = role;
     await save(stateRoot, data);
   });

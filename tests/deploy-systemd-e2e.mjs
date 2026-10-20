@@ -45,10 +45,16 @@ try {
   const core = await readFile(join(unitDir, "memhub-core.service"), "utf8");
   const target = await readFile(join(unitDir, "memhub-stack.target"), "utf8");
   const calls = await readFile(systemctlLog, "utf8");
+  const stateRoot = join(home, ".memmy", "memhub");
+  const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
   assert.match(gateway, /--http-path \/custom-memhub\/mcp/);
   assert.doesNotMatch(gateway, /capture-path|bridge/);
-  assert.match(gateway, /--state-root %h\/\.memmy\/memhub/);
+  // Fresh render with no state yet uses the canonical flat control root.
+  assert.match(gateway, new RegExp(`--state-root ${escapeRegex(stateRoot)}(?=\\s)`));
+  assert.doesNotMatch(gateway, new RegExp(`--state-root ${escapeRegex(stateRoot)}/server`));
+  assert.match(gateway, new RegExp(`Environment="MEMHUB_HOME=${escapeRegex(stateRoot)}"`));
+  assert.match(core, new RegExp(`Environment="MEMHUB_HOME=${escapeRegex(stateRoot)}"`));
   assert.match(gateway, /wait-for-service\.mjs --url http:\/\/127\.0\.0\.1:3001\/custom-memhub\/health --kind gateway/);
   assert.match(gateway, /Requires=memhub-core\.service/);
   assert.match(target, /Requires=memhub-core\.service memhub\.service/);
